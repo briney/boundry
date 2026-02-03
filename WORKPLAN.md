@@ -1,458 +1,306 @@
-# Boundry CLI and API Refactor: Implementation Plan
+# `analyze-interface`: Rosetta-like per-position energetics
 
-## Overview
-Refactor Boundry from a single-command CLI with mode flags to a subcommand-based CLI with standalone operations. Simultaneously refactor the Python API to expose core operations as top-level functions while maintaining a workflow system for complex multi-step pipelines.
-
-## Goals
-1. **CLI**: Convert from `boundry --mode` to `boundry <subcommand>` using Typer
-2. **API**: Expose core operations as standalone functions (idealize, minimize, repack, relax, mpnn, design, analyze_interface)
-3. **Workflows**: Add `boundry run` command that executes linear YAML workflows
-4. **Simplicity**: Keep it simple - no conditionals, loops, or complex control flow
-5. **Clean Break**: No backwards compatibility - fresh start
-
-## New CLI Structure
-```
-boundry
-├── idealize              # Fix backbone geometry
-├── minimize              # Energy minimization only (renamed from --no-repack)
-├── repack                # Repack sidechains only (renamed from --repack-only)
-├── relax                 # repack + minimize (default mode)
-├── mpnn                  # Sequence design only (renamed from --design-only)
-├── design                # mpnn + minimize
-├── analyze-interface     # Interface scoring/analysis
-└── run                   # Execute YAML workflow
-```
-
-All major subcommands support `--pre-idealize` flag as a convenient shortcut.
-
-## New Python API Structure
-```python
-# Direct function access (top-level imports)
-from boundry import (
-    idealize,      # Standalone: fix backbone geometry
-    minimize,      # Standalone: energy minimization
-    repack,        # Standalone: repack sidechains
-    relax,         # repack + minimize
-    mpnn,          # Standalone: sequence design
-    design,        # mpnn + minimize
-    analyze_interface  # Standalone: interface analysis
-)
-
-# Workflow system
-from boundry import Workflow
-workflow = Workflow.from_yaml('workflow.yaml')
-result = workflow.run()
-```
-
-## Implementation Phases
-
-### Phase 1: Create Core Operations Module [DONE]
-
-**File**: `src/boundry/operations.py` (NEW)
-
-**Purpose**: Extract discrete operations from Pipeline/Designer/Relaxer into standalone functions
-
-**Functions to implement**:
-
-1. [x] **`idealize(structure, config: IdealizeConfig) -> Structure`**
-   - Wrapper around existing `idealize_structure()` from idealize.py
-   - Handle input as path or PDB string
-   - Return processed structure
-
-2. [x] **`minimize(structure, config: RelaxConfig, pre_idealize: bool = False) -> Structure`**
-   - Call relaxer.relax() with appropriate config
-   - Optionally run idealize() first if pre_idealize=True
-   - Return minimized structure with energy info
-
-3. [x] **`repack(structure, config: DesignConfig, resfile: Optional[str] = None, pre_idealize: bool = False) -> Structure`**
-   - Call designer.repack() with resfile parsing
-   - Optionally run idealize() first
-   - Return repacked structure with loss info
-
-4. [x] **`relax(structure, config: PipelineConfig, resfile: Optional[str] = None, pre_idealize: bool = False, n_iterations: int = 5) -> Structure`**
-   - Loop: repack() → minimize() for n_iterations
-   - Track energy/sequence convergence
-   - Return relaxed structure
-
-5. [x] **`mpnn(structure, config: DesignConfig, resfile: Optional[str] = None, pre_idealize: bool = False) -> Structure`**
-   - Call designer.design() with resfile parsing
-   - Optionally run idealize() first
-   - Return designed structure with sequence/loss info
-
-6. [x] **`design(structure, config: PipelineConfig, resfile: Optional[str] = None, pre_idealize: bool = False, n_iterations: int = 5) -> Structure`**
-   - Loop: mpnn() → minimize() for n_iterations
-   - Track energy/sequence changes
-   - Return designed+minimized structure
-
-7. [x] **`analyze_interface(structure, config: InterfaceConfig, relaxer: Optional[Relaxer] = None, designer: Optional[Designer] = None) -> InterfaceAnalysisResult`**
-   - Call identify_interface_residues()
-   - Optionally calculate_binding_energy() if relaxer provided
-   - Optionally calculate_surface_area(), calculate_shape_complementarity()
-   - Return comprehensive interface analysis
-
-**Key Design Decisions**:
-- [x] **Input flexibility**: Accept both file paths (str) and structure objects
-- [x] **Return type**: Define a `Structure` wrapper class that holds:
-  - PDB string
-  - Metadata (energy, sequence, loss, etc.)
-  - Original path
-- [x] **Config handling**: Each operation takes its specific config dataclass
-- [x] **Error handling**: Informative errors for missing dependencies (e.g., PyTorch, OpenMM)
-
-**Implementation notes**:
-- These functions are thin wrappers around existing Designer/Relaxer/idealize logic
-- The main work is extracting the orchestration logic from Pipeline._run_iteration()
-- Each function should be independently testable
+## Summary of decisions (confirmed)
+- Implement **both**:
+  - **IAM-like per-residue energetics**: per-position `dG` derived from **bound vs separated** states.
+  - **AlaScan-style per-residue ΔΔG**: alanine mutation effect per position.
+- `boundry analyze-interface` should follow **Rosetta conventions**:
+  - `dG = E_bound - E_unbound` (favorable binding → **negative**).
+  - `ΔΔG = dG_mut(Ala) - dG_wt` (hotspot → **positive**).
+- Default scan set: **all detected interface residues**, with an option to restrict by explicit chains.
+- Default per-position energy protocol: **repack bound + unbound**.
+- Output: **CSV** (primary deliverable).
 
 ---
 
-### Phase 2: Refactor Configuration System [DONE]
+## Rosetta protocol notes (ground truth)
 
-**File**: `src/boundry/config.py` (MODIFY)
+### InterfaceAnalyzerMover (IAM) is *not* alanine scanning
+From Rosetta source (`protocols/analysis/InterfaceAnalyzerMover.cc`):
+- Creates a **separated pose** by rigid-body translating one side far away (~1000 Å).
+- Optional packing:
+  - `pack_input` = repack **bound** complex
+  - `pack_separated` = repack **separated** pose
+- Computes:
+  - total `dG = E_bound - E_unbound` (negative favorable)
+  - per-residue `dG_i` using the same sign, comparing per-residue energies in bound vs separated.
 
-**Changes needed**:
-
-1. [x] **Remove `PipelineMode` enum** (lines 9-16)
-   - No longer needed with subcommand architecture
-
-2. [x] **Keep existing config dataclasses**:
-   - `DesignConfig` (lines 22-32) - Used by mpnn, repack, design
-   - `RelaxConfig` (lines 35-48) - Used by minimize, relax, design
-   - `IdealizeConfig` (lines 51-59) - Used by idealize and --pre-idealize
-   - `InterfaceConfig` (lines 62-77) - Used by analyze_interface
-
-3. [x] **Modify `PipelineConfig`** (lines 80-93):
-   - Remove `mode` field (no longer needed)
-   - Keep `n_iterations`, `n_outputs`, `scorefile`, `verbose`, `remove_waters`
-   - This becomes the config for `relax()` and `design()` operations
-   - Used by workflow system
-
-4. [x] **Add new config class `WorkflowConfig`** (NEW):
-   ```python
-   @dataclass
-   class WorkflowConfig:
-       input: str  # Input PDB/CIF path
-       output: Optional[str] = None  # Final output path
-       steps: List[WorkflowStep] = field(default_factory=list)
-   ```
-
-5. [x] **Add `WorkflowStep` dataclass** (NEW):
-   ```python
-   @dataclass
-   class WorkflowStep:
-       operation: str  # 'idealize', 'minimize', 'repack', etc.
-       params: Dict[str, Any]  # Operation-specific parameters
-       output: Optional[str] = None  # Intermediate output path (optional)
-   ```
+### AlaScan is a separate protocol (uses DdgFilter)
+From Rosetta source (`protocols/simple_ddg/AlaScan.cc`, `protocols/simple_ddg/DdgFilter.cc`):
+- Identify interface residues by distance cutoff.
+- Compute WT `dG`/`ddG` with repacking enabled by default in `AlaScan` (Rosetta “ddG mode”).
+- For each interface residue:
+  - mutate to alanine
+  - compute mutant `dG`
+  - report `ΔΔG = dG_mut - dG_wt` (positive usually destabilizing/hotspot).
 
 ---
 
-### Phase 3: Build New CLI with Typer [DONE]
+## Boundry reality check (current implementation vs Rosetta)
 
-**File**: `src/boundry/cli.py` (COMPLETE REWRITE)
+### Current Boundry ddG sign
+`boundry.binding_energy.calculate_binding_energy()` currently computes:
+- `binding_energy = E_unbound - E_bound` (positive favorable), and tests expect that.
 
-**Structure**: See detailed CLI implementation in full plan file
+### Plan for Rosetta-aligned `analyze-interface`
+To avoid breaking other commands/tests, we will:
+- Keep the internal `BindingEnergyResult.binding_energy` as-is for now.
+- In `boundry analyze-interface`, report Rosetta-aligned values by converting sign:
+  - `dG_rosetta = -binding_energy` (i.e., `E_bound - E_unbound`)
+- All new per-position outputs and AlaScan deltas will use `dG_rosetta`.
 
-**Key CLI decisions**:
-- [x] Use `typer.Argument()` for required positional args (input, output)
-- [x] Use `typer.Option()` for optional flags
-- [x] Each command builds the appropriate config dataclass
-- [x] Verbose output is consistent across commands
-- [x] Help text is descriptive and domain-appropriate
-
----
-
-### Phase 4: Implement Workflow System [DONE]
-
-**File**: `src/boundry/workflow.py` (NEW)
-
-**Purpose**: YAML-based workflow runner for multi-step operations
-
-**Classes**:
-
-1. [x] **`WorkflowStep` dataclass**: Represents a single workflow step
-2. [x] **`Workflow` class**: Loads YAML, validates, and executes steps sequentially
-
-**YAML Schema Example**:
-```yaml
-# Simple idealize + minimize workflow
-input: input.pdb
-output: final.pdb
-
-steps:
-  - operation: idealize
-    params:
-      fix_cis_omega: true
-      add_missing_residues: true
-    output: idealized.pdb  # Optional intermediate output
-
-  - operation: minimize
-    params:
-      constrained: false
-      max_iterations: 1000
-      implicit_solvent: true
-    output: minimized.pdb
-```
-
-**Implementation notes**:
-- [x] Use PyYAML for parsing
-- [x] Validate schema (required fields, valid operation names)
-- [x] Raise informative errors if output is required but not specified
-- [x] Keep it simple: linear execution, no conditionals/loops
+If you later want the whole library to switch to Rosetta sign globally, we can do that in a separate change with coordinated test updates.
 
 ---
 
-### Phase 5: Update `__init__.py` for API Exposure
+## User-facing CLI design
 
-**File**: `src/boundry/__init__.py` (MODIFY)
+### New options on `boundry analyze-interface`
+Add options that apply only to this command:
 
-**Changes**:
-1. **Remove lazy loading of Pipeline**
-2. **Add top-level imports for operations**
-3. **Update `__all__` list** to expose new operations
-4. **Keep lazy loading for heavy dependencies** (PyTorch, OpenMM)
+1. `--per-position`
+   - Enables per-position energetics output (IAM-like per-residue `dG_i`) plus context columns.
 
----
+2. `--alanine-scan`
+   - Enables AlaScan output per interface residue:
+     - compute WT `dG_rosetta`
+     - compute Ala mutant `dG_rosetta`
+     - report `ΔΔG = dG_mut - dG_wt`
 
-### Phase 6: Rename and Deprecate Legacy Code
+3. `--scan-chains A,B,C`
+   - Optional restriction on which residues are included in `--per-position` and/or `--alanine-scan`.
+   - Default: scan all detected interface residues.
 
-**File**: `src/boundry/pipeline.py` (MODIFY → DELETE)
+4. `--position-repack {both,unbound,none}`
+   - Default: `both` (Rosetta-like; mirrors `pack_input=true`, `pack_separated=true`).
+   - `both`: repack bound complex and unbound partners.
+   - `unbound`: repack unbound partners only.
+   - `none`: no repacking (fastest).
 
-**Steps**:
-1. Rename `Pipeline` class → `LegacyPipeline`
-2. Add deprecation warning at top of file
-3. After Phase 7 is complete and tests pass, **delete this file entirely**
+5. `--position-csv OUT.csv`
+   - Write results to CSV (required output mode per requirement).
+   - If not provided, default behavior is stdout-only (keep it, but encourage CSV).
 
----
+6. Optional perf controls (recommended)
+   - `--max-scan-sites N` (limit number of residues scanned; helpful for large interfaces)
+   - `--scan-workers N` (default 1; consider later after correctness)
 
-### Phase 7: Update Tests
-
-**Directory**: `tests/`
-
-**Changes needed**:
-
-1. **Update existing tests** to use new API
-2. **Add new test files**:
-   - `tests/test_cli.py` - Test each CLI subcommand (use `typer.testing.CliRunner`)
-   - `tests/test_workflow.py` - Test YAML parsing, validation, execution
-   - `tests/test_operations.py` - Test each operation function
-
-3. **Keep existing fixtures** in `conftest.py`
-4. **Update integration tests** to use new API
-
----
-
-### Phase 8: Update Documentation
-
-**Files to update**:
-
-1. **`README.md`**:
-   - Update CLI examples to use new subcommand structure
-   - Add Python API examples using new operations
-   - Add workflow YAML examples
-   - Remove references to old `--mode` flags
-
-2. **`CLAUDE.md`** (project instructions):
-   - Update "Build & Development Commands" section
-   - Update "CLI Entry Point" section
-   - Document new operations.py module
-   - Document workflow.py module
-   - Update architecture diagram
-
-3. **Create `examples/` directory** (NEW):
-   - `examples/workflows/simple_relax.yaml`
-   - `examples/workflows/design_and_analyze.yaml`
-   - `examples/workflows/multi_step_pipeline.yaml`
-   - `examples/api_usage.py` - Python API examples
+### Existing options interactions
+- Continue to support existing `analyze-interface` flags (`--chains`, `--distance-cutoff`, `--relax-separated`, `--constrained`, etc.).
+- For per-position computations:
+  - ignore the legacy `--pack-separated` flag (to avoid mixed semantics)
+  - use `--position-repack` instead
+- Document clearly in help text which knobs apply to which computation.
 
 ---
 
-## Critical Files Summary
+## Output specification (CSV-first)
 
-### New Files
-- `src/boundry/operations.py` - Core operations as standalone functions
-- `src/boundry/workflow.py` - YAML workflow system
-- `tests/test_cli.py` - CLI subcommand tests
-- `tests/test_workflow.py` - Workflow system tests
-- `tests/test_operations.py` - Operations API tests
-- `examples/workflows/*.yaml` - Example workflows
+### CSV columns (single combined file)
+One row per interface residue (stable ordering: chain, resnum, icode):
 
-### Major Refactors
-- `src/boundry/cli.py` - Complete rewrite with Typer
-- `src/boundry/__init__.py` - Expose new operations API
-- `src/boundry/config.py` - Remove PipelineMode, add WorkflowConfig/WorkflowStep
+**Identifiers / context**
+- `chain_id`
+- `residue_number`
+- `insertion_code`
+- `wt_resname`
+- `partner_chain` (from `InterfaceResidue.partner_chain`)
+- `min_distance`
+- `num_contacts`
 
-### Files to Delete (after migration)
-- `src/boundry/pipeline.py` - Legacy Pipeline class
+**Burial (if SASA enabled)**
+- `delta_sasa` (unbound - bound for that residue; already computed in `surface_area`)
 
-### Unchanged Files (mostly)
-- `src/boundry/designer.py` - Used by operations.py
-- `src/boundry/relaxer.py` - Used by operations.py
-- `src/boundry/idealize.py` - Used by operations.py
-- `src/boundry/interface.py` - Used by operations.py
-- `src/boundry/binding_energy.py` - Used by operations.py
-- `src/boundry/surface_area.py` - Used by operations.py
-- `src/boundry/resfile.py` - Used by operations.py
-- `src/boundry/structure_io.py` - Used by operations.py
-- All vendored code in `LigandMPNN/`
+**WT interface energetics (Rosetta sign)**
+- `dG_wt` (same value repeated per row for convenience; or a header-level metadata section—CSV can’t easily represent that, so repeat is pragmatic)
 
----
+**IAM-like per-residue energetics (`--per-position`)**
+- `dG_i` (per-residue contribution estimate; see definition below)
 
-## Implementation Order
+**AlaScan (`--alanine-scan`)**
+- `dG_ala`
+- `delta_ddG` (= `dG_ala - dG_wt`)
 
-1. **Phase 1** - Create `operations.py` with core functions
-2. **Phase 2** - Refactor `config.py` (remove PipelineMode, add Workflow configs)
-3. **Phase 5** - Update `__init__.py` to expose new API (enables testing)
-4. **Phase 3** - Build new CLI with Typer (depends on operations.py)
-5. **Phase 4** - Implement workflow system (depends on operations.py)
-6. **Phase 7** - Update tests (validates everything works)
-7. **Phase 6** - Delete legacy Pipeline code
-8. **Phase 8** - Update documentation
+**Metadata (repeat per row or emit as commented header lines)**
+- `distance_cutoff`
+- `chain_pairs`
+- `position_repack`
+- `relax_separated`
+- `constrained`
+
+Stdout can print:
+- existing summary lines
+- paths to the CSV
+- optionally a short top-N table sorted by `delta_ddG` (hotspots) when enabled.
 
 ---
 
-## Key Design Patterns
+## Core algorithm design
 
-### Structure Representation
-Define a `Structure` wrapper class in `operations.py`:
-```python
-@dataclass
-class Structure:
-    pdb_string: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    source_path: Optional[str] = None
+### 1) Determine the interface definition
+Use existing:
+- `boundry.interface.identify_interface_residues(pdb_string, distance_cutoff, chain_pairs)`
 
-    def write(self, path: str):
-        """Write structure to file (auto-detect format from extension)."""
-        # Use structure_io.py write functions
+Default scan set:
+- all unique interface residues (dedupe by `(chain_id, residue_number, insertion_code)`).
+Optional restriction:
+- filter by `--scan-chains`.
 
-    @classmethod
-    def from_file(cls, path: str) -> "Structure":
-        """Load structure from file."""
-        # Use structure_io.py read functions
-```
+### 2) Define the interface “sides” (required for energies)
+Reuse existing chain grouping logic:
+- `boundry.binding_energy._get_interface_chain_groups(interface_info.chain_pairs)`
 
-### Config Building Pattern
-Each CLI command builds its config dataclass:
-```python
-config = DesignConfig(
-    model_type=model_type,
-    temperature=temperature,
-    seed=seed,
-)
-result = operations.mpnn(input, config)
-```
+Guardrail:
+- For per-position energetics and AlaScan, require **exactly 2 groups**.
+- If grouping yields >2 (ambiguous sides), raise an actionable error:
+  - “Per-position energetics require a two-sided interface; provide `--chains` that cleanly partitions (e.g. `H:A,L:A`).”
 
-### Workflow Dispatching Pattern
-```python
-operation_map = {
-    'idealize': operations.idealize,
-    'minimize': operations.minimize,
-    # etc.
-}
-result = operation_map[step.operation](structure, config)
-```
+### 3) Repacking protocol (Rosetta-like default)
+Implement a repacking helper that works on PDB strings:
+- Reuse and generalize existing `_repack_with_designer(pdb_string, designer)` in `src/boundry/binding_energy.py`:
+  - add a new public helper in a new module (or move to a shared util) so both binding energy and per-position can use it.
 
----
+For per-position computations, apply per `--position-repack`:
+- `both`:
+  - repack bound complex PDB string
+  - then generate unbound partner-group PDBs and repack each
+- `unbound`:
+  - only repack unbound partner-group PDBs
+- `none`:
+  - skip repacking entirely
 
-## Verification Plan
+### 4) WT `dG` (Rosetta sign) computation
+Compute once:
+- Call existing `calculate_binding_energy(...)` to get `binding_energy = E_unbound - E_bound`
+- Convert:
+  - `dG_wt = -binding_energy`
 
-After implementation, verify the refactor works by:
+### 5) AlaScan per-residue ΔΔG (`--alanine-scan`)
+For each scan site:
+- Mutate residue to alanine (see mutation helper below)
+- Apply repack policy (`both`/`unbound`/`none`)
+- Compute mutant:
+  - `dG_ala = -calculate_binding_energy(...).binding_energy`
+- Compute:
+  - `ΔΔG = dG_ala - dG_wt`
 
-1. **Unit Tests**: Run `pytest tests/` - all tests should pass
-2. **Integration Tests**: Run `pytest tests/ -m integration` - requires OpenMM/LigandMPNN
-3. **CLI Smoke Tests**:
-   ```bash
-   # Test each subcommand
-   boundry idealize test.pdb idealized.pdb
-   boundry minimize test.pdb minimized.pdb
-   boundry repack test.pdb repacked.pdb
-   boundry relax test.pdb relaxed.pdb
-   boundry mpnn test.pdb designed.pdb
-   boundry design test.pdb designed_relaxed.pdb
-   boundry analyze-interface test.pdb --chains A:B
+### 6) IAM-like per-residue `dG_i` (`--per-position`)
+Rosetta can compute per-residue energies directly; OpenMM cannot easily provide a faithful per-residue decomposition.
 
-   # Test workflow
-   boundry run examples/workflows/simple_relax.yaml
-   ```
+We will implement a well-defined OpenMM analogue that is stable and testable:
 
-4. **Python API Smoke Tests**:
-   ```python
-   from boundry import idealize, minimize, relax, design
-   from boundry.config import IdealizeConfig, RelaxConfig
+**Definition (marginal contribution by residue removal)**
+- Let `dG_total = E_bound - E_unbound` (Rosetta sign).
+- Let `dG_without_i` be the same binding energy computed after removing residue *i* from both bound and unbound states (coordinates fixed; PDBFixer handles missing atoms/termini).
+- Define:
+  - `dG_i = dG_total - dG_without_i`
 
-   # Test direct function calls
-   result = idealize("test.pdb", IdealizeConfig())
-   result = minimize("test.pdb", RelaxConfig())
+This yields a per-residue “contribution” consistent with the chosen forcefield and solvation model, and mirrors the intent of “how much does this residue matter for binding energy” (but is not identical to Rosetta’s per-residue scoring).
 
-   # Test workflow
-   from boundry import Workflow
-   wf = Workflow.from_yaml("workflow.yaml")
-   wf.run()
-   ```
+**Protocol**
+- WT (with repacking policy applied) → compute `dG_total`.
+- For each residue *i*:
+  - produce a “residue-removed” bound complex PDB string
+  - compute `dG_without_i` with the same repack policy (note: with residue removed, repacking might need to be disabled or limited—see risk section)
+  - compute `dG_i`
 
-5. **Backwards Compatibility Check**: Ensure old Pipeline class is removed and no references remain
+If this is too slow, future optimization paths:
+- compute `dG_i` only for top-N AlaScan hotspots
+- parallelize over sites with process-level OpenMM contexts
+- implement a cross-interface interaction-energy calculator (more complex)
 
-6. **Documentation Review**: Verify all examples in README.md work with new API
+### 7) Mutation helper (alanine)
+Add:
+`mutate_to_alanine(pdb_string, chain_id, resnum, icode) -> str`
 
----
+Requirements:
+- protein residues only
+- preserve chain and residue identifiers
+- set residue name to `ALA`
+- delete atoms not in alanine (`N`, `CA`, `C`, `O`, `CB`, `OXT` if present)
+- rely on PDBFixer inside Relaxer/OpenMM path to rebuild missing hydrogens/atoms
 
-## Migration Notes
+### 8) Residue removal helper
+Add:
+`remove_residue(pdb_string, chain_id, resnum, icode) -> str`
 
-**Breaking Changes** (acceptable per discussion):
-- CLI: All `boundry --mode` flags removed, replaced with subcommands
-- API: `Pipeline` class removed, replaced with operations functions
-- Config: `PipelineMode` enum removed
-
-**Non-Breaking Changes**:
-- All config dataclasses remain the same (DesignConfig, RelaxConfig, etc.)
-- Designer/Relaxer classes unchanged (still usable directly)
-- Resfile format unchanged
-- Input/output formats unchanged (PDB/CIF auto-detection)
-
-**User Migration Path**:
-```bash
-# Old CLI (REMOVED)
-boundry input.pdb output.pdb --relax --n-iter 5
-
-# New CLI (CURRENT)
-boundry relax input.pdb output.pdb --n-iter 5
-
-# Old API (REMOVED)
-from boundry import Pipeline, PipelineConfig, PipelineMode
-pipeline = Pipeline(PipelineConfig(mode=PipelineMode.RELAX))
-pipeline.run(input_pdb, output_pdb)
-
-# New API (CURRENT)
-from boundry import relax
-from boundry.config import PipelineConfig
-result = relax(input_pdb, PipelineConfig())
-result.write(output_pdb)
-```
+Requirements:
+- remove all `ATOM/HETATM` records for that residue
+- preserve the rest of the file
+- ensure resulting PDB is still parseable (END record, TER handling)
 
 ---
 
-## Dependencies
+## Concrete implementation steps (repo changes)
 
-**New dependencies to add**:
-- `typer` - CLI framework with typing support
-- `pyyaml` - YAML parsing for workflows
+### Step 1: Add a new module for per-position energetics
+Add `src/boundry/interface_position_energetics.py`:
+- dataclasses:
+  - `ResidueKey`
+  - `PerPositionRow`
+  - `PerPositionResult`
+- functions:
+  - `mutate_to_alanine(...)`
+  - `remove_residue(...)`
+  - `compute_rosetta_dG(...)` (wraps `calculate_binding_energy` and inverts sign)
+  - `compute_alanine_scan(...)`
+  - `compute_per_position_dG(...)` (residue removal marginal contributions)
+  - `write_position_csv(result, path)`
 
-**Update `pyproject.toml`**:
-```toml
-dependencies = [
-    "typer>=0.9.0",
-    "pyyaml>=6.0",
-    # ... existing dependencies
-]
-```
+### Step 2: Add CLI wiring
+Modify `src/boundry/cli.py` `analyze-interface`:
+- parse new options
+- ensure weights/designer are available when repacking is requested (`position_repack != none`)
+- compute interface residues as before
+- compute WT `dG_wt` via sign-inverted binding energy
+- if `--per-position`, compute `dG_i` values and attach to rows
+- if `--alanine-scan`, compute `dG_ala`/`ΔΔG` and attach to rows
+- write CSV if `--position-csv`
+
+### Step 3: Add tests (unit + lightweight integration)
+Add `tests/test_interface_position_energetics.py`:
+- unit: `mutate_to_alanine` correctness on small synthetic PDB snippets
+- unit: `remove_residue` correctness (residue records removed, rest intact)
+- mocked: patch `boundry.binding_energy.calculate_binding_energy` to validate:
+  - `dG_rosetta = -binding_energy`
+  - `ΔΔG = dG_ala - dG_wt`
+  - `dG_i = dG_total - dG_without_i`
+
+Update existing CLI help tests to ensure new flags appear in `boundry analyze-interface --help`.
+
+### Step 4: Documentation
+Update `README.md`:
+- add an example for per-position CSV:
+  - `boundry analyze-interface complex.pdb --chains H:A,L:A --per-position --alanine-scan --position-csv out.csv`
+- explain sign conventions (Rosetta-style) and interpretations.
 
 ---
 
-## Risk Mitigation
+## Performance expectations
+- AlaScan: O(N) binding-energy evaluations (N = number of interface residues).
+- Per-position `dG_i` via residue removal: O(N) additional evaluations on top of WT.
+- With repack bound+unbound, each evaluation also includes LigandMPNN packing time.
 
-1. **Testing Strategy**: Comprehensive test coverage before deleting legacy code
-2. **Incremental Development**: Build operations.py first, validate with tests, then build CLI
-3. **Example Workflows**: Create diverse YAML examples to validate workflow system
-4. **Documentation**: Update docs early to clarify new patterns
-5. **User Communication**: Clear breaking change announcement in release notes
+Mitigations (implement early):
+- `--max-scan-sites`
+- optionally support “AlaScan only” without per-position `dG_i` for large interfaces
+- consider `--scan-workers` after correctness (process-based, not threads)
+
+---
+
+## Risks & mitigations
+- **Repacking + residue removal interaction**: removing residues can create chain termini/geometry that makes repacking/minimization less stable.
+  - Mitigation: for `dG_i` calculations, default `position_repack=unbound` or `none` unless explicitly set to `both` (but you requested default `both`; we can keep default but add a warning when `--per-position` is enabled because it may be slow/fragile).
+- **OpenMM “per-residue” mismatch vs Rosetta**: Boundry’s `dG_i` will be defined by the chosen OpenMM forcefield + GBn2 model and the “residue removal marginal” definition, not Rosetta’s residue total energy decomposition.
+  - Mitigation: document the definition; keep the naming clear (`dG_i_marginal` if needed).
+- **Multichain ambiguity**: require exactly two sides for per-position energetics; error otherwise with suggestions.
+
+---
+
+## Acceptance criteria
+- Running `boundry analyze-interface` without new flags is unchanged.
+- `--per-position --position-csv out.csv` writes CSV including per-residue `dG_i` (and context columns).
+- `--alanine-scan --position-csv out.csv` writes CSV including `dG_ala` and `ΔΔG`.
+- Default energetics follow Rosetta sign conventions in `analyze-interface` outputs.
+- Tests cover mutation/removal helpers and the key math/sign conventions.
+
