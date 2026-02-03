@@ -71,6 +71,10 @@ boundry design input.pdb designed.pdb --n-iter 5
 boundry analyze-interface complex.pdb
 boundry analyze-interface complex.pdb --chains H:A,L:A --distance-cutoff 10.0
 
+# Per-position interface energetics
+boundry analyze-interface complex.pdb --per-position --alanine-scan
+boundry analyze-interface complex.pdb --per-position --scan-chains A,B --position-csv results.csv
+
 # Execute a YAML workflow
 boundry run workflow.yaml
 ```
@@ -161,6 +165,23 @@ config = InterfaceConfig(
 )
 result = analyze_interface("complex.pdb", config=config, relaxer=relaxer)
 print(f"ddG: {result.binding_energy.binding_energy:.2f} kcal/mol")
+
+# Per-position energetics (IAM-like dG_i and alanine scanning)
+from pathlib import Path
+
+config = InterfaceConfig(
+    enabled=True,
+    chain_pairs=[("H", "A"), ("L", "A")],
+    calculate_binding_energy=True,
+    calculate_sasa=True,
+    per_position=True,
+    alanine_scan=True,
+    position_csv=Path("per_position_results.csv"),
+)
+result = analyze_interface("complex.pdb", config=config, relaxer=relaxer)
+for row in result.per_position.rows:
+    print(f"  {row.wt_resname} {row.chain_id}{row.residue_number}: "
+          f"dG_i={row.dG_i}, ΔΔG={row.delta_ddG}")
 ```
 
 ## Workflows
@@ -205,7 +226,7 @@ result = workflow.run()
 | `relax`             | Iterative repack + minimize              | `n_iterations`, `temperature`, `constrained` |
 | `mpnn`              | Sequence design                          | `temperature`, `model_type`, `resfile`     |
 | `design`            | Iterative design + minimize              | `n_iterations`, `temperature`, `constrained` |
-| `analyze_interface` | Interface scoring                        | `chain_pairs`, `distance_cutoff`           |
+| `analyze_interface` | Interface scoring                        | `chain_pairs`, `distance_cutoff`, `per_position`, `alanine_scan` |
 
 See `examples/workflows/` for more workflow examples.
 
