@@ -5,10 +5,10 @@ build-backend = "hatchling.build"
 [project]
 name = "boundry"
 version = "0.0.1"
-description = "A Python package (under development)"
+description = "Scoring and improving protein-protein interfaces"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 authors = [
     { name = "Bryan Briney" }
 ]
@@ -16,13 +16,76 @@ classifiers = [
     "Development Status :: 1 - Planning",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
 
+dependencies = [
+    "torch>=2.3",
+    "numpy",
+    "prody",
+    "biopython",
+    "freesasa",
+    "absl-py",
+    "ml-collections",
+    "dm-tree",
+    "openmm",
+]
+
 [project.urls]
 Homepage = "https://github.com/bryanbriney/boundry"
 Repository = "https://github.com/bryanbriney/boundry"
+
+[project.optional-dependencies]
+cpu = [
+    # CPU-only OpenMM (smaller install, no GPU dependencies)
+    "openmm[cpu]",
+]
+cuda11 = [
+    # For GPU acceleration with CUDA 11
+    "openmm[cuda11]",
+]
+cuda12 = [
+    # For GPU acceleration with CUDA 12
+    "openmm[cuda12]",
+]
+cuda13 = [
+    # For GPU acceleration with CUDA 13
+    "openmm[cuda13]",
+]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
+test = [
+    "pytest>=7.0",
+    "pytest-cov>=4.1",
+]
+
+[project.scripts]
+boundry = "boundry.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/boundry"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v -m 'not integration'"
+markers = [
+    "integration: marks tests as integration tests (require OpenMM)",
+    "slow: marks tests as slow (skipped by default)",
+]
+
+[tool.black]
+line-length = 80
+extend-exclude = '''
+(
+    /LigandMPNN/
+)
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 80
+skip_glob = ["**/LigandMPNN/**"]
