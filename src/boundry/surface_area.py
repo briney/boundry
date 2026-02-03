@@ -69,6 +69,7 @@ def _compute_structure_sasa(
 
 def _compute_sasa_freesasa(
     pdb_string: str,
+    probe_radius: float = 1.4,
 ) -> Tuple[float, Dict[str, float], Dict[str, float]]:
     """
     Compute SASA using FreeSASA for closer alignment with Rosetta.
@@ -84,7 +85,9 @@ def _compute_sasa_freesasa(
 
     try:
         structure = freesasa.Structure(tmp_path)
-        result = freesasa.calc(structure)
+        parameters = freesasa.Parameters()
+        parameters.setProbeRadius(probe_radius)
+        result = freesasa.calc(structure, parameters)
 
         chain_sasa: Dict[str, float] = defaultdict(float)
         residue_sasa: Dict[str, float] = defaultdict(float)
@@ -167,7 +170,9 @@ def calculate_surface_area(
 
     # Choose SASA backend
     if _HAS_FREESASA:
-        complex_sasa, _, complex_res_sasa = _compute_sasa_freesasa(pdb_string)
+        complex_sasa, _, complex_res_sasa = _compute_sasa_freesasa(
+            pdb_string, probe_radius
+        )
     else:
         complex_sasa = _compute_structure_sasa(structure, probe_radius)
         complex_res_sasa = _compute_residue_sasa(structure, probe_radius)
@@ -209,7 +214,9 @@ def calculate_surface_area(
             chain_pdb_str += "\nEND\n"
 
         if _HAS_FREESASA:
-            total, _, res_sasa = _compute_sasa_freesasa(chain_pdb_str)
+            total, _, res_sasa = _compute_sasa_freesasa(
+                chain_pdb_str, probe_radius
+            )
         else:
             chain_structure = parser.get_structure(
                 f"chain_{chain_id}", io.StringIO(chain_pdb_str)
