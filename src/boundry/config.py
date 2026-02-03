@@ -1,19 +1,8 @@
-"""Configuration dataclasses for Boundry pipeline."""
+"""Configuration dataclasses for Boundry pipeline and workflows."""
 
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
-from typing import List, Literal, Optional, Tuple
-
-
-class PipelineMode(Enum):
-    """Operating mode for the pipeline."""
-
-    RELAX = "relax"  # Repack + minimize (default)
-    REPACK_ONLY = "repack_only"  # Only repack, no minimize
-    NO_REPACK = "no_repack"  # Only minimize, no repack
-    DESIGN = "design"  # Design + minimize
-    DESIGN_ONLY = "design_only"  # Only design, no minimize
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 
 ModelType = Literal["protein_mpnn", "ligand_mpnn", "soluble_mpnn"]
@@ -79,9 +68,13 @@ class InterfaceConfig:
 
 @dataclass
 class PipelineConfig:
-    """Configuration for the full pipeline."""
+    """Configuration for composite operations (relax, design).
 
-    mode: PipelineMode = PipelineMode.RELAX
+    Bundles the sub-configs needed by :func:`boundry.operations.relax`
+    and :func:`boundry.operations.design`, which iterate over
+    repack/design + minimize cycles.
+    """
+
     n_iterations: int = 5  # Number of repack/design + minimize cycles
     n_outputs: int = 1  # Number of output models to generate
     scorefile: Optional[Path] = None  # If set, write scores to this file
@@ -91,3 +84,36 @@ class PipelineConfig:
     relax: RelaxConfig = field(default_factory=RelaxConfig)
     idealize: IdealizeConfig = field(default_factory=IdealizeConfig)
     interface: InterfaceConfig = field(default_factory=InterfaceConfig)
+
+
+# -------------------------------------------------------------------
+# Workflow configuration
+# -------------------------------------------------------------------
+
+
+@dataclass
+class WorkflowStep:
+    """A single step in a Boundry workflow.
+
+    Each step maps to one of the core operations (idealize, minimize,
+    repack, relax, mpnn, design, analyze_interface) and carries
+    operation-specific parameters.
+    """
+
+    operation: str  # Operation name (e.g. 'idealize', 'minimize')
+    params: Dict[str, Any] = field(default_factory=dict)
+    output: Optional[str] = None  # Optional intermediate output path
+
+
+@dataclass
+class WorkflowConfig:
+    """Configuration for a YAML-based linear workflow.
+
+    A workflow is a sequence of :class:`WorkflowStep` instances
+    executed in order, with the output of each step fed as input
+    to the next.
+    """
+
+    input: str  # Input PDB/CIF path
+    output: Optional[str] = None  # Final output path
+    steps: List[WorkflowStep] = field(default_factory=list)

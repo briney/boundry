@@ -1,9 +1,12 @@
 """Tests for pipeline integration with interface analysis."""
 
 import pytest
+from typer.testing import CliRunner
 
-from boundry.cli import _parse_chain_pairs, create_parser
+from boundry.cli import _parse_chain_pairs, app
 from boundry.config import InterfaceConfig, PipelineConfig
+
+runner = CliRunner()
 
 
 class TestParseChainPairs:
@@ -77,114 +80,46 @@ class TestPipelineConfigWithInterface:
 
 
 class TestCLIInterfaceArgs:
-    def test_analyze_interface_flag(self):
-        """Test --analyze-interface flag is parsed."""
-        parser = create_parser()
-        args = parser.parse_args(
-            ["-i", "input.pdb", "-o", "output.pdb", "--analyze-interface"]
-        )
-        assert args.analyze_interface is True
+    """Tests for analyze-interface CLI subcommand options."""
 
-    def test_interface_distance_cutoff(self):
-        """Test --interface-distance-cutoff argument."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                "input.pdb",
-                "-o",
-                "output.pdb",
-                "--analyze-interface",
-                "--interface-distance-cutoff",
-                "6.0",
-            ]
-        )
-        assert args.interface_distance_cutoff == 6.0
+    def test_analyze_interface_help(self):
+        """Test analyze-interface --help shows interface options."""
+        result = runner.invoke(app, ["analyze-interface", "--help"])
+        assert result.exit_code == 0
+        assert "interface" in result.output.lower()
 
-    def test_interface_chains(self):
-        """Test --interface-chains argument."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                "input.pdb",
-                "-o",
-                "output.pdb",
-                "--analyze-interface",
-                "--interface-chains",
-                "H:A,L:A",
-            ]
-        )
-        assert args.interface_chains == "H:A,L:A"
+    def test_distance_cutoff_option(self):
+        """Test --distance-cutoff option is available."""
+        result = runner.invoke(app, ["analyze-interface", "--help"])
+        assert "--distance-cutoff" in result.output
 
-    def test_no_binding_energy(self):
-        """Test --no-binding-energy flag."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                "input.pdb",
-                "-o",
-                "output.pdb",
-                "--analyze-interface",
-                "--no-binding-energy",
-            ]
-        )
-        assert args.no_binding_energy is True
+    def test_chains_option(self):
+        """Test --chains option is available."""
+        result = runner.invoke(app, ["analyze-interface", "--help"])
+        assert "--chains" in result.output
 
-    def test_calculate_shape_complementarity(self):
-        """Test --calculate-shape-complementarity flag."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                "input.pdb",
-                "-o",
-                "output.pdb",
-                "--analyze-interface",
-                "--calculate-shape-complementarity",
-            ]
-        )
-        assert args.calculate_shape_complementarity is True
+    def test_no_binding_energy_option(self):
+        """Test --no-binding-energy option is available."""
+        result = runner.invoke(app, ["analyze-interface", "--help"])
+        assert "--no-binding-energy" in result.output
 
-    def test_pack_separated_flag(self):
-        """Test --pack-separated flag."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                "input.pdb",
-                "-o",
-                "output.pdb",
-                "--analyze-interface",
-                "--pack-separated",
-            ]
-        )
-        assert args.pack_separated is True
+    def test_shape_complementarity_option(self):
+        """Test --shape-complementarity option is available."""
+        result = runner.invoke(app, ["analyze-interface", "--help"])
+        # Rich may truncate long option names
+        assert "--shape-complementa" in result.output
 
-    def test_relax_separated_flag(self):
-        """Test --relax-separated flag."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                "input.pdb",
-                "-o",
-                "output.pdb",
-                "--analyze-interface",
-                "--relax-separated",
-            ]
-        )
-        assert args.relax_separated is True
+    def test_pack_separated_option(self):
+        """Test --pack-separated option is available."""
+        result = runner.invoke(app, ["analyze-interface", "--help"])
+        assert "--pack-separated" in result.output
 
-    def test_default_interface_values(self):
-        """Test default values for interface arguments."""
-        parser = create_parser()
-        args = parser.parse_args(["-i", "input.pdb", "-o", "output.pdb"])
-        assert args.analyze_interface is False
-        assert args.interface_distance_cutoff == 8.0
-        assert args.interface_chains is None
-        assert args.no_binding_energy is False
-        assert args.calculate_shape_complementarity is False
-        assert args.pack_separated is False
-        assert args.relax_separated is False
+    def test_relax_separated_option(self):
+        """Test --relax-separated option is available."""
+        result = runner.invoke(app, ["analyze-interface", "--help"])
+        assert "--relax-separated" in result.output
+
+    def test_constrained_option(self):
+        """Test --constrained option is available."""
+        result = runner.invoke(app, ["analyze-interface", "--help"])
+        assert "--constrained" in result.output

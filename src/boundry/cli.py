@@ -1,16 +1,35 @@
 #!/usr/bin/env python
-"""Boundry CLI - Combine LigandMPNN design with AMBER relaxation."""
+"""Boundry CLI - Protein engineering with LigandMPNN and AMBER relaxation."""
 
-import argparse
 import logging
 import sys
 from pathlib import Path
+from typing import Optional
 
-from boundry.weights import ensure_weights
+import typer
+
+logger = logging.getLogger(__name__)
+
+app = typer.Typer(
+    name="boundry",
+    help=(
+        "Protein engineering with LigandMPNN design and AMBER relaxation.\n\n"
+        "Boundry combines neural network-based sequence design (LigandMPNN) "
+        "with physics-based energy minimization (OpenMM AMBER), similar to "
+        "Rosetta FastRelax and FastDesign protocols."
+    ),
+    no_args_is_help=True,
+    add_completion=False,
+)
 
 
-def setup_logging(verbose: bool):
-    """Configure logging."""
+# -------------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------------
+
+
+def _setup_logging(verbose: bool) -> None:
+    """Configure logging for the CLI."""
     level = logging.DEBUG if verbose else logging.WARNING
     logging.basicConfig(
         level=level,
@@ -19,19 +38,26 @@ def setup_logging(verbose: bool):
     )
 
 
-def _check_for_ligands(input_path: Path, fmt) -> bool:
-    """
-    Check if input structure has ligands (non-water HETATM records).
+def _validate_input(path: Path) -> None:
+    """Validate that *path* exists and has a supported extension."""
+    if not path.exists():
+        typer.echo(f"Error: Input file not found: {path}", err=True)
+        raise typer.Exit(code=1)
+    ext = path.suffix.lower()
+    if ext not in (".pdb", ".cif", ".mmcif"):
+        typer.echo(
+            f"Error: Unsupported format '{ext}'. "
+            "Supported: .pdb, .cif, .mmcif",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
-    Args:
-        input_path: Path to input file
-        fmt: StructureFormat enum
 
-    Returns:
-        True if ligands are present
-    """
-    from boundry.structure_io import StructureFormat
+def _check_for_ligands(input_path: Path) -> bool:
+    """Check if structure has non-water HETATM records."""
+    from boundry.structure_io import StructureFormat, detect_format
 
+    fmt = detect_format(input_path)
     water_residues = {"HOH", "WAT", "SOL", "TIP3", "TIP4", "SPC"}
 
     if fmt == StructureFormat.PDB:
@@ -42,7 +68,6 @@ def _check_for_ligands(input_path: Path, fmt) -> bool:
                     if resname not in water_residues:
                         return True
     else:
-        # CIF format - use BioPython
         from Bio.PDB import MMCIFParser
 
         parser = MMCIFParser(QUIET=True)
@@ -58,301 +83,22 @@ def _check_for_ligands(input_path: Path, fmt) -> bool:
     return False
 
 
-def create_parser() -> argparse.ArgumentParser:
-    """Create argument parser."""
-    parser = argparse.ArgumentParser(
-        prog="boundry",
-        description=(
-            "Boundry: Combine LigandMPNN design with AMBER relaxation.\n\n"
-            "This tool alternates between neural network-based design/repacking"
-            " (LigandMPNN) and physics-based energy minimization (OpenMM AMBER)"
-            ", similar to Rosetta FastRelax and Design protocols."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Default: repack + minimize for 5 cycles
-  boundry -i input.pdb -o relaxed.pdb
-
-  # Only minimize (no repacking)
-  boundry -i input.pdb -o minimized.pdb --no-repack
-
-  # Full redesign + minimize
-  boundry -i input.pdb -o designed.pdb --design
-
-  # Design with resfile specification
-  boundry -i input.pdb -o designed.pdb --design --resfile design.resfile
-
-  # Generate 10 different designs
-  boundry -i input.pdb -o designed.pdb --design -n 10
-
-  # With scorefile output
-  boundry -i input.pdb -o relaxed.pdb --scorefile scores.sc
-""",
-    )
-
-    # Required arguments
-    parser.add_argument(
-        "-i",
-        "--input",
-        type=Path,
-        required=True,
-        metavar="FILE",
-        help="Input structure file (PDB or CIF format)",
-    )
-    parser.add_argument(
-        "-o",
-        "--output",
-        type=Path,
-        required=True,
-        metavar="FILE",
-        help="Output structure file (or prefix if -n > 1)",
-    )
-
-    # Mode selection (mutually exclusive)
-    mode_group = parser.add_argument_group(
-        "Mode selection (mutually exclusive)"
-    )
-    mode = mode_group.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--relax",
-        action="store_true",
-        help="Repack + minimize cycles (default mode)",
-    )
-    mode.add_argument(
-        "--repack-only",
-        action="store_true",
-        help="Only repack side chains, no minimization",
-    )
-    mode.add_argument(
-        "--no-repack",
-        action="store_true",
-        help="Only minimize, no repacking",
-    )
-    mode.add_argument(
-        "--design",
-        action="store_true",
-        help="Design + minimize (full redesign or per --resfile)",
-    )
-    mode.add_argument(
-        "--design-only",
-        action="store_true",
-        help="Only design, no minimization",
-    )
-
-    # Iteration and output control
-    iter_group = parser.add_argument_group("Iteration and output control")
-    iter_group.add_argument(
-        "--n-iter",
-        type=int,
-        default=5,
-        metavar="N",
-        help="Number of repack/design + minimize cycles (default: 5)",
-    )
-    iter_group.add_argument(
-        "-n",
-        "--n-outputs",
-        type=int,
-        default=1,
-        metavar="N",
-        help="Number of output models to generate (default: 1)",
-    )
-
-    # Design options
-    design_group = parser.add_argument_group("Design options")
-    design_group.add_argument(
-        "--resfile",
-        type=Path,
-        metavar="FILE",
-        help="Rosetta-style resfile for residue-specific design control",
-    )
-    design_group.add_argument(
-        "--temperature",
-        type=float,
-        default=0.1,
-        metavar="T",
-        help="Sampling temperature for LigandMPNN (default: 0.1)",
-    )
-    design_group.add_argument(
-        "--model-type",
-        choices=["protein_mpnn", "ligand_mpnn", "soluble_mpnn"],
-        default="ligand_mpnn",
-        help="LigandMPNN model variant (default: ligand_mpnn)",
-    )
-
-    # Relaxation options
-    relax_group = parser.add_argument_group("Relaxation options")
-    relax_group.add_argument(
-        "--constrained-minimization",
-        action="store_true",
-        help=(
-            "Use constrained minimization with position restraints and "
-            "violation checking (AlphaFold-style). Default is unconstrained."
-        ),
-    )
-    relax_group.add_argument(
-        "--stiffness",
-        type=float,
-        default=10.0,
-        metavar="K",
-        help=(
-            "Restraint stiffness in kcal/mol/A^2 for constrained mode "
-            "(default: 10.0)"
-        ),
-    )
-    relax_group.add_argument(
-        "--max-iterations",
-        type=int,
-        default=0,
-        metavar="N",
-        help="Max L-BFGS iterations, 0=unlimited (default: 0)",
-    )
-    relax_group.add_argument(
-        "--no-split-gaps",
-        action="store_true",
-        help=(
-            "Disable automatic chain splitting at gaps. "
-            "By default, chains are split at detected gaps (missing residues) "
-            "to prevent artificial gap closure during minimization."
-        ),
-    )
-    relax_group.add_argument(
-        "--no-implicit-solvent",
-        action="store_true",
-        help="Disable GBn2 implicit solvation for energy evaluation.",
-    )
-
-    # Scoring options
-    score_group = parser.add_argument_group("Scoring options")
-    score_group.add_argument(
-        "--scorefile",
-        type=Path,
-        metavar="FILE",
-        help="Output scorefile with OpenMM energy terms and LigandMPNN scores",
-    )
-
-    # Input preprocessing options
-    preprocess_group = parser.add_argument_group("Input preprocessing options")
-    preprocess_group.add_argument(
-        "--keep-waters",
-        action="store_true",
-        help="Keep water molecules in input (default: waters are removed)",
-    )
-    preprocess_group.add_argument(
-        "--pre-idealize",
-        action="store_true",
-        help=(
-            "Idealize backbone geometry before processing. "
-            "Runs constrained minimization to fix local geometry while "
-            "preserving dihedral angles. By default, chain breaks are closed."
-        ),
-    )
-    preprocess_group.add_argument(
-        "--ignore-missing-residues",
-        action="store_true",
-        help=(
-            "Do not add missing residues from SEQRES during pre-idealization. "
-            "By default, missing N/C-terminal residues and internal loops are "
-            "added based on SEQRES records."
-        ),
-    )
-    preprocess_group.add_argument(
-        "--retain-chainbreaks",
-        action="store_true",
-        help=(
-            "Do not close chain breaks during pre-idealization. "
-            "By default, chain breaks are closed by treating all segments "
-            "as a single chain. Use this to preserve gaps."
-        ),
-    )
-
-    # Interface analysis options
-    interface_group = parser.add_argument_group(
-        "Interface analysis",
-        "Options for antibody-antigen and protein-protein interface analysis",
-    )
-    interface_group.add_argument(
-        "--analyze-interface",
-        action="store_true",
-        help="Enable interface analysis (binding energy, SASA, etc.)",
-    )
-    interface_group.add_argument(
-        "--interface-distance-cutoff",
-        type=float,
-        default=8.0,
-        metavar="DIST",
-        help=(
-            "Distance cutoff (angstroms) for interface "
-            "residues (default: 8.0)"
-        ),
-    )
-    interface_group.add_argument(
-        "--interface-chains",
-        type=str,
-        metavar="CHAINS",
-        help=(
-            "Comma-separated chain pairs to analyze, e.g., 'H:L,H:A' "
-            "(auto-detect all pairs if not specified)"
-        ),
-    )
-    interface_group.add_argument(
-        "--no-binding-energy",
-        action="store_true",
-        help=(
-            "Skip binding energy calculation "
-            "(faster, only identify interface)"
-        ),
-    )
-    interface_group.add_argument(
-        "--calculate-shape-complementarity",
-        action="store_true",
-        help="Calculate shape complementarity score (Sc) - experimental",
-    )
-    interface_group.add_argument(
-        "--pack-separated",
-        action="store_true",
-        help=(
-            "Repack side chains on separated partners (no backbone "
-            "minimization), matching Rosetta InterfaceAnalyzer pack_separated"
-        ),
-    )
-    interface_group.add_argument(
-        "--relax-separated",
-        action="store_true",
-        help=(
-            "Backbone-minimize separated partners after repacking "
-            "(disabled by default to match Rosetta rigid-body separation)"
-        ),
-    )
-
-    # General options
-    general_group = parser.add_argument_group("General options")
-    general_group.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose output (show all log messages)",
-    )
-    general_group.add_argument(
-        "--seed",
-        type=int,
-        metavar="N",
-        help="Random seed for reproducibility",
-    )
-
-    return parser
+def _validate_minimization_ligands(
+    input_path: Path, constrained: bool
+) -> None:
+    """Error if structure has ligands but constrained mode is off."""
+    if not constrained and _check_for_ligands(input_path):
+        typer.echo(
+            "Error: Input contains ligands (HETATM records). "
+            "Unconstrained minimization cannot handle non-standard "
+            "residues. Use --constrained flag.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
 
 def _parse_chain_pairs(chain_string: str) -> list:
-    """
-    Parse chain pair specification string.
-
-    Args:
-        chain_string: Comma-separated chain pairs, e.g., 'H:L,H:A'
-
-    Returns:
-        List of (chain_a, chain_b) tuples
-    """
+    """Parse ``'H:L,H:A'`` into ``[('H', 'L'), ('H', 'A')]``."""
     pairs = []
     for pair in chain_string.split(","):
         if ":" in pair:
@@ -361,163 +107,555 @@ def _parse_chain_pairs(chain_string: str) -> list:
     return pairs
 
 
-def main(args=None) -> int:
-    """Main entry point."""
-    parser = create_parser()
-    opts = parser.parse_args(args)
+# -------------------------------------------------------------------
+# Commands
+# -------------------------------------------------------------------
 
-    setup_logging(opts.verbose)
-    logger = logging.getLogger(__name__)
 
-    # Validate inputs
-    if not opts.input.exists():
-        logger.error(f"Input file not found: {opts.input}")
-        return 1
+@app.command()
+def idealize(
+    input_file: Path = typer.Argument(
+        ..., metavar="INPUT", help="Input structure file (PDB or CIF)"
+    ),
+    output_file: Path = typer.Argument(
+        ..., metavar="OUTPUT", help="Output structure file"
+    ),
+    fix_cis_omega: bool = typer.Option(
+        True, help="Correct non-trans peptide bonds (except Pro)"
+    ),
+    add_missing_residues: bool = typer.Option(
+        True, help="Add missing residues from SEQRES"
+    ),
+    close_chainbreaks: bool = typer.Option(
+        True, help="Close chain breaks during idealization"
+    ),
+    stiffness: float = typer.Option(
+        10.0, help="Restraint stiffness in kcal/mol/A^2"
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable verbose output"
+    ),
+):
+    """Fix backbone geometry while preserving dihedral angles."""
+    _setup_logging(verbose)
+    _validate_input(input_file)
 
-    if opts.resfile and not opts.resfile.exists():
-        logger.error(f"Resfile not found: {opts.resfile}")
-        return 1
+    from boundry.config import IdealizeConfig
+    from boundry.operations import idealize as _idealize
 
-    # Validate input format
-    input_suffix = opts.input.suffix.lower()
-    if input_suffix not in (".pdb", ".cif", ".mmcif"):
-        logger.error(
-            f"Unsupported input format: {input_suffix}. "
-            "Supported formats: .pdb, .cif, .mmcif"
-        )
-        return 1
-
-    # Ensure model weights are downloaded
-    ensure_weights(verbose=opts.verbose)
-
-    # Import here to avoid slow startup from heavy dependencies
-    from boundry.config import (
-        DesignConfig,
-        IdealizeConfig,
-        InterfaceConfig,
-        PipelineConfig,
-        PipelineMode,
-        RelaxConfig,
-    )
-    from boundry.pipeline import Pipeline
-    from boundry.structure_io import detect_format
-
-    # Determine mode
-    if opts.repack_only:
-        mode = PipelineMode.REPACK_ONLY
-    elif opts.no_repack:
-        mode = PipelineMode.NO_REPACK
-    elif opts.design:
-        mode = PipelineMode.DESIGN
-    elif opts.design_only:
-        mode = PipelineMode.DESIGN_ONLY
-    else:
-        mode = PipelineMode.RELAX  # default
-
-    # Check if input structure has ligands (HETATM records)
-    input_format = detect_format(opts.input)
-    has_ligands = _check_for_ligands(opts.input, input_format)
-
-    # Validate: ligand_mpnn with ligands requires constrained minimization
-    uses_relaxation = mode in (
-        PipelineMode.RELAX,
-        PipelineMode.NO_REPACK,
-        PipelineMode.DESIGN,
-    )
-    if has_ligands and uses_relaxation and not opts.constrained_minimization:
-        logger.error(
-            "Input PDB contains ligands (HETATM records). "
-            "Unconstrained minimization cannot handle non-standard residues. "
-            "Please use --constrained-minimization flag."
-        )
-        return 1
-
-    logger.info(f"Running Boundry in {mode.value} mode")
-    logger.info(f"Input: {opts.input}")
-    logger.info(f"Output: {opts.output}")
-    logger.info(f"Iterations: {opts.n_iter}, Outputs: {opts.n_outputs}")
-
-    # Build configuration
-    design_config = DesignConfig(
-        model_type=opts.model_type,
-        temperature=opts.temperature,
-        seed=opts.seed,
+    config = IdealizeConfig(
+        enabled=True,
+        fix_cis_omega=fix_cis_omega,
+        add_missing_residues=add_missing_residues,
+        close_chainbreaks=close_chainbreaks,
+        post_idealize_stiffness=stiffness,
     )
 
-    relax_config = RelaxConfig(
-        stiffness=opts.stiffness,
-        max_iterations=opts.max_iterations,
-        constrained=opts.constrained_minimization,
-        split_chains_at_gaps=not opts.no_split_gaps,
-        implicit_solvent=not opts.no_implicit_solvent,
+    logger.info(f"Idealizing {input_file} -> {output_file}")
+    result = _idealize(input_file, config=config)
+    result.write(output_file)
+    logger.info(f"Wrote idealized structure to {output_file}")
+
+
+@app.command()
+def minimize(
+    input_file: Path = typer.Argument(
+        ..., metavar="INPUT", help="Input structure file (PDB or CIF)"
+    ),
+    output_file: Path = typer.Argument(
+        ..., metavar="OUTPUT", help="Output structure file"
+    ),
+    pre_idealize: bool = typer.Option(
+        False, help="Idealize backbone geometry before minimization"
+    ),
+    constrained: bool = typer.Option(
+        False,
+        help="Use constrained minimization with position restraints "
+        "(AlphaFold-style)",
+    ),
+    stiffness: float = typer.Option(
+        10.0, help="Restraint stiffness in kcal/mol/A^2"
+    ),
+    max_iterations: int = typer.Option(
+        0, help="Max L-BFGS iterations (0 = unlimited)"
+    ),
+    no_split_gaps: bool = typer.Option(
+        False, help="Disable chain splitting at gaps"
+    ),
+    no_implicit_solvent: bool = typer.Option(
+        False, help="Disable GBn2 implicit solvation"
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable verbose output"
+    ),
+):
+    """Energy minimization using OpenMM AMBER force field."""
+    _setup_logging(verbose)
+    _validate_input(input_file)
+    _validate_minimization_ligands(input_file, constrained)
+
+    from boundry.config import RelaxConfig
+    from boundry.operations import minimize as _minimize
+
+    config = RelaxConfig(
+        constrained=constrained,
+        stiffness=stiffness,
+        max_iterations=max_iterations,
+        split_chains_at_gaps=not no_split_gaps,
+        implicit_solvent=not no_implicit_solvent,
     )
 
-    idealize_config = IdealizeConfig(
-        enabled=opts.pre_idealize,
-        add_missing_residues=not opts.ignore_missing_residues,
-        close_chainbreaks=not opts.retain_chainbreaks,
+    logger.info(f"Minimizing {input_file} -> {output_file}")
+    result = _minimize(
+        input_file, config=config, pre_idealize=pre_idealize
     )
+    result.write(output_file)
+
+    energy = result.metadata.get("final_energy")
+    if energy is not None:
+        logger.info(f"Final energy: {energy:.2f} kcal/mol")
+    logger.info(f"Wrote minimized structure to {output_file}")
+
+
+@app.command()
+def repack(
+    input_file: Path = typer.Argument(
+        ..., metavar="INPUT", help="Input structure file (PDB or CIF)"
+    ),
+    output_file: Path = typer.Argument(
+        ..., metavar="OUTPUT", help="Output structure file"
+    ),
+    pre_idealize: bool = typer.Option(
+        False, help="Idealize backbone geometry before repacking"
+    ),
+    resfile: Optional[Path] = typer.Option(
+        None, help="Rosetta-style resfile for residue control"
+    ),
+    temperature: float = typer.Option(
+        0.1, help="LigandMPNN sampling temperature"
+    ),
+    model_type: str = typer.Option(
+        "ligand_mpnn",
+        help="Model variant: protein_mpnn, ligand_mpnn, soluble_mpnn",
+    ),
+    seed: Optional[int] = typer.Option(
+        None, help="Random seed for reproducibility"
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable verbose output"
+    ),
+):
+    """Repack side chains without changing sequence."""
+    _setup_logging(verbose)
+    _validate_input(input_file)
+
+    from boundry.config import DesignConfig
+    from boundry.operations import repack as _repack
+    from boundry.weights import ensure_weights
+
+    ensure_weights(verbose=verbose)
+
+    config = DesignConfig(
+        model_type=model_type,
+        temperature=temperature,
+        seed=seed,
+    )
+
+    logger.info(f"Repacking {input_file} -> {output_file}")
+    result = _repack(
+        input_file,
+        config=config,
+        resfile=resfile,
+        pre_idealize=pre_idealize,
+    )
+    result.write(output_file)
+    logger.info(f"Wrote repacked structure to {output_file}")
+
+
+@app.command()
+def relax(
+    input_file: Path = typer.Argument(
+        ..., metavar="INPUT", help="Input structure file (PDB or CIF)"
+    ),
+    output_file: Path = typer.Argument(
+        ..., metavar="OUTPUT", help="Output structure file"
+    ),
+    pre_idealize: bool = typer.Option(
+        False, help="Idealize backbone geometry before relaxation"
+    ),
+    n_iter: int = typer.Option(
+        5, help="Number of repack + minimize cycles"
+    ),
+    resfile: Optional[Path] = typer.Option(
+        None, help="Rosetta-style resfile for residue control"
+    ),
+    temperature: float = typer.Option(
+        0.1, help="LigandMPNN sampling temperature"
+    ),
+    model_type: str = typer.Option(
+        "ligand_mpnn",
+        help="Model variant: protein_mpnn, ligand_mpnn, soluble_mpnn",
+    ),
+    seed: Optional[int] = typer.Option(
+        None, help="Random seed for reproducibility"
+    ),
+    constrained: bool = typer.Option(
+        False,
+        help="Use constrained minimization with position restraints "
+        "(AlphaFold-style)",
+    ),
+    stiffness: float = typer.Option(
+        10.0, help="Restraint stiffness in kcal/mol/A^2"
+    ),
+    max_iterations: int = typer.Option(
+        0, help="Max L-BFGS iterations (0 = unlimited)"
+    ),
+    no_split_gaps: bool = typer.Option(
+        False, help="Disable chain splitting at gaps"
+    ),
+    no_implicit_solvent: bool = typer.Option(
+        False, help="Disable GBn2 implicit solvation"
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable verbose output"
+    ),
+):
+    """Iterative side-chain repacking and energy minimization.
+
+    Alternates between LigandMPNN repacking and OpenMM AMBER minimization,
+    similar to Rosetta FastRelax.
+    """
+    _setup_logging(verbose)
+    _validate_input(input_file)
+    _validate_minimization_ligands(input_file, constrained)
+
+    from boundry.config import DesignConfig, PipelineConfig, RelaxConfig
+    from boundry.operations import relax as _relax
+    from boundry.weights import ensure_weights
+
+    ensure_weights(verbose=verbose)
+
+    config = PipelineConfig(
+        design=DesignConfig(
+            model_type=model_type,
+            temperature=temperature,
+            seed=seed,
+        ),
+        relax=RelaxConfig(
+            constrained=constrained,
+            stiffness=stiffness,
+            max_iterations=max_iterations,
+            split_chains_at_gaps=not no_split_gaps,
+            implicit_solvent=not no_implicit_solvent,
+        ),
+    )
+
+    logger.info(
+        f"Relaxing {input_file} -> {output_file} ({n_iter} iterations)"
+    )
+    result = _relax(
+        input_file,
+        config=config,
+        resfile=resfile,
+        pre_idealize=pre_idealize,
+        n_iterations=n_iter,
+    )
+    result.write(output_file)
+
+    energy = result.metadata.get("final_energy")
+    if energy is not None:
+        logger.info(f"Final energy: {energy:.2f} kcal/mol")
+    logger.info(f"Wrote relaxed structure to {output_file}")
+
+
+@app.command()
+def mpnn(
+    input_file: Path = typer.Argument(
+        ..., metavar="INPUT", help="Input structure file (PDB or CIF)"
+    ),
+    output_file: Path = typer.Argument(
+        ..., metavar="OUTPUT", help="Output structure file"
+    ),
+    pre_idealize: bool = typer.Option(
+        False, help="Idealize backbone geometry before design"
+    ),
+    resfile: Optional[Path] = typer.Option(
+        None, help="Rosetta-style resfile for residue control"
+    ),
+    temperature: float = typer.Option(
+        0.1, help="LigandMPNN sampling temperature"
+    ),
+    model_type: str = typer.Option(
+        "ligand_mpnn",
+        help="Model variant: protein_mpnn, ligand_mpnn, soluble_mpnn",
+    ),
+    seed: Optional[int] = typer.Option(
+        None, help="Random seed for reproducibility"
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable verbose output"
+    ),
+):
+    """Sequence design using LigandMPNN."""
+    _setup_logging(verbose)
+    _validate_input(input_file)
+
+    from boundry.config import DesignConfig
+    from boundry.operations import mpnn as _mpnn
+    from boundry.weights import ensure_weights
+
+    ensure_weights(verbose=verbose)
+
+    config = DesignConfig(
+        model_type=model_type,
+        temperature=temperature,
+        seed=seed,
+    )
+
+    logger.info(f"Designing {input_file} -> {output_file}")
+    result = _mpnn(
+        input_file,
+        config=config,
+        resfile=resfile,
+        pre_idealize=pre_idealize,
+    )
+    result.write(output_file)
+    logger.info(f"Wrote designed structure to {output_file}")
+
+
+@app.command()
+def design(
+    input_file: Path = typer.Argument(
+        ..., metavar="INPUT", help="Input structure file (PDB or CIF)"
+    ),
+    output_file: Path = typer.Argument(
+        ..., metavar="OUTPUT", help="Output structure file"
+    ),
+    pre_idealize: bool = typer.Option(
+        False, help="Idealize backbone geometry before design"
+    ),
+    n_iter: int = typer.Option(
+        5, help="Number of design + minimize cycles"
+    ),
+    resfile: Optional[Path] = typer.Option(
+        None, help="Rosetta-style resfile for residue control"
+    ),
+    temperature: float = typer.Option(
+        0.1, help="LigandMPNN sampling temperature"
+    ),
+    model_type: str = typer.Option(
+        "ligand_mpnn",
+        help="Model variant: protein_mpnn, ligand_mpnn, soluble_mpnn",
+    ),
+    seed: Optional[int] = typer.Option(
+        None, help="Random seed for reproducibility"
+    ),
+    constrained: bool = typer.Option(
+        False,
+        help="Use constrained minimization with position restraints "
+        "(AlphaFold-style)",
+    ),
+    stiffness: float = typer.Option(
+        10.0, help="Restraint stiffness in kcal/mol/A^2"
+    ),
+    max_iterations: int = typer.Option(
+        0, help="Max L-BFGS iterations (0 = unlimited)"
+    ),
+    no_split_gaps: bool = typer.Option(
+        False, help="Disable chain splitting at gaps"
+    ),
+    no_implicit_solvent: bool = typer.Option(
+        False, help="Disable GBn2 implicit solvation"
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable verbose output"
+    ),
+):
+    """Iterative sequence design and energy minimization.
+
+    Alternates between LigandMPNN design and OpenMM AMBER minimization,
+    similar to Rosetta FastDesign.
+    """
+    _setup_logging(verbose)
+    _validate_input(input_file)
+    _validate_minimization_ligands(input_file, constrained)
+
+    from boundry.config import DesignConfig, PipelineConfig, RelaxConfig
+    from boundry.operations import design as _design
+    from boundry.weights import ensure_weights
+
+    ensure_weights(verbose=verbose)
+
+    config = PipelineConfig(
+        design=DesignConfig(
+            model_type=model_type,
+            temperature=temperature,
+            seed=seed,
+        ),
+        relax=RelaxConfig(
+            constrained=constrained,
+            stiffness=stiffness,
+            max_iterations=max_iterations,
+            split_chains_at_gaps=not no_split_gaps,
+            implicit_solvent=not no_implicit_solvent,
+        ),
+    )
+
+    logger.info(
+        f"Designing {input_file} -> {output_file} ({n_iter} iterations)"
+    )
+    result = _design(
+        input_file,
+        config=config,
+        resfile=resfile,
+        pre_idealize=pre_idealize,
+        n_iterations=n_iter,
+    )
+    result.write(output_file)
+
+    energy = result.metadata.get("final_energy")
+    if energy is not None:
+        logger.info(f"Final energy: {energy:.2f} kcal/mol")
+    logger.info(f"Wrote designed structure to {output_file}")
+
+
+@app.command("analyze-interface")
+def analyze_interface(
+    input_file: Path = typer.Argument(
+        ..., metavar="INPUT", help="Input structure file (PDB or CIF)"
+    ),
+    chains: Optional[str] = typer.Option(
+        None,
+        help="Chain pairs to analyze, e.g. 'H:L,H:A' "
+        "(auto-detect if omitted)",
+    ),
+    distance_cutoff: float = typer.Option(
+        8.0, help="Distance cutoff (angstroms) for interface residues"
+    ),
+    no_binding_energy: bool = typer.Option(
+        False, help="Skip binding energy (ddG) calculation"
+    ),
+    shape_complementarity: bool = typer.Option(
+        False,
+        "--shape-complementarity",
+        help="Calculate shape complementarity (experimental)",
+    ),
+    pack_separated: bool = typer.Option(
+        False, help="Repack side chains on separated partners"
+    ),
+    relax_separated: bool = typer.Option(
+        False, help="Minimize separated partners after repacking"
+    ),
+    constrained: bool = typer.Option(
+        False,
+        help="Use constrained minimization for binding energy calculation",
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable verbose output"
+    ),
+):
+    """Analyze protein-protein interface properties."""
+    _setup_logging(verbose)
+    _validate_input(input_file)
+
+    from boundry.config import DesignConfig, InterfaceConfig, RelaxConfig
+    from boundry.operations import analyze_interface as _analyze
 
     interface_config = InterfaceConfig(
-        enabled=opts.analyze_interface,
-        distance_cutoff=opts.interface_distance_cutoff,
+        enabled=True,
+        distance_cutoff=distance_cutoff,
         chain_pairs=(
-            _parse_chain_pairs(opts.interface_chains)
-            if opts.interface_chains
-            else None
+            _parse_chain_pairs(chains) if chains else None
         ),
-        calculate_binding_energy=not opts.no_binding_energy,
+        calculate_binding_energy=not no_binding_energy,
         calculate_sasa=True,
-        calculate_shape_complementarity=opts.calculate_shape_complementarity,
-        pack_separated=opts.pack_separated,
-        relax_separated_chains=opts.relax_separated,
+        calculate_shape_complementarity=shape_complementarity,
+        pack_separated=pack_separated,
+        relax_separated_chains=relax_separated,
     )
 
-    pipeline_config = PipelineConfig(
-        mode=mode,
-        n_iterations=opts.n_iter,
-        n_outputs=opts.n_outputs,
-        scorefile=opts.scorefile,
-        verbose=opts.verbose,
-        remove_waters=not opts.keep_waters,
-        design=design_config,
-        relax=relax_config,
-        idealize=idealize_config,
-        interface=interface_config,
+    relaxer = None
+    designer = None
+
+    if not no_binding_energy:
+        from boundry.relaxer import Relaxer
+
+        relaxer = Relaxer(RelaxConfig(constrained=constrained))
+
+    if pack_separated:
+        from boundry.designer import Designer
+        from boundry.weights import ensure_weights
+
+        ensure_weights(verbose=verbose)
+        designer = Designer(DesignConfig())
+
+    result = _analyze(
+        input_file,
+        config=interface_config,
+        relaxer=relaxer,
+        designer=designer,
     )
 
-    # Run pipeline
-    try:
-        pipeline = Pipeline(pipeline_config)
-        results = pipeline.run(
-            input_pdb=opts.input,
-            output_pdb=opts.output,
-            resfile=opts.resfile,
+    # Print results to stdout
+    if result.interface_info:
+        typer.echo(result.interface_info.summary)
+    if result.binding_energy:
+        typer.echo(
+            f"Binding energy (ddG): "
+            f"{result.binding_energy.binding_energy:.2f} kcal/mol"
+        )
+    if result.sasa:
+        typer.echo(
+            f"Buried SASA: {result.sasa.buried_sasa:.1f} sq. angstroms"
+        )
+    if result.shape_complementarity:
+        typer.echo(
+            f"Shape complementarity: "
+            f"{result.shape_complementarity.sc_score:.3f}"
         )
 
-        # Summary
-        logger.info("=" * 50)
-        logger.info("Boundry completed successfully!")
-        logger.info(f"Generated {len(results['outputs'])} output(s)")
 
-        for output_result in results["outputs"]:
-            logger.info(f"  {output_result['output_path']}")
-            if "final_energy" in output_result:
-                energy = output_result["final_energy"]
-                logger.info(f"    Final energy: {energy:.2f} kcal/mol")
+@app.command()
+def run(
+    workflow_file: Path = typer.Argument(
+        ..., metavar="WORKFLOW", help="YAML workflow file"
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable verbose output"
+    ),
+):
+    """Execute a YAML workflow."""
+    _setup_logging(verbose)
 
-        if opts.scorefile:
-            logger.info(f"Scorefile: {opts.scorefile}")
+    if not workflow_file.exists():
+        typer.echo(
+            f"Error: Workflow file not found: {workflow_file}", err=True
+        )
+        raise typer.Exit(code=1)
 
-        return 0
+    try:
+        from boundry.workflow import Workflow
+    except ImportError:
+        typer.echo(
+            "Error: Workflow system not available. "
+            "Install pyyaml: pip install pyyaml",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-        return 130
-    except Exception as e:
-        logger.exception(f"Pipeline failed: {e}")
-        return 1
+    workflow = Workflow.from_yaml(workflow_file)
+    workflow.run()
+
+
+# -------------------------------------------------------------------
+# Entry point
+# -------------------------------------------------------------------
+
+
+def main():
+    """CLI entry point (called by ``boundry`` console script)."""
+    app()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

@@ -1,418 +1,268 @@
-"""Tests for boundry.cli module."""
+"""Tests for boundry.cli module (Typer-based CLI)."""
 
 import pytest
+from typer.testing import CliRunner
 
-from boundry.cli import create_parser
+from boundry.cli import app
 
-
-class TestCreateParser:
-    """Tests for create_parser function."""
-
-    def test_parser_creation(self):
-        """Test that parser is created successfully."""
-        parser = create_parser()
-        assert parser is not None
-        assert parser.prog == "boundry"
-
-    def test_required_arguments(self):
-        """Test that input and output are required."""
-        parser = create_parser()
-
-        # Should fail without required args
-        with pytest.raises(SystemExit):
-            parser.parse_args([])
-
-    def test_input_argument(self, tmp_path):
-        """Test input argument parsing."""
-        parser = create_parser()
-        input_file = tmp_path / "input.pdb"
-        output_file = tmp_path / "output.pdb"
-
-        args = parser.parse_args(
-            ["-i", str(input_file), "-o", str(output_file)]
-        )
-        assert args.input == input_file
-        assert args.output == output_file
-
-    def test_input_long_form(self, tmp_path):
-        """Test input argument long form."""
-        parser = create_parser()
-        input_file = tmp_path / "input.pdb"
-        output_file = tmp_path / "output.pdb"
-
-        args = parser.parse_args(
-            ["--input", str(input_file), "--output", str(output_file)]
-        )
-        assert args.input == input_file
-        assert args.output == output_file
+runner = CliRunner()
 
 
-class TestModeSelection:
-    """Tests for mode selection arguments."""
+class TestAppStructure:
+    """Tests for the CLI app structure and subcommands."""
 
-    def test_default_mode(self, tmp_path):
-        """Test that default mode is relax."""
-        parser = create_parser()
-        args = parser.parse_args(
-            ["-i", str(tmp_path / "in.pdb"), "-o", str(tmp_path / "out.pdb")]
-        )
+    def test_no_args_shows_help(self):
+        """Test that running with no args shows help text."""
+        result = runner.invoke(app, [])
+        # Typer shows help and exits (exit code may be 0 or 2)
+        assert "idealize" in result.output or "Usage" in result.output
 
-        # All mode flags should be False by default (relax is implicit)
-        assert args.relax is False
-        assert args.repack_only is False
-        assert args.no_repack is False
-        assert args.design is False
-        assert args.design_only is False
+    def test_help_flag(self):
+        """Test --help flag on the main app."""
+        result = runner.invoke(app, ["--help"])
+        assert result.exit_code == 0
+        assert "idealize" in result.output
+        assert "minimize" in result.output
+        assert "repack" in result.output
+        assert "relax" in result.output
+        assert "mpnn" in result.output
+        assert "design" in result.output
+        assert "analyze-interface" in result.output
+        assert "run" in result.output
 
-    def test_relax_flag(self, tmp_path):
-        """Test --relax flag."""
-        parser = create_parser()
-        args = parser.parse_args(
+
+class TestIdealize:
+    """Tests for the idealize subcommand."""
+
+    def test_help(self):
+        """Test idealize --help."""
+        result = runner.invoke(app, ["idealize", "--help"])
+        assert result.exit_code == 0
+        assert "backbone geometry" in result.output.lower()
+
+    def test_missing_args(self):
+        """Test idealize with no arguments fails."""
+        result = runner.invoke(app, ["idealize"])
+        assert result.exit_code != 0
+
+    def test_missing_input_file(self, tmp_path):
+        """Test idealize with nonexistent input file."""
+        result = runner.invoke(
+            app,
             [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
+                "idealize",
+                str(tmp_path / "nonexistent.pdb"),
                 str(tmp_path / "out.pdb"),
-                "--relax",
-            ]
+            ],
         )
-        assert args.relax is True
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower()
 
-    def test_repack_only_flag(self, tmp_path):
-        """Test --repack-only flag."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
-                str(tmp_path / "out.pdb"),
-                "--repack-only",
-            ]
+    def test_unsupported_format(self, tmp_path):
+        """Test idealize with unsupported file format."""
+        bad_file = tmp_path / "input.xyz"
+        bad_file.write_text("dummy")
+        result = runner.invoke(
+            app,
+            ["idealize", str(bad_file), str(tmp_path / "out.pdb")],
         )
-        assert args.repack_only is True
+        assert result.exit_code != 0
+        assert "unsupported" in result.output.lower()
 
-    def test_no_repack_flag(self, tmp_path):
-        """Test --no-repack flag."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
-                str(tmp_path / "out.pdb"),
-                "--no-repack",
-            ]
+
+class TestMinimize:
+    """Tests for the minimize subcommand."""
+
+    def test_help(self):
+        """Test minimize --help."""
+        result = runner.invoke(app, ["minimize", "--help"])
+        assert result.exit_code == 0
+        assert "energy minimization" in result.output.lower()
+
+    def test_missing_args(self):
+        """Test minimize with no arguments fails."""
+        result = runner.invoke(app, ["minimize"])
+        assert result.exit_code != 0
+
+    def test_has_constrained_option(self):
+        """Test that --constrained option is available."""
+        result = runner.invoke(app, ["minimize", "--help"])
+        assert "--constrained" in result.output
+
+    def test_has_pre_idealize_option(self):
+        """Test that --pre-idealize option is available."""
+        result = runner.invoke(app, ["minimize", "--help"])
+        assert "--pre-idealize" in result.output
+
+
+class TestRepack:
+    """Tests for the repack subcommand."""
+
+    def test_help(self):
+        """Test repack --help."""
+        result = runner.invoke(app, ["repack", "--help"])
+        assert result.exit_code == 0
+        assert "repack" in result.output.lower()
+
+    def test_has_resfile_option(self):
+        """Test that --resfile option is available."""
+        result = runner.invoke(app, ["repack", "--help"])
+        assert "--resfile" in result.output
+
+    def test_has_temperature_option(self):
+        """Test that --temperature option is available."""
+        result = runner.invoke(app, ["repack", "--help"])
+        assert "--temperature" in result.output
+
+    def test_has_model_type_option(self):
+        """Test that --model-type option is available."""
+        result = runner.invoke(app, ["repack", "--help"])
+        assert "--model-type" in result.output
+
+
+class TestRelax:
+    """Tests for the relax subcommand."""
+
+    def test_help(self):
+        """Test relax --help."""
+        result = runner.invoke(app, ["relax", "--help"])
+        assert result.exit_code == 0
+        assert "repacking" in result.output.lower()
+
+    def test_has_n_iter_option(self):
+        """Test that --n-iter option is available."""
+        result = runner.invoke(app, ["relax", "--help"])
+        assert "--n-iter" in result.output
+
+    def test_has_design_and_relax_options(self):
+        """Test that both design and relaxation options are available."""
+        result = runner.invoke(app, ["relax", "--help"])
+        assert "--temperature" in result.output
+        assert "--constrained" in result.output
+        assert "--stiffness" in result.output
+
+
+class TestMpnn:
+    """Tests for the mpnn subcommand."""
+
+    def test_help(self):
+        """Test mpnn --help."""
+        result = runner.invoke(app, ["mpnn", "--help"])
+        assert result.exit_code == 0
+        assert "sequence design" in result.output.lower()
+
+    def test_has_design_options(self):
+        """Test that design options are available."""
+        result = runner.invoke(app, ["mpnn", "--help"])
+        assert "--resfile" in result.output
+        assert "--temperature" in result.output
+        assert "--model-type" in result.output
+        assert "--seed" in result.output
+
+
+class TestDesign:
+    """Tests for the design subcommand."""
+
+    def test_help(self):
+        """Test design --help."""
+        result = runner.invoke(app, ["design", "--help"])
+        assert result.exit_code == 0
+        assert "design" in result.output.lower()
+
+    def test_has_n_iter_option(self):
+        """Test that --n-iter option is available."""
+        result = runner.invoke(app, ["design", "--help"])
+        assert "--n-iter" in result.output
+
+    def test_has_design_and_relax_options(self):
+        """Test that both design and relaxation options are available."""
+        result = runner.invoke(app, ["design", "--help"])
+        assert "--temperature" in result.output
+        assert "--constrained" in result.output
+        assert "--model-type" in result.output
+
+
+class TestAnalyzeInterface:
+    """Tests for the analyze-interface subcommand."""
+
+    def test_help(self):
+        """Test analyze-interface --help."""
+        result = runner.invoke(app, ["analyze-interface", "--help"])
+        assert result.exit_code == 0
+        assert "interface" in result.output.lower()
+
+    def test_has_chains_option(self):
+        """Test that --chains option is available."""
+        result = runner.invoke(app, ["analyze-interface", "--help"])
+        assert "--chains" in result.output
+
+    def test_has_analysis_options(self):
+        """Test that analysis options are available."""
+        result = runner.invoke(app, ["analyze-interface", "--help"])
+        assert "--distance-cutoff" in result.output
+        assert "--no-binding-energy" in result.output
+        # Rich may truncate long option names; match prefix
+        assert "--shape-complementa" in result.output
+        assert "--pack-separated" in result.output
+
+    def test_no_output_file_argument(self):
+        """Test that analyze-interface takes only one positional arg."""
+        result = runner.invoke(app, ["analyze-interface", "--help"])
+        # Should only have INPUT, not OUTPUT
+        assert "INPUT" in result.output
+
+
+class TestRun:
+    """Tests for the run subcommand."""
+
+    def test_help(self):
+        """Test run --help."""
+        result = runner.invoke(app, ["run", "--help"])
+        assert result.exit_code == 0
+        assert "workflow" in result.output.lower()
+
+    def test_missing_workflow_file(self, tmp_path):
+        """Test run with nonexistent workflow file."""
+        result = runner.invoke(
+            app, ["run", str(tmp_path / "nonexistent.yaml")]
         )
-        assert args.no_repack is True
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower()
 
-    def test_design_flag(self, tmp_path):
-        """Test --design flag."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
-                str(tmp_path / "out.pdb"),
-                "--design",
-            ]
-        )
-        assert args.design is True
 
-    def test_design_only_flag(self, tmp_path):
-        """Test --design-only flag."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
-                str(tmp_path / "out.pdb"),
-                "--design-only",
-            ]
-        )
-        assert args.design_only is True
+class TestHelpers:
+    """Tests for CLI helper functions."""
 
-    def test_mutually_exclusive_modes(self, tmp_path):
-        """Test that mode flags are mutually exclusive."""
-        parser = create_parser()
+    def test_parse_chain_pairs(self):
+        """Test chain pair parsing."""
+        from boundry.cli import _parse_chain_pairs
 
-        # Should fail with multiple mode flags
-        with pytest.raises(SystemExit):
-            parser.parse_args(
-                [
-                    "-i",
-                    str(tmp_path / "in.pdb"),
-                    "-o",
-                    str(tmp_path / "out.pdb"),
-                    "--relax",
-                    "--design",
-                ]
+        assert _parse_chain_pairs("H:L") == [("H", "L")]
+        assert _parse_chain_pairs("H:L,H:A") == [("H", "L"), ("H", "A")]
+        assert _parse_chain_pairs("A:B, C:D") == [("A", "B"), ("C", "D")]
+
+    def test_parse_chain_pairs_empty(self):
+        """Test chain pair parsing with invalid input."""
+        from boundry.cli import _parse_chain_pairs
+
+        assert _parse_chain_pairs("") == []
+        assert _parse_chain_pairs("ABC") == []
+
+    def test_verbose_option_on_all_commands(self):
+        """Test that --verbose / -v is available on all commands."""
+        commands = [
+            "idealize",
+            "minimize",
+            "repack",
+            "relax",
+            "mpnn",
+            "design",
+            "analyze-interface",
+            "run",
+        ]
+        for cmd in commands:
+            result = runner.invoke(app, [cmd, "--help"])
+            assert "--verbose" in result.output, (
+                f"--verbose missing from {cmd}"
             )
-
-
-class TestIterationAndOutputControl:
-    """Tests for iteration and output control arguments."""
-
-    def test_default_n_iter(self, tmp_path):
-        """Test default n_iter value."""
-        parser = create_parser()
-        args = parser.parse_args(
-            ["-i", str(tmp_path / "in.pdb"), "-o", str(tmp_path / "out.pdb")]
-        )
-        assert args.n_iter == 5
-
-    def test_custom_n_iter(self, tmp_path):
-        """Test custom n_iter value."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
-                str(tmp_path / "out.pdb"),
-                "--n-iter",
-                "10",
-            ]
-        )
-        assert args.n_iter == 10
-
-    def test_default_n_outputs(self, tmp_path):
-        """Test default n_outputs value."""
-        parser = create_parser()
-        args = parser.parse_args(
-            ["-i", str(tmp_path / "in.pdb"), "-o", str(tmp_path / "out.pdb")]
-        )
-        assert args.n_outputs == 1
-
-    def test_custom_n_outputs(self, tmp_path):
-        """Test custom n_outputs value."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
-                str(tmp_path / "out.pdb"),
-                "-n",
-                "5",
-            ]
-        )
-        assert args.n_outputs == 5
-
-    def test_n_outputs_long_form(self, tmp_path):
-        """Test --n-outputs long form."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
-                str(tmp_path / "out.pdb"),
-                "--n-outputs",
-                "3",
-            ]
-        )
-        assert args.n_outputs == 3
-
-
-class TestDesignOptions:
-    """Tests for design option arguments."""
-
-    def test_default_resfile(self, tmp_path):
-        """Test default resfile is None."""
-        parser = create_parser()
-        args = parser.parse_args(
-            ["-i", str(tmp_path / "in.pdb"), "-o", str(tmp_path / "out.pdb")]
-        )
-        assert args.resfile is None
-
-    def test_resfile_argument(self, tmp_path):
-        """Test resfile argument."""
-        parser = create_parser()
-        resfile = tmp_path / "design.resfile"
-        args = parser.parse_args(
-            [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
-                str(tmp_path / "out.pdb"),
-                "--resfile",
-                str(resfile),
-            ]
-        )
-        assert args.resfile == resfile
-
-    def test_default_temperature(self, tmp_path):
-        """Test default temperature value."""
-        parser = create_parser()
-        args = parser.parse_args(
-            ["-i", str(tmp_path / "in.pdb"), "-o", str(tmp_path / "out.pdb")]
-        )
-        assert args.temperature == 0.1
-
-    def test_custom_temperature(self, tmp_path):
-        """Test custom temperature value."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
-                str(tmp_path / "out.pdb"),
-                "--temperature",
-                "0.5",
-            ]
-        )
-        assert args.temperature == 0.5
-
-    def test_default_model_type(self, tmp_path):
-        """Test default model type."""
-        parser = create_parser()
-        args = parser.parse_args(
-            ["-i", str(tmp_path / "in.pdb"), "-o", str(tmp_path / "out.pdb")]
-        )
-        assert args.model_type == "ligand_mpnn"
-
-    def test_model_type_choices(self, tmp_path):
-        """Test model type choices."""
-        parser = create_parser()
-        for model in ["protein_mpnn", "ligand_mpnn", "soluble_mpnn"]:
-            args = parser.parse_args(
-                [
-                    "-i",
-                    str(tmp_path / "in.pdb"),
-                    "-o",
-                    str(tmp_path / "out.pdb"),
-                    "--model-type",
-                    model,
-                ]
-            )
-            assert args.model_type == model
-
-
-class TestRelaxationOptions:
-    """Tests for relaxation option arguments."""
-
-    def test_default_stiffness(self, tmp_path):
-        """Test default stiffness value."""
-        parser = create_parser()
-        args = parser.parse_args(
-            ["-i", str(tmp_path / "in.pdb"), "-o", str(tmp_path / "out.pdb")]
-        )
-        assert args.stiffness == 10.0
-
-    def test_custom_stiffness(self, tmp_path):
-        """Test custom stiffness value."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
-                str(tmp_path / "out.pdb"),
-                "--stiffness",
-                "5.0",
-            ]
-        )
-        assert args.stiffness == 5.0
-
-    def test_default_max_iterations(self, tmp_path):
-        """Test default max_iterations value."""
-        parser = create_parser()
-        args = parser.parse_args(
-            ["-i", str(tmp_path / "in.pdb"), "-o", str(tmp_path / "out.pdb")]
-        )
-        assert args.max_iterations == 0
-
-
-class TestScoringOptions:
-    """Tests for scoring option arguments."""
-
-    def test_default_scorefile(self, tmp_path):
-        """Test default scorefile is None."""
-        parser = create_parser()
-        args = parser.parse_args(
-            ["-i", str(tmp_path / "in.pdb"), "-o", str(tmp_path / "out.pdb")]
-        )
-        assert args.scorefile is None
-
-    def test_scorefile_argument(self, tmp_path):
-        """Test scorefile argument."""
-        parser = create_parser()
-        scorefile = tmp_path / "scores.sc"
-        args = parser.parse_args(
-            [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
-                str(tmp_path / "out.pdb"),
-                "--scorefile",
-                str(scorefile),
-            ]
-        )
-        assert args.scorefile == scorefile
-
-
-class TestGeneralOptions:
-    """Tests for general option arguments."""
-
-    def test_default_verbose(self, tmp_path):
-        """Test default verbose is False."""
-        parser = create_parser()
-        args = parser.parse_args(
-            ["-i", str(tmp_path / "in.pdb"), "-o", str(tmp_path / "out.pdb")]
-        )
-        assert args.verbose is False
-
-    def test_verbose_flag(self, tmp_path):
-        """Test -v/--verbose flag."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
-                str(tmp_path / "out.pdb"),
-                "-v",
-            ]
-        )
-        assert args.verbose is True
-
-    def test_verbose_long_form(self, tmp_path):
-        """Test --verbose long form."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
-                str(tmp_path / "out.pdb"),
-                "--verbose",
-            ]
-        )
-        assert args.verbose is True
-
-    def test_default_seed(self, tmp_path):
-        """Test default seed is None."""
-        parser = create_parser()
-        args = parser.parse_args(
-            ["-i", str(tmp_path / "in.pdb"), "-o", str(tmp_path / "out.pdb")]
-        )
-        assert args.seed is None
-
-    def test_seed_argument(self, tmp_path):
-        """Test seed argument."""
-        parser = create_parser()
-        args = parser.parse_args(
-            [
-                "-i",
-                str(tmp_path / "in.pdb"),
-                "-o",
-                str(tmp_path / "out.pdb"),
-                "--seed",
-                "42",
-            ]
-        )
-        assert args.seed == 42
+            assert "-v" in result.output, f"-v missing from {cmd}"

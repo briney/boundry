@@ -26,60 +26,41 @@ class TestCLIHelp:
         )
         assert result.returncode == 0
         assert "boundry" in result.stdout.lower()
-        assert "usage" in result.stdout.lower()
 
-    def test_help_shows_modes(self):
-        """Test that help shows all available modes."""
+    def test_help_shows_subcommands(self):
+        """Test that help shows all available subcommands."""
         result = subprocess.run(
             [sys.executable, "-m", "boundry.cli", "--help"],
             capture_output=True,
             text=True,
         )
-        assert "--relax" in result.stdout
-        assert "--design" in result.stdout
-        assert "--no-repack" in result.stdout
-        assert "--repack-only" in result.stdout
-        assert "--design-only" in result.stdout
+        assert "idealize" in result.stdout
+        assert "minimize" in result.stdout
+        assert "repack" in result.stdout
+        assert "relax" in result.stdout
+        assert "mpnn" in result.stdout
+        assert "design" in result.stdout
+        assert "analyze-interface" in result.stdout
+        assert "run" in result.stdout
 
-    def test_help_shows_required_args(self):
-        """Test that help shows required arguments."""
+    def test_subcommand_help_shows_positional_args(self):
+        """Test that subcommand help shows positional INPUT/OUTPUT args."""
         result = subprocess.run(
-            [sys.executable, "-m", "boundry.cli", "--help"],
+            [sys.executable, "-m", "boundry.cli", "minimize", "--help"],
             capture_output=True,
             text=True,
         )
-        assert "-i" in result.stdout or "--input" in result.stdout
-        assert "-o" in result.stdout or "--output" in result.stdout
+        assert "INPUT" in result.stdout
+        assert "OUTPUT" in result.stdout
 
 
 class TestCLIArgumentValidation:
     """Tests for CLI argument validation."""
 
-    def test_missing_input_fails(self, tmp_path):
-        """Test that missing input file fails with error."""
+    def test_missing_args_fails(self):
+        """Test that calling a subcommand with no args fails."""
         result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "boundry.cli",
-                "-o",
-                str(tmp_path / "output.pdb"),
-            ],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode != 0
-
-    def test_missing_output_fails(self, small_peptide_pdb):
-        """Test that missing output file fails with error."""
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "boundry.cli",
-                "-i",
-                str(small_peptide_pdb),
-            ],
+            [sys.executable, "-m", "boundry.cli", "minimize"],
             capture_output=True,
             text=True,
         )
@@ -92,107 +73,55 @@ class TestCLIArgumentValidation:
                 sys.executable,
                 "-m",
                 "boundry.cli",
-                "-i",
+                "minimize",
                 str(tmp_path / "nonexistent.pdb"),
-                "-o",
                 str(tmp_path / "output.pdb"),
             ],
             capture_output=True,
             text=True,
         )
         assert result.returncode != 0
-        assert (
-            "not found" in result.stderr.lower()
-            or "error" in result.stderr.lower()
-        )
+        combined = result.stderr + result.stdout
+        assert "not found" in combined.lower()
 
-    def test_nonexistent_resfile_fails(self, small_peptide_pdb, tmp_path):
-        """Test that nonexistent resfile fails with error."""
+    def test_unsupported_format_fails(self, tmp_path):
+        """Test that unsupported file format fails with error."""
+        bad_file = tmp_path / "input.xyz"
+        bad_file.write_text("dummy")
         result = subprocess.run(
             [
                 sys.executable,
                 "-m",
                 "boundry.cli",
-                "-i",
-                str(small_peptide_pdb),
-                "-o",
+                "idealize",
+                str(bad_file),
                 str(tmp_path / "output.pdb"),
-                "--resfile",
-                str(tmp_path / "nonexistent.resfile"),
-                "--no-repack",
             ],
             capture_output=True,
             text=True,
         )
         assert result.returncode != 0
-
-
-class TestCLIMutuallyExclusiveModes:
-    """Tests for mutually exclusive mode arguments."""
-
-    def test_relax_and_design_exclusive(self, small_peptide_pdb, tmp_path):
-        """Test that --relax and --design are mutually exclusive."""
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "boundry.cli",
-                "-i",
-                str(small_peptide_pdb),
-                "-o",
-                str(tmp_path / "output.pdb"),
-                "--relax",
-                "--design",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode != 0
-        assert "not allowed" in result.stderr.lower()
-
-    def test_no_repack_and_repack_only_exclusive(
-        self, small_peptide_pdb, tmp_path
-    ):
-        """Test that --no-repack and --repack-only are mutually exclusive."""
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "boundry.cli",
-                "-i",
-                str(small_peptide_pdb),
-                "-o",
-                str(tmp_path / "output.pdb"),
-                "--no-repack",
-                "--repack-only",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode != 0
+        combined = result.stderr + result.stdout
+        assert "unsupported" in combined.lower()
 
 
 @pytest.mark.integration
-class TestCLINoRepackMode:
-    """Integration tests for CLI --no-repack mode."""
+class TestCLIMinimize:
+    """Integration tests for CLI minimize subcommand."""
 
-    def test_no_repack_completes(
+    def test_minimize_completes(
         self, small_peptide_pdb, tmp_path, weights_available
     ):
-        """Test that --no-repack mode completes successfully."""
+        """Test that minimize completes successfully."""
         output_pdb = tmp_path / "minimized.pdb"
         result = subprocess.run(
             [
                 sys.executable,
                 "-m",
                 "boundry.cli",
-                "-i",
+                "minimize",
                 str(small_peptide_pdb),
-                "-o",
                 str(output_pdb),
-                "--no-repack",
-                "--n-iter",
-                "1",
                 "--max-iterations",
                 "50",
             ],
@@ -203,23 +132,19 @@ class TestCLINoRepackMode:
         assert result.returncode == 0, f"CLI failed with: {result.stderr}"
         assert output_pdb.exists()
 
-    def test_no_repack_creates_output(
+    def test_minimize_creates_valid_output(
         self, small_peptide_pdb, tmp_path, weights_available
     ):
-        """Test that --no-repack creates valid PDB output."""
+        """Test that minimize creates valid PDB output."""
         output_pdb = tmp_path / "minimized.pdb"
         subprocess.run(
             [
                 sys.executable,
                 "-m",
                 "boundry.cli",
-                "-i",
+                "minimize",
                 str(small_peptide_pdb),
-                "-o",
                 str(output_pdb),
-                "--no-repack",
-                "--n-iter",
-                "1",
                 "--max-iterations",
                 "50",
             ],
@@ -230,90 +155,26 @@ class TestCLINoRepackMode:
         content = output_pdb.read_text()
         assert "ATOM" in content
 
-    def test_no_repack_multiple_outputs(
-        self, small_peptide_pdb, tmp_path, weights_available
-    ):
-        """Test --no-repack with multiple outputs."""
-        output_pdb = tmp_path / "minimized.pdb"
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "boundry.cli",
-                "-i",
-                str(small_peptide_pdb),
-                "-o",
-                str(output_pdb),
-                "--no-repack",
-                "-n",
-                "2",
-                "--n-iter",
-                "1",
-                "--max-iterations",
-                "50",
-            ],
-            capture_output=True,
-            text=True,
-        )
-
-        assert result.returncode == 0
-        assert (tmp_path / "minimized_1.pdb").exists()
-        assert (tmp_path / "minimized_2.pdb").exists()
-
-    def test_no_repack_with_scorefile(
-        self, small_peptide_pdb, tmp_path, weights_available
-    ):
-        """Test --no-repack with scorefile output."""
-        output_pdb = tmp_path / "minimized.pdb"
-        scorefile = tmp_path / "scores.sc"
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "boundry.cli",
-                "-i",
-                str(small_peptide_pdb),
-                "-o",
-                str(output_pdb),
-                "--no-repack",
-                "--n-iter",
-                "1",
-                "--max-iterations",
-                "50",
-                "--scorefile",
-                str(scorefile),
-            ],
-            capture_output=True,
-            text=True,
-        )
-
-        assert result.returncode == 0
-        assert scorefile.exists()
-        content = scorefile.read_text()
-        assert "SCORE:" in content
-
 
 @pytest.mark.integration
 @pytest.mark.skipif(
     not weights_available(),
     reason="LigandMPNN weights not downloaded",
 )
-class TestCLIDesignMode:
-    """Integration tests for CLI --design mode (requires weights)."""
+class TestCLIDesign:
+    """Integration tests for CLI design subcommand (requires weights)."""
 
-    def test_design_mode_completes(self, small_peptide_pdb, tmp_path):
-        """Test that --design mode completes successfully."""
+    def test_design_completes(self, small_peptide_pdb, tmp_path):
+        """Test that design subcommand completes successfully."""
         output_pdb = tmp_path / "designed.pdb"
         result = subprocess.run(
             [
                 sys.executable,
                 "-m",
                 "boundry.cli",
-                "-i",
+                "design",
                 str(small_peptide_pdb),
-                "-o",
                 str(output_pdb),
-                "--design",
                 "--n-iter",
                 "1",
                 "--max-iterations",
@@ -330,8 +191,7 @@ class TestCLIDesignMode:
         assert output_pdb.exists()
 
     def test_design_with_resfile(self, small_peptide_pdb, tmp_path):
-        """Test --design with resfile constraints."""
-        # Create resfile
+        """Test design with resfile constraints."""
         resfile = tmp_path / "design.resfile"
         resfile.write_text(
             """NATAA
@@ -350,11 +210,9 @@ START
                 sys.executable,
                 "-m",
                 "boundry.cli",
-                "-i",
+                "design",
                 str(small_peptide_pdb),
-                "-o",
                 str(output_pdb),
-                "--design",
                 "--resfile",
                 str(resfile),
                 "--n-iter",
@@ -378,20 +236,19 @@ START
     not weights_available(),
     reason="LigandMPNN weights not downloaded",
 )
-class TestCLIRelaxMode:
-    """Integration tests for CLI default relax mode (requires weights)."""
+class TestCLIRelax:
+    """Integration tests for CLI relax subcommand (requires weights)."""
 
-    def test_default_mode_completes(self, small_peptide_pdb, tmp_path):
-        """Test that default mode (relax) completes successfully."""
+    def test_relax_completes(self, small_peptide_pdb, tmp_path):
+        """Test that relax subcommand completes successfully."""
         output_pdb = tmp_path / "relaxed.pdb"
         result = subprocess.run(
             [
                 sys.executable,
                 "-m",
                 "boundry.cli",
-                "-i",
+                "relax",
                 str(small_peptide_pdb),
-                "-o",
                 str(output_pdb),
                 "--n-iter",
                 "1",
@@ -423,13 +280,11 @@ class TestCLIVerbosity:
                 sys.executable,
                 "-m",
                 "boundry.cli",
-                "-i",
+                "minimize",
                 str(small_peptide_pdb),
-                "-o",
                 str(output_pdb),
-                "--no-repack",
-                "--n-iter",
-                "1",
+                "--max-iterations",
+                "50",
                 "-v",
             ],
             capture_output=True,

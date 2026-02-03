@@ -1,0 +1,23 @@
+# Design and analyze workflow
+#
+# Runs iterative sequence design + energy minimization, then
+# analyzes the protein-protein interface of the result.
+#
+# Usage:
+#   boundry run examples/workflows/design_and_analyze.yaml
+
+input: complex.pdb
+output: designed.pdb
+
+steps:
+  - operation: design
+    params:
+      n_iterations: 3
+      temperature: 0.2
+      model_type: ligand_mpnn
+
+  - operation: analyze_interface
+    params:
+      distance_cutoff: 8.0
+      calculate_sasa: true
+      calculate_binding_energy: true

@@ -31,6 +31,8 @@ dependencies = [
     "ml-collections",
     "dm-tree",
     "openmm",
+    "typer>=0.9.0",
+    "pyyaml>=6.0",
 ]
 
 [project.urls]
