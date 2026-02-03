@@ -107,7 +107,7 @@ class TestCLIInterfaceArgs:
         """Test --shape-complementarity option is available."""
         result = runner.invoke(app, ["analyze-interface", "--help"])
         # Rich may truncate long option names
-        assert "--shape-complementa" in result.output
+        assert "--shape-complement" in result.output
 
     def test_pack_separated_option(self):
         """Test --pack-separated option is available."""

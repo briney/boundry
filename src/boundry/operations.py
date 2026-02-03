@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     )
     from boundry.designer import Designer
     from boundry.interface import InterfaceInfo
+    from boundry.interface_position_energetics import PerPositionResult
     from boundry.relaxer import Relaxer
     from boundry.surface_area import (
         ShapeComplementarityResult,
@@ -105,6 +106,7 @@ class InterfaceAnalysisResult:
     binding_energy: Optional[BindingEnergyResult] = None
     sasa: Optional[SurfaceAreaResult] = None
     shape_complementarity: Optional[ShapeComplementarityResult] = None
+    per_position: Optional[PerPositionResult] = None
 
 
 # -------------------------------------------------------------------
@@ -709,5 +711,36 @@ def analyze_interface(
             f"Shape complementarity: "
             f"{result.shape_complementarity.sc_score:.3f}"
         )
+
+    # Per-position energetics (alanine scan and/or dG_i)
+    if (config.per_position or config.alanine_scan) and relaxer is not None:
+        from boundry.interface_position_energetics import (
+            compute_position_energetics,
+            write_position_csv,
+        )
+
+        sasa_delta = None
+        if result.sasa is not None:
+            sasa_delta = result.sasa.interface_residue_delta_sasa
+
+        logger.info("Computing per-position energetics...")
+        result.per_position = compute_position_energetics(
+            pdb_string,
+            interface_info.interface_residues,
+            interface_info.chain_pairs,
+            relaxer,
+            designer=designer,
+            distance_cutoff=config.distance_cutoff,
+            position_repack=config.position_repack,
+            relax_separated=config.relax_separated_chains,
+            scan_chains=config.scan_chains,
+            max_scan_sites=config.max_scan_sites,
+            run_per_position=config.per_position,
+            run_alanine_scan=config.alanine_scan,
+            sasa_delta=sasa_delta,
+        )
+
+        if config.position_csv is not None:
+            write_position_csv(result.per_position, config.position_csv)
 
     return result

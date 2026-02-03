@@ -533,7 +533,7 @@ def analyze_interface(
         8.0, help="Distance cutoff (angstroms) for interface residues"
     ),
     no_binding_energy: bool = typer.Option(
-        False, help="Skip binding energy (ddG) calculation"
+        False, help="Skip binding energy (dG) calculation"
     ),
     shape_complementarity: bool = typer.Option(
         False,
@@ -550,16 +550,72 @@ def analyze_interface(
         False,
         help="Use constrained minimization for binding energy calculation",
     ),
+    per_position: bool = typer.Option(
+        False,
+        "--per-position",
+        help="Compute IAM-like per-residue dG_i via residue removal",
+    ),
+    alanine_scan: bool = typer.Option(
+        False,
+        "--alanine-scan",
+        help="Compute per-residue AlaScan ΔΔG (GLY/PRO/ALA skipped)",
+    ),
+    scan_chains: Optional[str] = typer.Option(
+        None,
+        "--scan-chains",
+        help="Restrict per-position / alanine scan to these chains "
+        "(comma-separated, e.g. 'A,B')",
+    ),
+    position_repack: str = typer.Option(
+        "both",
+        "--position-repack",
+        help="Repack policy for per-position scans: "
+        "both (bound+unbound), unbound, none",
+    ),
+    position_csv: Optional[Path] = typer.Option(
+        None,
+        "--position-csv",
+        help="Write per-position results to CSV file",
+    ),
+    max_scan_sites: Optional[int] = typer.Option(
+        None,
+        "--max-scan-sites",
+        help="Limit number of residues scanned "
+        "(useful for large interfaces)",
+    ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Enable verbose output"
     ),
 ):
-    """Analyze protein-protein interface properties."""
+    """Analyze protein-protein interface properties.
+
+    Identifies interface residues by distance cutoff, computes binding
+    energy (dG), buried SASA, and optionally shape complementarity.
+
+    Per-position flags (--per-position, --alanine-scan) enable Rosetta-
+    like per-residue energetics. Results follow Rosetta sign conventions:
+    dG = E_bound - E_unbound (negative = favorable binding), and
+    ΔΔG = dG_ala - dG_wt (positive = destabilising hotspot).
+    """
     _setup_logging(verbose)
     _validate_input(input_file)
 
+    if position_repack not in ("both", "unbound", "none"):
+        typer.echo(
+            f"Error: --position-repack must be 'both', 'unbound', "
+            f"or 'none' (got '{position_repack}')",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     from boundry.config import DesignConfig, InterfaceConfig, RelaxConfig
     from boundry.operations import analyze_interface as _analyze
+
+    parsed_scan_chains = None
+    if scan_chains:
+        parsed_scan_chains = [
+            c.strip() for c in scan_chains.split(",") if c.strip()
+        ]
 
     interface_config = InterfaceConfig(
         enabled=True,
@@ -572,17 +628,32 @@ def analyze_interface(
         calculate_shape_complementarity=shape_complementarity,
         pack_separated=pack_separated,
         relax_separated_chains=relax_separated,
+        per_position=per_position,
+        alanine_scan=alanine_scan,
+        scan_chains=parsed_scan_chains,
+        position_repack=position_repack,
+        position_csv=position_csv,
+        max_scan_sites=max_scan_sites,
     )
 
     relaxer = None
     designer = None
 
-    if not no_binding_energy:
+    needs_relaxer = not no_binding_energy or per_position or alanine_scan
+    needs_designer = (
+        pack_separated
+        or (
+            (per_position or alanine_scan)
+            and position_repack != "none"
+        )
+    )
+
+    if needs_relaxer:
         from boundry.relaxer import Relaxer
 
         relaxer = Relaxer(RelaxConfig(constrained=constrained))
 
-    if pack_separated:
+    if needs_designer:
         from boundry.designer import Designer
         from boundry.weights import ensure_weights
 
@@ -600,9 +671,10 @@ def analyze_interface(
     if result.interface_info:
         typer.echo(result.interface_info.summary)
     if result.binding_energy:
+        # Display with Rosetta sign: dG = E_bound - E_unbound
+        dG_rosetta = -result.binding_energy.binding_energy
         typer.echo(
-            f"Binding energy (ddG): "
-            f"{result.binding_energy.binding_energy:.2f} kcal/mol"
+            f"dG (Rosetta sign): {dG_rosetta:.2f} kcal/mol"
         )
     if result.sasa:
         typer.echo(
@@ -613,6 +685,21 @@ def analyze_interface(
             f"Shape complementarity: "
             f"{result.shape_complementarity.sc_score:.3f}"
         )
+    if result.per_position:
+        from boundry.interface_position_energetics import (
+            format_hotspot_table,
+        )
+
+        if result.per_position.dG_wt is not None:
+            typer.echo(
+                f"dG_wt (per-position): "
+                f"{result.per_position.dG_wt:.2f} kcal/mol"
+            )
+        hotspot_table = format_hotspot_table(result.per_position)
+        if hotspot_table:
+            typer.echo(hotspot_table)
+        if position_csv:
+            typer.echo(f"Per-position CSV: {position_csv}")
 
 
 @app.command()

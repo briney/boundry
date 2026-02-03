@@ -202,7 +202,7 @@ class TestAnalyzeInterface:
         assert "--distance-cutoff" in result.output
         assert "--no-binding-energy" in result.output
         # Rich may truncate long option names; match prefix
-        assert "--shape-complementa" in result.output
+        assert "--shape-complement" in result.output
         assert "--pack-separated" in result.output
 
     def test_no_output_file_argument(self):
