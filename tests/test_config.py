@@ -118,6 +118,8 @@ class TestInterfaceConfig:
         assert config.pack_separated is False
         assert config.relax_separated_chains is False
         assert config.sasa_probe_radius == 1.4
+        assert config.show_progress is False
+        assert config.quiet is False
 
     def test_custom_chain_pairs(self):
         """Test setting chain pairs."""
@@ -127,6 +129,15 @@ class TestInterfaceConfig:
         )
         assert config.enabled is True
         assert config.chain_pairs == [("H", "A"), ("L", "A")]
+
+    def test_show_progress_and_quiet(self):
+        """Test setting show_progress and quiet flags."""
+        config = InterfaceConfig(
+            show_progress=True,
+            quiet=True,
+        )
+        assert config.show_progress is True
+        assert config.quiet is True
 
 
 class TestPipelineConfig:

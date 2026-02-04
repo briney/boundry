@@ -72,6 +72,8 @@ class InterfaceConfig:
     position_repack: PositionRepackMode = "both"  # Repack policy for scans
     position_csv: Optional[Path] = None  # Write per-position CSV to this path
     max_scan_sites: Optional[int] = None  # Limit number of residues scanned
+    show_progress: bool = False  # Show tqdm progress bar for per-position scans
+    quiet: bool = False  # Suppress dependency logging/stderr noise
 
 
 @dataclass

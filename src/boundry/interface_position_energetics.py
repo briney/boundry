@@ -9,8 +9,10 @@ conventions follow Rosetta:
 """
 
 import csv
+import contextlib
 import io
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
@@ -34,6 +36,30 @@ _ALANINE_SCAN_SKIP = {"ALA", "GLY", "PRO"}
 
 # Atoms retained when mutating to alanine
 _ALA_ATOMS = {"N", "CA", "C", "O", "CB", "OXT", "H", "HA"}
+
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _suppress_stderr():
+    """Temporarily redirect fd 2 (stderr) to /dev/null.
+
+    Catches C library output from PDBFixer, OpenMM, and FreeSASA that
+    bypasses Python logging.
+    """
+    stderr_fd = 2
+    saved_fd = os.dup(stderr_fd)
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, stderr_fd)
+        os.close(devnull)
+        yield
+    finally:
+        os.dup2(saved_fd, stderr_fd)
+        os.close(saved_fd)
 
 
 # ------------------------------------------------------------------
@@ -274,6 +300,8 @@ def compute_alanine_scan(
     relax_separated: bool = False,
     scan_chains: Optional[List[str]] = None,
     max_scan_sites: Optional[int] = None,
+    show_progress: bool = False,
+    quiet: bool = False,
 ) -> Dict[ResidueKey, Tuple[Optional[float], Optional[float]]]:
     """Run alanine scanning on interface residues.
 
@@ -290,8 +318,23 @@ def compute_alanine_scan(
 
     results: Dict[ResidueKey, Tuple[Optional[float], Optional[float]]] = {}
 
-    for idx, ir in enumerate(scan_sites):
+    iterable = scan_sites
+    bar = None
+    if show_progress:
+        from tqdm import tqdm
+
+        bar = tqdm(
+            scan_sites, desc="Alanine scan", unit="res"
+        )
+        iterable = bar
+
+    for idx, ir in enumerate(iterable):
         key = ResidueKey(ir.chain_id, ir.residue_number, ir.insertion_code)
+
+        if bar is not None:
+            bar.set_postfix_str(
+                f"{ir.residue_name} {key}"
+            )
 
         if ir.residue_name in _ALANINE_SCAN_SKIP:
             results[key] = (None, None)
@@ -307,15 +350,17 @@ def compute_alanine_scan(
         )
 
         try:
-            dG_ala = _compute_rosetta_dG(
-                mutant_pdb,
-                relaxer,
-                chain_pairs=chain_pairs,
-                distance_cutoff=distance_cutoff,
-                pack_separated=pack_sep,
-                relax_separated=relax_separated,
-                repacker=repacker,
-            )
+            ctx = _suppress_stderr() if quiet else contextlib.nullcontext()
+            with ctx:
+                dG_ala = _compute_rosetta_dG(
+                    mutant_pdb,
+                    relaxer,
+                    chain_pairs=chain_pairs,
+                    distance_cutoff=distance_cutoff,
+                    pack_separated=pack_sep,
+                    relax_separated=relax_separated,
+                    repacker=repacker,
+                )
             delta_ddG = dG_ala - dG_wt
             results[key] = (dG_ala, delta_ddG)
             logger.info(
@@ -345,6 +390,8 @@ def compute_per_position_dG(
     relax_separated: bool = False,
     scan_chains: Optional[List[str]] = None,
     max_scan_sites: Optional[int] = None,
+    show_progress: bool = False,
+    quiet: bool = False,
 ) -> Dict[ResidueKey, Optional[float]]:
     """Compute per-residue marginal dG_i via residue removal.
 
@@ -362,8 +409,23 @@ def compute_per_position_dG(
 
     results: Dict[ResidueKey, Optional[float]] = {}
 
-    for idx, ir in enumerate(scan_sites):
+    iterable = scan_sites
+    bar = None
+    if show_progress:
+        from tqdm import tqdm
+
+        bar = tqdm(
+            scan_sites, desc="Per-position dG_i", unit="res"
+        )
+        iterable = bar
+
+    for idx, ir in enumerate(iterable):
         key = ResidueKey(ir.chain_id, ir.residue_number, ir.insertion_code)
+
+        if bar is not None:
+            bar.set_postfix_str(
+                f"{ir.residue_name} {key}"
+            )
 
         logger.info(
             f"  PerPosition [{idx + 1}/{len(scan_sites)}]: "
@@ -375,15 +437,17 @@ def compute_per_position_dG(
         )
 
         try:
-            dG_without_i = _compute_rosetta_dG(
-                removed_pdb,
-                relaxer,
-                chain_pairs=chain_pairs,
-                distance_cutoff=distance_cutoff,
-                pack_separated=pack_sep,
-                relax_separated=relax_separated,
-                repacker=repacker,
-            )
+            ctx = _suppress_stderr() if quiet else contextlib.nullcontext()
+            with ctx:
+                dG_without_i = _compute_rosetta_dG(
+                    removed_pdb,
+                    relaxer,
+                    chain_pairs=chain_pairs,
+                    distance_cutoff=distance_cutoff,
+                    pack_separated=pack_sep,
+                    relax_separated=relax_separated,
+                    repacker=repacker,
+                )
             dG_i = dG_total - dG_without_i
             results[key] = dG_i
             logger.info(
@@ -453,6 +517,8 @@ def compute_position_energetics(
     run_per_position: bool = False,
     run_alanine_scan: bool = False,
     sasa_delta: Optional[Dict[str, float]] = None,
+    show_progress: bool = False,
+    quiet: bool = False,
 ) -> PerPositionResult:
     """Run the full per-position energetics pipeline.
 
@@ -475,15 +541,17 @@ def compute_position_energetics(
     repacker = designer if pack_sep else None
 
     logger.info("Computing WT binding energy (Rosetta sign)...")
-    dG_wt = _compute_rosetta_dG(
-        pdb_string,
-        relaxer,
-        chain_pairs=chain_pairs,
-        distance_cutoff=distance_cutoff,
-        pack_separated=pack_sep,
-        relax_separated=relax_separated,
-        repacker=repacker,
-    )
+    ctx = _suppress_stderr() if quiet else contextlib.nullcontext()
+    with ctx:
+        dG_wt = _compute_rosetta_dG(
+            pdb_string,
+            relaxer,
+            chain_pairs=chain_pairs,
+            distance_cutoff=distance_cutoff,
+            pack_separated=pack_sep,
+            relax_separated=relax_separated,
+            repacker=repacker,
+        )
     logger.info(f"  dG_wt = {dG_wt:.2f} kcal/mol")
 
     # Alanine scan
@@ -504,6 +572,8 @@ def compute_position_energetics(
             relax_separated=relax_separated,
             scan_chains=scan_chains,
             max_scan_sites=max_scan_sites,
+            show_progress=show_progress,
+            quiet=quiet,
         )
 
     # Per-position dG_i
@@ -522,6 +592,8 @@ def compute_position_energetics(
             relax_separated=relax_separated,
             scan_chains=scan_chains,
             max_scan_sites=max_scan_sites,
+            show_progress=show_progress,
+            quiet=quiet,
         )
 
     # Assemble rows

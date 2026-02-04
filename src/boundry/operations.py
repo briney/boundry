@@ -823,6 +823,8 @@ def analyze_interface(
             run_per_position=config.per_position,
             run_alanine_scan=config.alanine_scan,
             sasa_delta=sasa_delta,
+            show_progress=config.show_progress,
+            quiet=config.quiet,
         )
 
         if config.position_csv is not None:

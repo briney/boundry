@@ -36,6 +36,23 @@ def _setup_logging(verbose: bool) -> None:
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    if not verbose:
+        # Suppress noisy dependency loggers
+        import warnings
+
+        for name in (
+            "openmm",
+            "pdbfixer",
+            "Bio",
+            "freesasa",
+            "torch",
+            "absl",
+        ):
+            logging.getLogger(name).setLevel(logging.ERROR)
+        warnings.filterwarnings(
+            "ignore",
+            module=r"(openmm|pdbfixer|Bio|freesasa|torch|absl)",
+        )
 
 
 def _validate_input(path: Path) -> None:
@@ -662,6 +679,8 @@ def analyze_interface(
         position_repack=position_repack,
         position_csv=position_csv,
         max_scan_sites=max_scan_sites,
+        show_progress=per_position or alanine_scan,
+        quiet=not verbose,
     )
 
     relaxer = None
