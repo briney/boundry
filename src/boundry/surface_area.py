@@ -143,6 +143,64 @@ def _compute_residue_sasa(
     return residue_sasa
 
 
+def _extract_chain_pdb_string(
+    pdb_string: str,
+    chain_id: str,
+    protein_only: bool = True,
+) -> str:
+    """
+    Extract a single chain's PDB string from a multi-chain PDB.
+
+    Args:
+        pdb_string: Full PDB file contents
+        chain_id: Chain ID to extract
+        protein_only: If True, only include ATOM records (skip HETATM)
+
+    Returns:
+        PDB string for the specified chain with proper TER/END records
+    """
+    lines = []
+    for line in pdb_string.splitlines():
+        if line.startswith("ATOM"):
+            if len(line) > 21 and line[21] == chain_id:
+                lines.append(line)
+        elif not protein_only and line.startswith("HETATM"):
+            if len(line) > 21 and line[21] == chain_id:
+                lines.append(line)
+    if lines:
+        lines.append("TER")
+    lines.append("END")
+    return "\n".join(lines) + "\n"
+
+
+def _filter_protein_pdb_string(pdb_string: str) -> str:
+    """
+    Filter a PDB string to only include protein ATOM records.
+
+    Removes HETATM records (ligands, glycans, etc.) while preserving
+    chain TER boundaries and the END record.
+
+    Args:
+        pdb_string: Full PDB file contents
+
+    Returns:
+        PDB string with only ATOM records and proper TER/END
+    """
+    lines = []
+    prev_chain = None
+    for line in pdb_string.splitlines():
+        if line.startswith("ATOM") and len(line) > 21:
+            chain_id = line[21]
+            if prev_chain is not None and chain_id != prev_chain:
+                lines.append("TER")
+            lines.append(line)
+            prev_chain = chain_id
+    if prev_chain is not None:
+        lines.append("TER")
+    lines.append("END")
+    return "\n".join(lines) + "\n"
+
+
 def calculate_surface_area(
     pdb_string: str,
     interface_residues: List[InterfaceResidue],
@@ -166,52 +224,31 @@ def calculate_surface_area(
         SurfaceAreaResult with SASA values
     """
     parser = PDBParser(QUIET=True)
-    structure = parser.get_structure("complex", io.StringIO(pdb_string))
+    # Filter to protein-only ATOM records for consistent SASA across
+    # complex and unbound calculations (excludes glycans, ligands, etc.)
+    protein_pdb_string = _filter_protein_pdb_string(pdb_string)
+    structure = parser.get_structure(
+        "complex", io.StringIO(protein_pdb_string)
+    )
 
     # Choose SASA backend
     if _HAS_FREESASA:
         complex_sasa, _, complex_res_sasa = _compute_sasa_freesasa(
-            pdb_string, probe_radius
+            protein_pdb_string, probe_radius
         )
     else:
         complex_sasa = _compute_structure_sasa(structure, probe_radius)
         complex_res_sasa = _compute_residue_sasa(structure, probe_radius)
-        complex_chain_sasa = {}
-        protein_chains = _get_protein_chains(structure, exclude_ligands=False)
-        for chain_id, _residues in protein_chains.items():
-            chain_pdb_lines = []
-            for line in pdb_string.splitlines():
-                if line.startswith(("ATOM", "HETATM")):
-                    if len(line) > 21 and line[21] == chain_id:
-                        chain_pdb_lines.append(line)
-                elif line.startswith(("END", "TER")):
-                    chain_pdb_lines.append(line)
-            chain_pdb_str = "\n".join(chain_pdb_lines)
-            if not chain_pdb_str.rstrip().endswith("END"):
-                chain_pdb_str += "\nEND\n"
-            chain_structure = parser.get_structure(
-                f"chain_{chain_id}", io.StringIO(chain_pdb_str)
-            )
-            complex_chain_sasa[chain_id] = _compute_structure_sasa(
-                chain_structure, probe_radius
-            )
 
     # Compute per-chain unbound SASA and per-residue unbound SASA
     chain_sasa_unbound: Dict[str, float] = {}
     residue_sasa_unbound: Dict[str, float] = {}
 
-    protein_chains = _get_protein_chains(structure, exclude_ligands=False)
+    protein_chains = _get_protein_chains(structure, exclude_ligands=True)
     for chain_id, _residues in protein_chains.items():
-        chain_pdb_lines = []
-        for line in pdb_string.splitlines():
-            if line.startswith(("ATOM", "HETATM")):
-                if len(line) > 21 and line[21] == chain_id:
-                    chain_pdb_lines.append(line)
-            elif line.startswith(("END", "TER")):
-                chain_pdb_lines.append(line)
-        chain_pdb_str = "\n".join(chain_pdb_lines)
-        if not chain_pdb_str.rstrip().endswith("END"):
-            chain_pdb_str += "\nEND\n"
+        chain_pdb_str = _extract_chain_pdb_string(
+            protein_pdb_string, chain_id, protein_only=True
+        )
 
         if _HAS_FREESASA:
             total, _, res_sasa = _compute_sasa_freesasa(
