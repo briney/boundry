@@ -443,14 +443,15 @@ def minimize_with_constraints(
     fixer.findMissingAtoms()
     fixer.addMissingAtoms()
 
-    # Add hydrogens
-    fixer.addMissingHydrogens(7.0)
-
     # Create force field and modeller
     force_field = openmm_app.ForceField(
         "amber14-all.xml", "amber14/tip3pfb.xml"
     )
     modeller = openmm_app.Modeller(fixer.topology, fixer.positions)
+
+    # Add hydrogens using Modeller+ForceField, which is more robust for
+    # termini/chain breaks than PDBFixer's addMissingHydrogens() in practice.
+    modeller.addHydrogens(force_field, pH=7.0)
 
     # Create system
     system = force_field.createSystem(
