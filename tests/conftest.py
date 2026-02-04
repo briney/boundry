@@ -121,6 +121,53 @@ def small_peptide_cif(tmp_path, small_peptide_cif_string):
     return path
 
 
+@pytest.fixture
+def kabat_numbered_pdb_string():
+    """A small PDB with Kabat-style insertion codes (H chain CDR-H3).
+
+    Residues 100, 100A, 100B, 101 on chain H, plus a normal chain L.
+    """
+    # fmt: off
+    return (
+        "ATOM      1  N   ALA H  98       0.000   0.000   0.000  1.00  0.00           N\n"
+        "ATOM      2  CA  ALA H  98       1.458   0.000   0.000  1.00  0.00           C\n"
+        "ATOM      3  C   ALA H  98       2.009   1.420   0.000  1.00  0.00           C\n"
+        "ATOM      4  O   ALA H  98       1.246   2.390   0.000  1.00  0.00           O\n"
+        "ATOM      5  N   ALA H  99       3.326   1.540   0.000  1.00  0.00           N\n"
+        "ATOM      6  CA  ALA H  99       3.941   2.861   0.000  1.00  0.00           C\n"
+        "ATOM      7  C   ALA H  99       5.459   2.789   0.000  1.00  0.00           C\n"
+        "ATOM      8  O   ALA H  99       6.065   1.719   0.000  1.00  0.00           O\n"
+        "ATOM      9  N   GLY H 100       6.063   3.970   0.000  1.00  0.00           N\n"
+        "ATOM     10  CA  GLY H 100       7.510   4.096   0.000  1.00  0.00           C\n"
+        "ATOM     11  C   GLY H 100       8.061   5.516   0.000  1.00  0.00           C\n"
+        "ATOM     12  O   GLY H 100       7.298   6.486   0.000  1.00  0.00           O\n"
+        "ATOM     13  N   ALA H 100A      9.378   5.636   0.000  1.00  0.00           N\n"
+        "ATOM     14  CA  ALA H 100A      9.993   6.957   0.000  1.00  0.00           C\n"
+        "ATOM     15  C   ALA H 100A     11.511   6.885   0.000  1.00  0.00           C\n"
+        "ATOM     16  O   ALA H 100A     12.117   5.815   0.000  1.00  0.00           O\n"
+        "ATOM     17  N   SER H 100B     12.115   8.066   0.000  1.00  0.00           N\n"
+        "ATOM     18  CA  SER H 100B     13.562   8.192   0.000  1.00  0.00           C\n"
+        "ATOM     19  C   SER H 100B     14.113   9.612   0.000  1.00  0.00           C\n"
+        "ATOM     20  O   SER H 100B     13.350  10.582   0.000  1.00  0.00           O\n"
+        "ATOM     21  N   TYR H 101      15.350   9.732   0.000  1.00  0.00           N\n"
+        "ATOM     22  CA  TYR H 101      16.100  10.900   0.000  1.00  0.00           C\n"
+        "ATOM     23  C   TYR H 101      17.500  10.600   0.000  1.00  0.00           C\n"
+        "ATOM     24  O   TYR H 101      18.200   9.600   0.000  1.00  0.00           O\n"
+        "TER      25      TYR H 101\n"
+        "ATOM     26  N   ALA L   1      20.000   0.000   5.000  1.00  0.00           N\n"
+        "ATOM     27  CA  ALA L   1      21.458   0.000   5.000  1.00  0.00           C\n"
+        "ATOM     28  C   ALA L   1      22.009   1.420   5.000  1.00  0.00           C\n"
+        "ATOM     29  O   ALA L   1      21.246   2.390   5.000  1.00  0.00           O\n"
+        "ATOM     30  N   ALA L   2      23.326   1.540   5.000  1.00  0.00           N\n"
+        "ATOM     31  CA  ALA L   2      23.941   2.861   5.000  1.00  0.00           C\n"
+        "ATOM     32  C   ALA L   2      25.459   2.789   5.000  1.00  0.00           C\n"
+        "ATOM     33  O   ALA L   2      26.065   1.719   5.000  1.00  0.00           O\n"
+        "TER      34      ALA L   2\n"
+        "END\n"
+    )
+    # fmt: on
+
+
 @pytest.fixture(scope="session")
 def ubiquitin_pdb(tmp_path_factory):
     """

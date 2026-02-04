@@ -636,6 +636,11 @@ class TestValidOperations:
             "relax",
             "mpnn",
             "design",
+            "renumber",
             "analyze_interface",
         }
         assert VALID_OPERATIONS == expected
+
+    def test_renumber_in_valid_operations(self):
+        """Renumber is a valid workflow operation."""
+        assert "renumber" in VALID_OPERATIONS

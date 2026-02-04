@@ -27,6 +27,7 @@ class TestAppStructure:
         assert "relax" in result.output
         assert "mpnn" in result.output
         assert "design" in result.output
+        assert "renumber" in result.output
         assert "analyze-interface" in result.output
         assert "run" in result.output
 
@@ -182,6 +183,34 @@ class TestDesign:
         assert "--model-type" in result.output
 
 
+class TestRenumber:
+    """Tests for the renumber subcommand."""
+
+    def test_help(self):
+        """Test renumber --help."""
+        result = runner.invoke(app, ["renumber", "--help"])
+        assert result.exit_code == 0
+        assert "renumber" in result.output.lower()
+
+    def test_missing_args(self):
+        """Test renumber with no arguments fails."""
+        result = runner.invoke(app, ["renumber"])
+        assert result.exit_code != 0
+
+    def test_missing_input_file(self, tmp_path):
+        """Test renumber with nonexistent input file."""
+        result = runner.invoke(
+            app,
+            [
+                "renumber",
+                str(tmp_path / "nonexistent.pdb"),
+                str(tmp_path / "out.pdb"),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower()
+
+
 class TestAnalyzeInterface:
     """Tests for the analyze-interface subcommand."""
 
@@ -257,6 +286,7 @@ class TestHelpers:
             "relax",
             "mpnn",
             "design",
+            "renumber",
             "analyze-interface",
             "run",
         ]

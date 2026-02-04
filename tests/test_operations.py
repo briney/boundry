@@ -1237,9 +1237,118 @@ class TestTopLevelImports:
         assert ResidueMode.ALLAA.value == "ALLAA"
         assert callable(ResfileParser().parse)
 
+    def test_renumber_importable(self):
+        """Test that renumber is importable from boundry.
+
+        The ``renumber`` function is imported from
+        ``boundry.operations`` because the ``boundry.renumber``
+        sub-module shadows the function name once it has been
+        imported by other tests.
+        """
+        from boundry.operations import renumber
+
+        assert callable(renumber)
+
     def test_pipeline_removed(self):
         """Test that Pipeline and PipelineMode are no longer exposed."""
         import boundry
 
         assert not hasattr(boundry, "Pipeline")
         assert not hasattr(boundry, "PipelineMode")
+
+
+# ------------------------------------------------------------------
+# Auto-renumber in operations
+# ------------------------------------------------------------------
+
+
+# PDB with Kabat insertion codes for auto-renumber tests
+ICODE_PDB = (
+    "ATOM      1  N   ALA H  99       0.000   0.000   0.000"
+    "  1.00  0.00           N\n"
+    "ATOM      2  CA  ALA H  99       1.458   0.000   0.000"
+    "  1.00  0.00           C\n"
+    "ATOM      3  N   GLY H 100       3.326   1.540   0.000"
+    "  1.00  0.00           N\n"
+    "ATOM      4  CA  GLY H 100       3.941   2.861   0.000"
+    "  1.00  0.00           C\n"
+    "ATOM      5  N   ALA H 100A      5.000   3.000   0.000"
+    "  1.00  0.00           N\n"
+    "ATOM      6  CA  ALA H 100A      6.000   4.000   0.000"
+    "  1.00  0.00           C\n"
+    "ATOM      7  N   TYR H 101       9.000   7.000   0.000"
+    "  1.00  0.00           N\n"
+    "ATOM      8  CA  TYR H 101      10.000   8.000   0.000"
+    "  1.00  0.00           C\n"
+    "END\n"
+)
+
+
+class TestAutoRenumber:
+    """Tests for auto-renumber in affected operations."""
+
+    @patch("boundry.relaxer.Relaxer")
+    def test_minimize_auto_renumber(self, MockRelaxer):
+        """Minimize transparently handles insertion codes."""
+        mock_relaxer = MockRelaxer.return_value
+        # The relaxer receives renumbered PDB (no icodes) and
+        # returns it as-is for simplicity
+        mock_relaxer.relax.return_value = (
+            "ATOM      1  N   ALA H   1       0.000   0.000   0.000"
+            "  1.00  0.00           N\n"
+            "ATOM      2  CA  ALA H   1       1.458   0.000   0.000"
+            "  1.00  0.00           C\n"
+            "ATOM      3  N   GLY H   2       3.326   1.540   0.000"
+            "  1.00  0.00           N\n"
+            "ATOM      4  CA  GLY H   2       3.941   2.861   0.000"
+            "  1.00  0.00           C\n"
+            "ATOM      5  N   ALA H   3       5.000   3.000   0.000"
+            "  1.00  0.00           N\n"
+            "ATOM      6  CA  ALA H   3       6.000   4.000   0.000"
+            "  1.00  0.00           C\n"
+            "ATOM      7  N   TYR H   4       9.000   7.000   0.000"
+            "  1.00  0.00           N\n"
+            "ATOM      8  CA  TYR H   4      10.000   8.000   0.000"
+            "  1.00  0.00           C\n"
+            "END\n",
+            {
+                "initial_energy": -50.0,
+                "final_energy": -100.0,
+                "rmsd": 0.5,
+            },
+            [],
+        )
+
+        from boundry.operations import minimize
+
+        result = minimize(ICODE_PDB)
+
+        # Output should have original numbering restored
+        assert "renumber_mapping" in result.metadata
+        # Check that insertion codes are restored in output
+        lines = result.pdb_string.splitlines()
+        atom_lines = [l for l in lines if l.startswith("ATOM")]
+        # Residue 100A should be present in output
+        icodes = [l[26] for l in atom_lines]
+        assert "A" in icodes
+
+    @patch("boundry.relaxer.Relaxer")
+    def test_auto_renumber_noop(self, MockRelaxer):
+        """No insertion codes = no renumbering applied."""
+        mock_relaxer = MockRelaxer.return_value
+        mock_relaxer.relax.return_value = (
+            "RELAXED\nEND\n",
+            {
+                "initial_energy": -50.0,
+                "final_energy": -100.0,
+                "rmsd": 0.5,
+            },
+            [],
+        )
+
+        from boundry.operations import minimize
+
+        result = minimize(SINGLE_CHAIN_PDB)
+
+        # No renumber_mapping when no insertion codes
+        assert "renumber_mapping" not in result.metadata

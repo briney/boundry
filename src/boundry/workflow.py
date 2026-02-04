@@ -24,6 +24,7 @@ VALID_OPERATIONS = frozenset(
         "relax",
         "mpnn",
         "design",
+        "renumber",
         "analyze_interface",
     }
 )
@@ -170,6 +171,7 @@ class Workflow:
             "relax": self._run_relax,
             "mpnn": self._run_mpnn,
             "design": self._run_design,
+            "renumber": self._run_renumber,
             "analyze_interface": self._run_analyze_interface,
         }
         handler = dispatch[step.operation]
@@ -289,6 +291,12 @@ class Workflow:
             pre_idealize=pre_idealize,
             n_iterations=n_iterations,
         )
+
+    @staticmethod
+    def _run_renumber(structure, params):
+        from boundry.operations import renumber
+
+        return renumber(structure)
 
     @staticmethod
     def _run_analyze_interface(structure, params):

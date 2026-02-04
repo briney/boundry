@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from boundry.interface import InterfaceInfo
     from boundry.interface_position_energetics import PerPositionResult
     from boundry.relaxer import Relaxer
+    from boundry.renumber import RenumberMapping
     from boundry.surface_area import (
         ShapeComplementarityResult,
         SurfaceAreaResult,
@@ -152,6 +153,35 @@ def _write_temp_pdb(pdb_string: str) -> Path:
     return Path(tmp.name)
 
 
+def _auto_renumber(
+    pdb_string: str,
+) -> Tuple[str, Optional["RenumberMapping"]]:
+    """Renumber residues if insertion codes are present.
+
+    Returns *(pdb_string, mapping)*.  If no insertion codes are found
+    the input is returned unchanged with ``mapping=None``.
+    """
+    from boundry.renumber import has_insertion_codes, renumber_pdb
+
+    if not has_insertion_codes(pdb_string):
+        return pdb_string, None
+    logger.info("Insertion codes detected; renumbering residues")
+    return renumber_pdb(pdb_string)
+
+
+def _maybe_restore(
+    pdb_string: str,
+    mapping: Optional["RenumberMapping"],
+) -> str:
+    """Restore original numbering if *mapping* is not ``None``."""
+    if mapping is None:
+        return pdb_string
+    from boundry.renumber import restore_numbering
+
+    logger.info("Restoring original residue numbering")
+    return restore_numbering(pdb_string, mapping)
+
+
 # -------------------------------------------------------------------
 # Operations
 # -------------------------------------------------------------------
@@ -183,14 +213,20 @@ def idealize(
         config = IdealizeConfig(enabled=True)
 
     pdb_string, source_path = _resolve_input(structure)
+    pdb_string, renumber_mapping = _auto_renumber(pdb_string)
     idealized_pdb, gaps = idealize_structure(pdb_string, config)
+    idealized_pdb = _maybe_restore(idealized_pdb, renumber_mapping)
+
+    metadata: Dict[str, Any] = {
+        "chain_gaps": len(gaps),
+        "operation": "idealize",
+    }
+    if renumber_mapping is not None:
+        metadata["renumber_mapping"] = renumber_mapping
 
     return Structure(
         pdb_string=idealized_pdb,
-        metadata={
-            "chain_gaps": len(gaps),
-            "operation": "idealize",
-        },
+        metadata=metadata,
         source_path=source_path,
     )
 
@@ -224,6 +260,7 @@ def minimize(
         config = RelaxConfig()
 
     pdb_string, source_path = _resolve_input(structure)
+    pdb_string, renumber_mapping = _auto_renumber(pdb_string)
 
     if pre_idealize:
         pre = idealize(
@@ -234,15 +271,20 @@ def minimize(
 
     relaxer = Relaxer(config)
     relaxed_pdb, relax_info, _ = relaxer.relax(pdb_string)
+    relaxed_pdb = _maybe_restore(relaxed_pdb, renumber_mapping)
+
+    metadata: Dict[str, Any] = {
+        "initial_energy": relax_info["initial_energy"],
+        "final_energy": relax_info["final_energy"],
+        "rmsd": relax_info["rmsd"],
+        "operation": "minimize",
+    }
+    if renumber_mapping is not None:
+        metadata["renumber_mapping"] = renumber_mapping
 
     return Structure(
         pdb_string=relaxed_pdb,
-        metadata={
-            "initial_energy": relax_info["initial_energy"],
-            "final_energy": relax_info["final_energy"],
-            "rmsd": relax_info["rmsd"],
-            "operation": "minimize",
-        },
+        metadata=metadata,
         source_path=source_path,
     )
 
@@ -345,6 +387,7 @@ def relax(
         config = PipelineConfig()
 
     pdb_string, source_path = _resolve_input(structure)
+    pdb_string, renumber_mapping = _auto_renumber(pdb_string)
 
     if pre_idealize:
         ide_cfg = (
@@ -397,18 +440,23 @@ def relax(
         )
 
     energy_breakdown = relaxer.get_energy_breakdown(current_pdb)
+    current_pdb = _maybe_restore(current_pdb, renumber_mapping)
+
+    metadata: Dict[str, Any] = {
+        "iterations": iterations,
+        "final_energy": (
+            iterations[-1]["final_energy"] if iterations else None
+        ),
+        "energy_breakdown": energy_breakdown,
+        "sequence": (iterations[-1]["sequence"] if iterations else None),
+        "operation": "relax",
+    }
+    if renumber_mapping is not None:
+        metadata["renumber_mapping"] = renumber_mapping
 
     return Structure(
         pdb_string=current_pdb,
-        metadata={
-            "iterations": iterations,
-            "final_energy": (
-                iterations[-1]["final_energy"] if iterations else None
-            ),
-            "energy_breakdown": energy_breakdown,
-            "sequence": (iterations[-1]["sequence"] if iterations else None),
-            "operation": "relax",
-        },
+        metadata=metadata,
         source_path=source_path,
     )
 
@@ -527,6 +575,7 @@ def design(
         config = PipelineConfig()
 
     pdb_string, source_path = _resolve_input(structure)
+    pdb_string, renumber_mapping = _auto_renumber(pdb_string)
 
     if pre_idealize:
         ide_cfg = (
@@ -599,21 +648,57 @@ def design(
         )
 
     energy_breakdown = relaxer.get_energy_breakdown(current_pdb)
+    current_pdb = _maybe_restore(current_pdb, renumber_mapping)
+
+    metadata: Dict[str, Any] = {
+        "iterations": iterations,
+        "final_energy": (
+            iterations[-1]["final_energy"] if iterations else None
+        ),
+        "energy_breakdown": energy_breakdown,
+        "sequence": (iterations[-1]["sequence"] if iterations else None),
+        "native_sequence": original_native_sequence,
+        "ligandmpnn_loss": (
+            iterations[-1]["ligandmpnn_loss"] if iterations else None
+        ),
+        "operation": "design",
+    }
+    if renumber_mapping is not None:
+        metadata["renumber_mapping"] = renumber_mapping
 
     return Structure(
         pdb_string=current_pdb,
+        metadata=metadata,
+        source_path=source_path,
+    )
+
+
+def renumber(structure: StructureInput) -> Structure:
+    """Renumber residues sequentially, removing insertion codes.
+
+    Useful for preparing Kabat-numbered antibody structures for
+    operations that cannot handle insertion codes.  The original
+    numbering mapping is stored in ``metadata["renumber_mapping"]``
+    so it can be restored later via
+    :func:`boundry.renumber.restore_numbering`.
+
+    Args:
+        structure: Input structure (file path, PDB string, or
+            Structure).
+
+    Returns:
+        Structure with sequentially numbered residues.
+    """
+    from boundry.renumber import renumber_pdb
+
+    pdb_string, source_path = _resolve_input(structure)
+    renumbered_pdb, mapping = renumber_pdb(pdb_string)
+
+    return Structure(
+        pdb_string=renumbered_pdb,
         metadata={
-            "iterations": iterations,
-            "final_energy": (
-                iterations[-1]["final_energy"] if iterations else None
-            ),
-            "energy_breakdown": energy_breakdown,
-            "sequence": (iterations[-1]["sequence"] if iterations else None),
-            "native_sequence": original_native_sequence,
-            "ligandmpnn_loss": (
-                iterations[-1]["ligandmpnn_loss"] if iterations else None
-            ),
-            "operation": "design",
+            "renumber_mapping": mapping,
+            "operation": "renumber",
         },
         source_path=source_path,
     )

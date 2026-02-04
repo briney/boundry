@@ -519,6 +519,34 @@ def design(
     logger.info(f"Wrote designed structure to {output_file}")
 
 
+@app.command()
+def renumber(
+    input_file: Path = typer.Argument(
+        ..., metavar="INPUT", help="Input structure file (PDB or CIF)"
+    ),
+    output_file: Path = typer.Argument(
+        ..., metavar="OUTPUT", help="Output structure file"
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable verbose output"
+    ),
+):
+    """Renumber residues sequentially, removing insertion codes.
+
+    Useful for preparing Kabat-numbered antibody structures for
+    downstream operations that cannot handle insertion codes.
+    """
+    _setup_logging(verbose)
+    _validate_input(input_file)
+
+    from boundry.operations import renumber as _renumber
+
+    logger.info(f"Renumbering {input_file} -> {output_file}")
+    result = _renumber(input_file)
+    result.write(output_file)
+    logger.info(f"Wrote renumbered structure to {output_file}")
+
+
 @app.command("analyze-interface")
 def analyze_interface(
     input_file: Path = typer.Argument(

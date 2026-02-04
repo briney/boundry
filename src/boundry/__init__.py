@@ -30,6 +30,7 @@ from boundry.operations import (
     mpnn,
     repack,
     relax,
+    renumber,
 )
 
 # Workflow system
@@ -62,6 +63,7 @@ __all__ = [
     "relax",
     "mpnn",
     "design",
+    "renumber",
     "analyze_interface",
     # Data classes
     "Structure",
