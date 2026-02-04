@@ -580,6 +580,9 @@ def analyze_interface(
     no_binding_energy: bool = typer.Option(
         False, help="Skip binding energy (dG) calculation"
     ),
+    sasa: bool = typer.Option(
+        False, "--sasa", help="Calculate buried surface area (SASA)"
+    ),
     shape_complementarity: bool = typer.Option(
         False,
         "--shape-complementarity",
@@ -635,7 +638,7 @@ def analyze_interface(
     """Analyze protein-protein interface properties.
 
     Identifies interface residues by distance cutoff, computes binding
-    energy (dG), buried SASA, and optionally shape complementarity.
+    energy (dG), and optionally buried SASA and shape complementarity.
 
     Per-position flags (--per-position, --alanine-scan) enable Rosetta-
     like per-residue energetics. Results follow Rosetta sign conventions:
@@ -669,7 +672,7 @@ def analyze_interface(
             _parse_chain_pairs(chains) if chains else None
         ),
         calculate_binding_energy=not no_binding_energy,
-        calculate_sasa=True,
+        calculate_sasa=sasa,
         calculate_shape_complementarity=shape_complementarity,
         pack_separated=pack_separated,
         relax_separated_chains=relax_separated,

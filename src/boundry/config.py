@@ -57,7 +57,7 @@ class InterfaceConfig:
     distance_cutoff: float = 8.0  # Distance cutoff (A) for interface residues
     chain_pairs: Optional[List[Tuple[str, str]]] = None  # Auto-detect if None
     calculate_binding_energy: bool = True  # Calculate ddG via chain separation
-    calculate_sasa: bool = True  # Calculate buried surface area
+    calculate_sasa: bool = False  # Calculate buried surface area
     calculate_shape_complementarity: bool = (
         False  # Simplified Sc (experimental)
     )

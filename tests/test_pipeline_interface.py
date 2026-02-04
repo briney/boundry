@@ -39,7 +39,7 @@ class TestInterfaceConfig:
         assert config.distance_cutoff == 8.0
         assert config.chain_pairs is None
         assert config.calculate_binding_energy is True
-        assert config.calculate_sasa is True
+        assert config.calculate_sasa is False
         assert config.calculate_shape_complementarity is False
         assert config.pack_separated is False
         assert config.relax_separated_chains is False

@@ -230,6 +230,7 @@ class TestAnalyzeInterface:
         result = runner.invoke(app, ["analyze-interface", "--help"])
         assert "--distance-cutoff" in result.output
         assert "--no-binding-energy" in result.output
+        assert "--sasa" in result.output
         # Rich may truncate long option names; match prefix
         assert "--shape-complement" in result.output
         assert "--pack-separated" in result.output
