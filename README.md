@@ -39,6 +39,7 @@ boundry
 ├── relax                 Iterative repack + minimize cycles
 ├── mpnn                  Sequence design (LigandMPNN)
 ├── design                Iterative design + minimize cycles
+├── renumber              Remove insertion codes (Kabat numbering)
 ├── analyze-interface     Interface scoring and analysis
 └── run                   Execute a YAML workflow
 ```
@@ -67,6 +68,9 @@ boundry mpnn input.pdb designed.pdb --temperature 0.2 --resfile design.resfile
 # Iterative design + minimize (like Rosetta FastDesign)
 boundry design input.pdb designed.pdb --n-iter 5
 
+# Renumber residues (strip Kabat insertion codes)
+boundry renumber antibody.pdb renumbered.pdb
+
 # Interface analysis
 boundry analyze-interface complex.pdb
 boundry analyze-interface complex.pdb --chains H:A,L:A --distance-cutoff 10.0
@@ -79,14 +83,14 @@ boundry analyze-interface complex.pdb --per-position --scan-chains A,B --positio
 boundry run workflow.yaml
 ```
 
-All commands that include energy minimization (`minimize`, `relax`, `design`) support `--pre-idealize` to fix backbone geometry before processing. Use `--verbose` or `-v` on any command for detailed logging.
+All commands that include energy minimization (`minimize`, `relax`, `design`) support `--pre-idealize` to fix backbone geometry before processing. These commands also automatically handle PDB insertion codes (e.g., Kabat-numbered antibodies) by renumbering residues before processing and restoring original numbering in the output. Use `--verbose` or `-v` on any command for detailed logging.
 
 ## Python API
 
 Core operations are available as standalone functions:
 
 ```python
-from boundry import idealize, minimize, repack, relax, mpnn, design
+from boundry import idealize, minimize, repack, relax, mpnn, design, renumber
 from boundry import analyze_interface
 from boundry import Structure, Workflow
 ```
@@ -118,6 +122,27 @@ struct = Structure.from_file("input.pdb")
 struct = idealize(struct)
 struct = minimize(struct, pre_idealize=False)
 struct.write("processed.pdb")
+```
+
+### Insertion Code Handling
+
+PDB files with Kabat-numbered antibodies use insertion codes (e.g., 100, 100A, 100B, 101) that can cause issues with some downstream tools. Boundry handles this transparently — the `minimize`, `relax`, `design`, and `idealize` operations automatically detect insertion codes, renumber residues sequentially before processing, and restore the original numbering in the output.
+
+For explicit renumbering:
+
+```python
+from boundry import renumber
+
+# Renumber to sequential residue numbers
+result = renumber("antibody.pdb")
+result.write("renumbered.pdb")
+
+# The original numbering mapping is stored in metadata
+mapping = result.metadata["renumber_mapping"]
+
+# Restore original numbering later
+from boundry.renumber import restore_numbering
+restored_pdb = restore_numbering(result.pdb_string, mapping)
 ```
 
 ### Structure
@@ -226,6 +251,7 @@ result = workflow.run()
 | `relax`             | Iterative repack + minimize              | `n_iterations`, `temperature`, `constrained` |
 | `mpnn`              | Sequence design                          | `temperature`, `model_type`, `resfile`     |
 | `design`            | Iterative design + minimize              | `n_iterations`, `temperature`, `constrained` |
+| `renumber`          | Remove insertion codes                   | *(none)*                                     |
 | `analyze_interface` | Interface scoring                        | `chain_pairs`, `distance_cutoff`, `per_position`, `alanine_scan` |
 
 See `examples/workflows/` for more workflow examples.
