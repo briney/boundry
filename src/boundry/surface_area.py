@@ -13,6 +13,7 @@ from Bio.PDB import PDBParser
 from Bio.PDB.SASA import ShrakeRupley
 
 from boundry.interface import InterfaceResidue, _get_protein_chains
+from boundry.utils import filter_protein_only
 
 logger = logging.getLogger(__name__)
 
@@ -177,8 +178,8 @@ def _filter_protein_pdb_string(pdb_string: str) -> str:
     """
     Filter a PDB string to only include protein ATOM records.
 
-    Removes HETATM records (ligands, glycans, etc.) while preserving
-    chain TER boundaries and the END record.
+    Thin wrapper around :func:`boundry.utils.filter_protein_only` for
+    backwards compatibility within this module.
 
     Args:
         pdb_string: Full PDB file contents
@@ -186,19 +187,7 @@ def _filter_protein_pdb_string(pdb_string: str) -> str:
     Returns:
         PDB string with only ATOM records and proper TER/END
     """
-    lines = []
-    prev_chain = None
-    for line in pdb_string.splitlines():
-        if line.startswith("ATOM") and len(line) > 21:
-            chain_id = line[21]
-            if prev_chain is not None and chain_id != prev_chain:
-                lines.append("TER")
-            lines.append(line)
-            prev_chain = chain_id
-    if prev_chain is not None:
-        lines.append("TER")
-    lines.append("END")
-    return "\n".join(lines) + "\n"
+    return filter_protein_only(pdb_string)
 
 
 def calculate_surface_area(

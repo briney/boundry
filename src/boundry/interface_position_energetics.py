@@ -239,6 +239,9 @@ def _compute_rosetta_dG(
 
     Returns ``dG = E_bound - E_unbound`` (negative favourable).
     Wraps :func:`calculate_binding_energy` and inverts its sign.
+
+    Raises:
+        RuntimeError: If binding energy calculation fails (returns None).
     """
     result = calculate_binding_energy(
         pdb_string,
@@ -249,6 +252,11 @@ def _compute_rosetta_dG(
         relax_separated=relax_separated,
         repacker=repacker,
     )
+    if result.binding_energy is None:
+        raise RuntimeError(
+            "Binding energy calculation failed "
+            "(energy returned None)"
+        )
     return -result.binding_energy
 
 

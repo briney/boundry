@@ -1352,3 +1352,160 @@ class TestAutoRenumber:
 
         # No renumber_mapping when no insertion codes
         assert "renumber_mapping" not in result.metadata
+
+
+# ------------------------------------------------------------------
+# filter_protein_only utility
+# ------------------------------------------------------------------
+
+
+class TestFilterProteinOnly:
+    """Tests for the filter_protein_only utility function."""
+
+    def test_strips_hetatm(self):
+        """Test that HETATM lines (waters, ligands) are removed."""
+        from boundry.utils import filter_protein_only
+
+        pdb = (
+            "ATOM      1  N   ALA A   1       0.000   0.000   0.000"
+            "  1.00  0.00           N\n"
+            "HETATM    2  O   HOH A   2       1.000   1.000   1.000"
+            "  1.00  0.00           O\n"
+            "HETATM    3  C1  NAG M   1      10.000  10.000  10.000"
+            "  1.00  0.00           C\n"
+            "END\n"
+        )
+        result = filter_protein_only(pdb)
+        assert "HETATM" not in result
+        assert "HOH" not in result
+        assert "NAG" not in result
+
+    def test_preserves_atom_records(self):
+        """Test that ATOM records are preserved."""
+        from boundry.utils import filter_protein_only
+
+        pdb = (
+            "ATOM      1  N   ALA A   1       0.000   0.000   0.000"
+            "  1.00  0.00           N\n"
+            "ATOM      2  CA  ALA A   1       1.458   0.000   0.000"
+            "  1.00  0.00           C\n"
+            "END\n"
+        )
+        result = filter_protein_only(pdb)
+        atom_lines = [
+            l for l in result.splitlines() if l.startswith("ATOM")
+        ]
+        assert len(atom_lines) == 2
+
+    def test_adds_ter_between_chains(self):
+        """Test that TER records are added between chains."""
+        from boundry.utils import filter_protein_only
+
+        result = filter_protein_only(TWO_CHAIN_PDB)
+        lines = result.strip().splitlines()
+        ter_count = sum(1 for l in lines if l.startswith("TER"))
+        assert ter_count == 2  # One between A/B, one after B
+
+    def test_ends_with_end(self):
+        """Test that output ends with END record."""
+        from boundry.utils import filter_protein_only
+
+        result = filter_protein_only(SINGLE_CHAIN_PDB)
+        lines = result.strip().splitlines()
+        assert lines[-1] == "END"
+
+    def test_protein_only_input_unchanged(self):
+        """Test that protein-only PDB retains all ATOM lines."""
+        from boundry.utils import filter_protein_only
+
+        result = filter_protein_only(SINGLE_CHAIN_PDB)
+        original_atoms = [
+            l
+            for l in SINGLE_CHAIN_PDB.splitlines()
+            if l.startswith("ATOM")
+        ]
+        result_atoms = [
+            l for l in result.splitlines() if l.startswith("ATOM")
+        ]
+        assert len(result_atoms) == len(original_atoms)
+
+
+# ------------------------------------------------------------------
+# None energy handling
+# ------------------------------------------------------------------
+
+
+class TestNoneEnergyHandling:
+    """Tests for None energy propagation through the pipeline."""
+
+    @patch("boundry.binding_energy.calculate_binding_energy")
+    @patch("boundry.interface.identify_interface_residues")
+    def test_analyze_interface_none_binding_energy(
+        self, mock_identify, mock_be
+    ):
+        """Test that None binding_energy is handled gracefully."""
+        from boundry.binding_energy import BindingEnergyResult
+        from boundry.config import InterfaceConfig
+        from boundry.operations import analyze_interface
+
+        mock_info = MagicMock()
+        mock_info.interface_residues = [MagicMock()]
+        mock_info.chain_pairs = [("A", "B")]
+        mock_info.summary = "1 residue"
+        mock_identify.return_value = mock_info
+
+        mock_be.return_value = BindingEnergyResult(
+            complex_energy=None,
+            binding_energy=None,
+        )
+
+        config = InterfaceConfig(
+            enabled=True,
+            calculate_binding_energy=True,
+            calculate_sasa=False,
+            calculate_shape_complementarity=False,
+        )
+        mock_relaxer = MagicMock()
+        result = analyze_interface(
+            TWO_CHAIN_PDB, config=config, relaxer=mock_relaxer
+        )
+
+        assert result.binding_energy is not None
+        assert result.binding_energy.binding_energy is None
+
+    def test_binding_energy_result_optional_fields(self):
+        """Test BindingEnergyResult accepts None for energy fields."""
+        from boundry.binding_energy import BindingEnergyResult
+
+        result = BindingEnergyResult(
+            complex_energy=None,
+            binding_energy=None,
+        )
+        assert result.complex_energy is None
+        assert result.binding_energy is None
+
+    def test_compute_rosetta_dG_raises_on_none(self):
+        """Test _compute_rosetta_dG raises RuntimeError on None."""
+        from boundry.binding_energy import BindingEnergyResult
+        from boundry.interface_position_energetics import (
+            _compute_rosetta_dG,
+        )
+
+        mock_relaxer = MagicMock()
+        mock_relaxer.get_energy_breakdown.return_value = {
+            "total_energy": None,
+        }
+
+        with patch(
+            "boundry.interface_position_energetics"
+            ".calculate_binding_energy"
+        ) as mock_be:
+            mock_be.return_value = BindingEnergyResult(
+                binding_energy=None,
+            )
+            with pytest.raises(RuntimeError, match="failed"):
+                _compute_rosetta_dG(
+                    SINGLE_CHAIN_PDB,
+                    mock_relaxer,
+                    chain_pairs=[("A", "B")],
+                )

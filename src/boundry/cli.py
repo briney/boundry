@@ -718,11 +718,14 @@ def analyze_interface(
     if result.interface_info:
         typer.echo(result.interface_info.summary)
     if result.binding_energy:
-        # Display with Rosetta sign: dG = E_bound - E_unbound
-        dG_rosetta = -result.binding_energy.binding_energy
-        typer.echo(
-            f"dG (Rosetta sign): {dG_rosetta:.2f} kcal/mol"
-        )
+        if result.binding_energy.binding_energy is not None:
+            # Display with Rosetta sign: dG = E_bound - E_unbound
+            dG_rosetta = -result.binding_energy.binding_energy
+            typer.echo(
+                f"dG (Rosetta sign): {dG_rosetta:.2f} kcal/mol"
+            )
+        else:
+            typer.echo("dG: could not be computed")
     if result.sasa:
         typer.echo(
             f"Buried SASA: {result.sasa.buried_sasa:.1f} sq. angstroms"

@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from Bio.PDB import PDBIO, PDBParser, Select
 
 from boundry.interface import InterfaceResidue, identify_interface_residues
+from boundry.utils import filter_protein_only
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +18,14 @@ logger = logging.getLogger(__name__)
 class BindingEnergyResult:
     """Results of binding energy calculation."""
 
-    complex_energy: float = 0.0
-    separated_energies: Dict[str, float] = field(default_factory=dict)
-    binding_energy: float = 0.0
-    energy_breakdown: Dict[str, float] = field(default_factory=dict)
+    complex_energy: Optional[float] = 0.0
+    separated_energies: Dict[str, Optional[float]] = field(
+        default_factory=dict
+    )
+    binding_energy: Optional[float] = 0.0
+    energy_breakdown: Dict[str, Optional[float]] = field(
+        default_factory=dict
+    )
     interface_residues: List[InterfaceResidue] = field(default_factory=list)
     interface_energy: Optional[float] = None
 
@@ -146,10 +151,23 @@ def calculate_binding_energy(
     Returns:
         BindingEnergyResult with energies and interface info
     """
+    # Strip non-protein content before energy evaluation
+    protein_pdb = filter_protein_only(pdb_string)
+
     # Step 1: Get complex energy (bound state)
     logger.info("  Computing complex energy...")
-    complex_breakdown = relaxer.get_energy_breakdown(pdb_string)
-    complex_energy = complex_breakdown.get("total_energy", 0.0)
+    complex_breakdown = relaxer.get_energy_breakdown(protein_pdb)
+    complex_energy = complex_breakdown.get("total_energy")
+
+    if complex_energy is None:
+        logger.warning(
+            "  Complex energy calculation failed - cannot compute ddG"
+        )
+        return BindingEnergyResult(
+            complex_energy=None,
+            binding_energy=None,
+            energy_breakdown=complex_breakdown,
+        )
 
     # Step 2: Identify interface residues
     interface_info = identify_interface_residues(
@@ -173,12 +191,15 @@ def calculate_binding_energy(
     )
 
     # Step 4: Compute separated chain energies
-    separated_energies = {}
+    separated_energies: Dict[str, Optional[float]] = {}
+    energy_failed = False
     for group in chain_groups:
         group_label = "+".join(group)
         logger.info(f"  Computing energy for chain(s) {group_label}...")
 
         chain_pdb = extract_chain(pdb_string, group)
+        # Also filter extracted chains for defense-in-depth
+        chain_pdb = filter_protein_only(chain_pdb)
 
         # Rosetta default: rigid-body separation (no repack/min)
         if pack_separated and repacker is not None:
@@ -195,26 +216,48 @@ def calculate_binding_energy(
             try:
                 relaxed_pdb, relax_info, _ = relaxer.relax(chain_pdb)
                 chain_breakdown = relaxer.get_energy_breakdown(relaxed_pdb)
-                chain_energy = chain_breakdown.get("total_energy", 0.0)
-                logger.info(
-                    f"    Chain(s) {group_label}: "
-                    f"E_init={relax_info['initial_energy']:.2f}, "
-                    f"E_final={chain_energy:.2f}"
-                )
+                chain_energy = chain_breakdown.get("total_energy")
+                if chain_energy is not None:
+                    logger.info(
+                        f"    Chain(s) {group_label}: "
+                        f"E_init={relax_info['initial_energy']:.2f}, "
+                        f"E_final={chain_energy:.2f}"
+                    )
+                else:
+                    energy_failed = True
             except Exception as e:
                 logger.warning(
                     f"    Failed to relax chain(s) {group_label}: {e}"
                 )
                 chain_breakdown = relaxer.get_energy_breakdown(chain_pdb)
-                chain_energy = chain_breakdown.get("total_energy", 0.0)
+                chain_energy = chain_breakdown.get("total_energy")
+                if chain_energy is None:
+                    energy_failed = True
         else:
             chain_breakdown = relaxer.get_energy_breakdown(chain_pdb)
-            chain_energy = chain_breakdown.get("total_energy", 0.0)
+            chain_energy = chain_breakdown.get("total_energy")
+            if chain_energy is None:
+                energy_failed = True
 
         separated_energies[group_label] = chain_energy
 
     # Step 5: Calculate ddG (Rosetta convention: separated - complex)
-    total_separated = sum(separated_energies.values())
+    if energy_failed:
+        logger.warning(
+            "  One or more chain energy calculations failed "
+            "- cannot compute ddG"
+        )
+        return BindingEnergyResult(
+            complex_energy=complex_energy,
+            separated_energies=separated_energies,
+            binding_energy=None,
+            energy_breakdown=complex_breakdown,
+            interface_residues=interface_info.interface_residues,
+        )
+
+    total_separated = sum(
+        e for e in separated_energies.values() if e is not None
+    )
     binding_energy = total_separated - complex_energy
 
     logger.info(

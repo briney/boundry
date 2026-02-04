@@ -106,6 +106,36 @@ def _remove_waters_cif(cif_string: str) -> str:
         Path(tmp_path).unlink(missing_ok=True)
 
 
+def filter_protein_only(pdb_string: str) -> str:
+    """
+    Filter a PDB string to only include protein ATOM records.
+
+    Removes HETATM records (waters, ligands, glycans, etc.) while
+    preserving chain TER boundaries and the END record. This is used
+    to prepare PDB strings for OpenMM/AMBER force fields, which cannot
+    parameterize non-standard residues.
+
+    Args:
+        pdb_string: Full PDB file contents
+
+    Returns:
+        PDB string with only ATOM records and proper TER/END
+    """
+    lines = []
+    prev_chain = None
+    for line in pdb_string.splitlines():
+        if line.startswith("ATOM") and len(line) > 21:
+            chain_id = line[21]
+            if prev_chain is not None and chain_id != prev_chain:
+                lines.append("TER")
+            lines.append(line)
+            prev_chain = chain_id
+    if prev_chain is not None:
+        lines.append("TER")
+    lines.append("END")
+    return "\n".join(lines) + "\n"
+
+
 def compute_sequence_recovery(seq1: str, seq2: str) -> float:
     """
     Compute fraction of identical residues between two sequences.

@@ -20,6 +20,7 @@ from boundry.chain_gaps import (
 )
 from boundry.config import RelaxConfig
 from boundry.idealize import extract_ligands, restore_ligands
+from boundry.utils import filter_protein_only
 
 # Add vendored LigandMPNN to path for OpenFold imports
 # Must happen before importing from openfold
@@ -425,6 +426,10 @@ class Relaxer:
         try:
             ENERGY = unit.kilocalories_per_mole
 
+            # Strip non-protein content (ligands, glycans, waters)
+            # before OpenMM processing -- AMBER can't parameterize them
+            pdb_string = filter_protein_only(pdb_string)
+
             # Use pdbfixer to handle missing atoms/H
             fixer = PDBFixer(pdbfile=io.StringIO(pdb_string))
             fixer.findMissingResidues()
@@ -501,4 +506,4 @@ class Relaxer:
 
         except Exception as e:
             logger.warning(f"Could not compute energy breakdown: {e}")
-            return {"total_energy": 0.0}
+            return {"total_energy": None}
