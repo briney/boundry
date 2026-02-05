@@ -408,13 +408,15 @@ def relax(
     iterations: list[dict[str, Any]] = []
     current_pdb = pdb_string
 
-    # Set up optional progress bar
+    # Set up optional progress bar (write to stdout to avoid stderr suppression)
     iterable = range(1, n_iterations + 1)
     pbar = None
     if config.show_progress:
+        import sys
+
         from tqdm import tqdm
 
-        pbar = tqdm(iterable, desc="Relaxing", unit="iter")
+        pbar = tqdm(iterable, desc="Relaxing", unit="iter", file=sys.stdout)
         iterable = pbar
 
     for i in iterable:
@@ -612,13 +614,15 @@ def design(
     current_pdb = pdb_string
     original_native_sequence: Optional[str] = None
 
-    # Set up optional progress bar
+    # Set up optional progress bar (write to stdout to avoid stderr suppression)
     iterable = range(1, n_iterations + 1)
     pbar = None
     if config.show_progress:
+        import sys
+
         from tqdm import tqdm
 
-        pbar = tqdm(iterable, desc="Designing", unit="iter")
+        pbar = tqdm(iterable, desc="Designing", unit="iter", file=sys.stdout)
         iterable = pbar
 
     for i in iterable:
