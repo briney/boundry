@@ -301,23 +301,23 @@ class TestSelectScanSites:
 # ------------------------------------------------------------------
 
 
-class TestRosettaSignConvention:
-    """Verify that dG is computed with Rosetta sign: E_bound - E_unbound."""
+class TestSignConvention:
+    """Verify that dG is computed as E_bound - E_unbound (negative = favorable)."""
 
     @patch("boundry.interface_position_energetics.calculate_binding_energy")
-    def test_dG_wt_sign_inversion(self, mock_calc):
-        """dG_wt should be -binding_energy (internal uses E_unbound - E_bound)."""
+    def test_dG_wt_passthrough(self, mock_calc):
+        """dG_wt should match binding_energy directly (no sign inversion)."""
         from boundry.interface_position_energetics import _compute_rosetta_dG
 
         mock_result = MagicMock()
-        mock_result.binding_energy = 10.0  # internal: positive = favorable
+        mock_result.binding_energy = -10.0  # negative = favorable
         mock_calc.return_value = mock_result
 
         relaxer = MagicMock()
         dG = _compute_rosetta_dG(
             "PDB", relaxer, chain_pairs=[("A", "B")]
         )
-        # Rosetta: negative = favorable
+        # dG should be passed through unchanged
         assert dG == -10.0
 
 
@@ -741,11 +741,11 @@ class TestCLINewOptions:
         result = CliRunner().invoke(app, ["analyze-interface", "--help"])
         assert "--max-scan-sites" in result.output
 
-    def test_rosetta_sign_in_help(self):
-        """Help text mentions Rosetta sign conventions."""
+    def test_sign_convention_in_help(self):
+        """Help text mentions sign convention (negative = favorable)."""
         from typer.testing import CliRunner
 
         from boundry.cli import app
 
         result = CliRunner().invoke(app, ["analyze-interface", "--help"])
-        assert "rosetta" in result.output.lower()
+        assert "negative" in result.output.lower()

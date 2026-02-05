@@ -770,12 +770,12 @@ def analyze_interface(
         )
         if result.binding_energy.binding_energy is not None:
             logger.info(
-                f"ddG = "
+                f"dG = "
                 f"{result.binding_energy.binding_energy:.2f} "
                 f"kcal/mol"
             )
         else:
-            logger.warning("ddG calculation failed (energy returned None)")
+            logger.warning("dG calculation failed (energy returned None)")
 
     # Surface area
     if config.calculate_sasa:

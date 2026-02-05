@@ -139,7 +139,7 @@ def calculate_binding_energy(
     2. Identify interface residues
     3. Extract each side of the interface to separate PDBs
     4. Optionally repack side chains (pack_separated) and/or relax separated chains
-    5. Calculate ddG = sum(E_separated) - E_complex (Rosetta convention)
+    5. Calculate dG = E_complex - sum(E_separated) (negative = favorable)
 
     Args:
         pdb_string: Complex PDB structure (should already be relaxed)
@@ -241,7 +241,7 @@ def calculate_binding_energy(
 
         separated_energies[group_label] = chain_energy
 
-    # Step 5: Calculate ddG (Rosetta convention: separated - complex)
+    # Step 5: Calculate dG = E_bound - E_unbound (negative = favorable)
     if energy_failed:
         logger.warning(
             "  One or more chain energy calculations failed "
@@ -258,12 +258,12 @@ def calculate_binding_energy(
     total_separated = sum(
         e for e in separated_energies.values() if e is not None
     )
-    binding_energy = total_separated - complex_energy
+    binding_energy = complex_energy - total_separated
 
     logger.info(
-        f"  ddG = {binding_energy:.2f} kcal/mol "
-        f"(separated: {total_separated:.2f}, "
-        f"complex: {complex_energy:.2f})"
+        f"  dG = {binding_energy:.2f} kcal/mol "
+        f"(complex: {complex_energy:.2f}, "
+        f"separated: {total_separated:.2f})"
     )
 
     return BindingEnergyResult(

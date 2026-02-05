@@ -1,8 +1,7 @@
 """Per-position interface energetics: IAM-like dG_i and alanine scanning.
 
-Provides Rosetta-aligned per-residue binding energy decomposition and
-alanine-scanning ΔΔG values for protein-protein interfaces. Sign
-conventions follow Rosetta:
+Provides per-residue binding energy decomposition and alanine-scanning
+ΔΔG values for protein-protein interfaces.
 
 - ``dG = E_bound - E_unbound`` (negative = favorable binding)
 - ``ΔΔG = dG_ala - dG_wt`` (positive = destabilising hotspot)
@@ -96,7 +95,7 @@ class PerPositionRow:
     # Burial
     delta_sasa: Optional[float] = None
 
-    # WT binding energy (Rosetta sign, repeated per row)
+    # WT binding energy (repeated per row for convenience)
     dG_wt: Optional[float] = None
 
     # IAM-like per-residue dG_i (--per-position)
@@ -235,10 +234,9 @@ def _compute_rosetta_dG(
     relax_separated: bool = False,
     repacker: Optional["Designer"] = None,
 ) -> float:
-    """Compute binding energy with Rosetta sign convention.
+    """Compute binding energy dG = E_bound - E_unbound (negative = favorable).
 
-    Returns ``dG = E_bound - E_unbound`` (negative favourable).
-    Wraps :func:`calculate_binding_energy` and inverts its sign.
+    Wraps :func:`calculate_binding_energy`.
 
     Raises:
         RuntimeError: If binding energy calculation fails (returns None).
@@ -257,7 +255,7 @@ def _compute_rosetta_dG(
             "Binding energy calculation failed "
             "(energy returned None)"
         )
-    return -result.binding_energy
+    return result.binding_energy
 
 
 def _apply_repack_policy(
@@ -544,11 +542,11 @@ def compute_position_energetics(
             f"(e.g. 'H:A,L:A')."
         )
 
-    # Compute WT dG (Rosetta sign)
+    # Compute WT dG
     pack_sep = position_repack in ("both", "unbound")
     repacker = designer if pack_sep else None
 
-    logger.info("Computing WT binding energy (Rosetta sign)...")
+    logger.info("Computing WT binding energy...")
     ctx = _suppress_stderr() if quiet else contextlib.nullcontext()
     with ctx:
         dG_wt = _compute_rosetta_dG(

@@ -640,10 +640,9 @@ def analyze_interface(
     Identifies interface residues by distance cutoff, computes binding
     energy (dG), and optionally buried SASA and shape complementarity.
 
-    Per-position flags (--per-position, --alanine-scan) enable Rosetta-
-    like per-residue energetics. Results follow Rosetta sign conventions:
-    dG = E_bound - E_unbound (negative = favorable binding), and
-    ΔΔG = dG_ala - dG_wt (positive = destabilising hotspot).
+    Per-position flags (--per-position, --alanine-scan) enable per-residue
+    energetics. dG = E_bound - E_unbound (negative = favorable binding),
+    and ΔΔG = dG_ala - dG_wt (positive = destabilising hotspot).
     """
     _setup_logging(verbose)
     _validate_input(input_file)
@@ -722,11 +721,8 @@ def analyze_interface(
         typer.echo(result.interface_info.summary)
     if result.binding_energy:
         if result.binding_energy.binding_energy is not None:
-            # Display with Rosetta sign: dG = E_bound - E_unbound
-            dG_rosetta = -result.binding_energy.binding_energy
-            typer.echo(
-                f"dG (Rosetta sign): {dG_rosetta:.2f} kcal/mol"
-            )
+            dG = result.binding_energy.binding_energy
+            typer.echo(f"dG: {dG:.2f} kcal/mol")
         else:
             typer.echo("dG: could not be computed")
     if result.sasa:

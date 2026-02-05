@@ -268,11 +268,11 @@ class TestBindingEnergyWithRealStructure:
         assert len(result.separated_energies) == 2
         assert len(result.interface_residues) > 0
 
-    def test_positive_ddg_rosetta_convention(
+    def test_negative_dG_for_high_affinity(
         self, relaxed_1vfb_pdb_string, relaxer
     ):
-        """ddG (separated - complex) should be positive for 1VFB under
-        Rosetta InterfaceAnalyzer convention."""
+        """dG (complex - separated) should be negative for 1VFB since it is
+        a high-affinity antibody-antigen interaction."""
         result = calculate_binding_energy(
             relaxed_1vfb_pdb_string,
             relaxer,
@@ -280,9 +280,9 @@ class TestBindingEnergyWithRealStructure:
             relax_separated=False,
         )
         assert math.isfinite(result.binding_energy)
-        assert result.binding_energy > 0, (
-            "ddG should be positive for high-affinity binder in "
-            "separated-minus-complex convention, "
+        assert result.binding_energy < 0, (
+            "dG should be negative for high-affinity binder "
+            "(E_bound - E_unbound), "
             f"got {result.binding_energy:.2f}"
         )
 
