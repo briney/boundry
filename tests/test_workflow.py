@@ -5,7 +5,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from boundry.config import WorkflowConfig, WorkflowStep
+from boundry.config import (
+    BeamBlock,
+    IterateBlock,
+    WorkflowConfig,
+    WorkflowStep,
+)
 from boundry.workflow import VALID_OPERATIONS, Workflow, WorkflowError
 
 
@@ -149,7 +154,7 @@ class TestValidationErrors:
             Workflow.from_yaml(wf_file)
 
     def test_step_missing_operation(self, tmp_path):
-        """Test error when a step lacks 'operation' field."""
+        """Test error when a step lacks a valid step key."""
         wf_file = tmp_path / "wf.yaml"
         wf_file.write_text(
             yaml.dump(
@@ -159,7 +164,9 @@ class TestValidationErrors:
                 }
             )
         )
-        with pytest.raises(WorkflowError, match="Step 1.*operation"):
+        with pytest.raises(
+            WorkflowError, match="Step 1.*expected one of"
+        ):
             Workflow.from_yaml(wf_file)
 
     def test_unknown_operation(self, tmp_path):
@@ -209,6 +216,72 @@ class TestDirectConstruction:
         )
         with pytest.raises(WorkflowError, match="unknown.*bogus"):
             Workflow(config)
+
+
+class TestBlockParsing:
+    """Tests for iterate and beam parsing."""
+
+    def test_parse_iterate_block(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [
+                        {
+                            "iterate": {
+                                "n": 3,
+                                "steps": [{"operation": "relax"}],
+                            }
+                        }
+                    ],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert isinstance(wf.config.steps[0], IterateBlock)
+        block = wf.config.steps[0]
+        assert block.n == 3
+        assert len(block.steps) == 1
+
+    def test_parse_beam_block(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [
+                        {
+                            "beam": {
+                                "width": 2,
+                                "rounds": 3,
+                                "metric": "dG",
+                                "direction": "min",
+                                "steps": [{"operation": "analyze_interface"}],
+                            }
+                        }
+                    ],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert isinstance(wf.config.steps[0], BeamBlock)
+        block = wf.config.steps[0]
+        assert block.width == 2
+        assert block.rounds == 3
+
+    def test_unknown_block_key_raises(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [{"unknown": {"steps": []}}],
+                }
+            )
+        )
+        with pytest.raises(WorkflowError, match="expected one of"):
+            Workflow.from_yaml(wf_file)
 
 
 # ------------------------------------------------------------------
@@ -292,8 +365,8 @@ class TestWorkflowRun:
 
         # Step 2 should receive output of step 1
         call_args = mock_minimize.call_args
-        assert call_args[0][0] is struct_after_ideal
-        assert result is struct_after_min
+        assert call_args[0][0].pdb_string == struct_after_ideal.pdb_string
+        assert result.pdb_string == struct_after_min.pdb_string
 
     @patch("boundry.workflow.Workflow._run_idealize")
     def test_final_output_written(self, mock_idealize, tmp_path):
@@ -391,6 +464,200 @@ class TestWorkflowRun:
         call_args = mock_idealize.call_args
         params = call_args[0][1]  # second positional arg
         assert params == {"fix_cis_omega": False}
+
+
+class TestCompoundExecution:
+    """Tests for iterate/beam workflow execution."""
+
+    def _make_workflow(self, tmp_path, steps, output=None):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": str(tmp_path / "input.pdb"),
+                    "output": (
+                        str(tmp_path / output) if output else None
+                    ),
+                    "steps": steps,
+                }
+            )
+        )
+        return Workflow.from_yaml(wf_file)
+
+    def _make_input(self, tmp_path):
+        pdb = tmp_path / "input.pdb"
+        pdb.write_text(
+            "ATOM      1  N   ALA A   1       0.000   0.000   0.000"
+            "  1.00  0.00           N\nEND\n"
+        )
+        return pdb
+
+    @patch("boundry.workflow.Workflow._run_relax")
+    def test_iterate_fixed_count_runs_n_times(self, mock_relax, tmp_path):
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        call_count = {"n": 0}
+
+        def _side_effect(structure, params):
+            call_count["n"] += 1
+            return Structure(
+                pdb_string=f"ATOM iter {call_count['n']}\nEND\n",
+                metadata={"final_energy": -1.0 * call_count["n"]},
+            )
+
+        mock_relax.side_effect = _side_effect
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {
+                    "iterate": {
+                        "n": 3,
+                        "steps": [{"operation": "relax"}],
+                    }
+                }
+            ],
+        )
+        result = wf.run()
+        assert call_count["n"] == 3
+        assert "iter 3" in result.pdb_string
+
+    @patch("boundry.workflow.Workflow._run_analyze_interface")
+    def test_iterate_convergence_stops_early(
+        self, mock_analyze, tmp_path
+    ):
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        dgs = [-1.0, -2.0, -4.0, -6.0]
+        calls = {"n": 0}
+
+        def _side_effect(structure, params):
+            idx = calls["n"]
+            calls["n"] += 1
+            return Structure(
+                pdb_string=f"ATOM dG {idx}\nEND\n",
+                metadata={"dG": dgs[idx]},
+            )
+
+        mock_analyze.side_effect = _side_effect
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {
+                    "iterate": {
+                        "until": "{dG} < -3.0",
+                        "max_n": 10,
+                        "steps": [{"operation": "analyze_interface"}],
+                    }
+                }
+            ],
+        )
+        wf.run()
+        assert calls["n"] == 3
+
+    @patch("boundry.workflow.Workflow._run_relax")
+    def test_iterate_seed_param_injected(self, mock_relax, tmp_path):
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        seen_seeds = []
+
+        def _side_effect(structure, params):
+            seen_seeds.append(params["seed"])
+            return Structure(
+                pdb_string="ATOM\nEND\n",
+                metadata={"final_energy": -1.0},
+            )
+
+        mock_relax.side_effect = _side_effect
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {
+                    "iterate": {
+                        "n": 3,
+                        "seed_param": "seed",
+                        "steps": [{"operation": "relax"}],
+                    }
+                }
+            ],
+        )
+        wf.run()
+        assert seen_seeds == [1, 2, 3]
+
+    @patch("boundry.workflow.Workflow._run_minimize")
+    @patch("boundry.workflow.Workflow._run_analyze_interface")
+    def test_beam_top_k_continues_to_next_step(
+        self, mock_analyze, mock_minimize, tmp_path
+    ):
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        scores = [5.0, 1.0, 3.0, 2.0]
+        call_idx = {"i": 0}
+
+        def _analyze(structure, params):
+            i = call_idx["i"]
+            call_idx["i"] += 1
+            return Structure(
+                pdb_string=f"ATOM beam {i}\nEND\n",
+                metadata={"dG": scores[i]},
+            )
+
+        def _minimize(structure, params):
+            return Structure(
+                pdb_string=structure.pdb_string,
+                metadata={"final_energy": -10.0},
+            )
+
+        mock_analyze.side_effect = _analyze
+        mock_minimize.side_effect = _minimize
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {
+                    "beam": {
+                        "width": 2,
+                        "rounds": 1,
+                        "expand": 4,
+                        "metric": "dG",
+                        "direction": "min",
+                        "steps": [{"operation": "analyze_interface"}],
+                    }
+                },
+                {"operation": "minimize"},
+            ],
+        )
+        population = wf.run_population()
+        assert len(population) == 2
+        assert mock_minimize.call_count == 2
+
+    @patch("boundry.workflow.Workflow._run_idealize")
+    def test_beam_missing_metric_raises(self, mock_idealize, tmp_path):
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        mock_idealize.return_value = Structure(
+            pdb_string="ATOM\nEND\n",
+            metadata={"final_energy": -10.0},
+        )
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {
+                    "beam": {
+                        "width": 2,
+                        "rounds": 1,
+                        "metric": "dG",
+                        "steps": [{"operation": "idealize"}],
+                    }
+                }
+            ],
+        )
+        with pytest.raises(WorkflowError, match="Missing metric|missing metric"):
+            wf.run()
 
 
 # ------------------------------------------------------------------
@@ -545,8 +812,7 @@ class TestRunAnalyzeInterface:
         _, kwargs = mock_op.call_args
         config = kwargs["config"]
         assert config.chain_pairs == [("H", "A"), ("L", "A")]
-        # Should return the original structure unchanged
-        assert result is struct
+        assert result.pdb_string == struct.pdb_string
 
     @patch("boundry.operations.analyze_interface")
     def test_list_chain_pairs(self, mock_op):
@@ -583,7 +849,7 @@ class TestRunAnalyzeInterface:
         result = Workflow._run_analyze_interface(
             struct, {"calculate_binding_energy": False}
         )
-        assert result is struct
+        assert result.pdb_string == struct.pdb_string
 
 
 # ------------------------------------------------------------------

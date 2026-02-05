@@ -1,0 +1,25 @@
+# Convergence workflow
+#
+# Iterate design/relax/analyze until dG reaches target or max_n is hit.
+
+workflow_version: 1
+input: input.pdb
+output: converged_design.pdb
+
+steps:
+  - operation: idealize
+  - iterate:
+      until: "{dG} < -12.0"
+      max_n: 50
+      seed_param: seed
+      output: converge_cycle_{cycle}.pdb
+      steps:
+        - operation: design
+          params:
+            n_iterations: 1
+        - operation: relax
+          params:
+            n_iterations: 1
+        - operation: analyze_interface
+          params:
+            calculate_binding_energy: true

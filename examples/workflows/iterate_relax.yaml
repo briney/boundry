@@ -1,0 +1,22 @@
+# Fixed-count iterate workflow
+#
+# Idealize once, then run relax + interface analysis for 5 cycles with
+# cycle-based seed injection.
+
+workflow_version: 1
+input: input.pdb
+output: relaxed_iterate.pdb
+
+steps:
+  - operation: idealize
+  - iterate:
+      n: 5
+      seed_param: seed
+      output: iterate_cycle_{cycle}.pdb
+      steps:
+        - operation: relax
+          params:
+            n_iterations: 1
+        - operation: analyze_interface
+          params:
+            calculate_binding_energy: true

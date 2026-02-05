@@ -1,0 +1,40 @@
+# Combined pipeline workflow
+#
+# Idealize -> convergence loop -> beam search. Demonstrates nested,
+# composable block structures.
+
+workflow_version: 1
+input: input.pdb
+output: full_pipeline_{rank}.pdb
+
+steps:
+  - operation: idealize
+  - iterate:
+      until: "delta({final_energy}) < 0.5"
+      max_n: 20
+      seed_param: seed
+      output: converge_relax_cycle_{cycle}.pdb
+      steps:
+        - operation: relax
+          params:
+            n_iterations: 1
+        - operation: analyze_interface
+          params:
+            calculate_binding_energy: true
+  - beam:
+      width: 3
+      rounds: 6
+      expand: 3
+      metric: dG
+      direction: min
+      output: full_beam_round_{round}_rank_{rank}.pdb
+      steps:
+        - operation: design
+          params:
+            n_iterations: 1
+        - operation: relax
+          params:
+            n_iterations: 1
+        - operation: analyze_interface
+          params:
+            calculate_binding_energy: true

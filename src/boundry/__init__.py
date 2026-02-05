@@ -38,9 +38,11 @@ from boundry.workflow import Workflow
 
 # Configuration dataclasses (lightweight, no heavy deps)
 from boundry.config import (
+    BeamBlock,
     DesignConfig,
     IdealizeConfig,
     InterfaceConfig,
+    IterateBlock,
     PipelineConfig,
     RelaxConfig,
     WorkflowConfig,
@@ -78,6 +80,8 @@ __all__ = [
     "InterfaceConfig",
     "WorkflowConfig",
     "WorkflowStep",
+    "IterateBlock",
+    "BeamBlock",
     # Resfile
     "ResidueMode",
     "ResidueSpec",

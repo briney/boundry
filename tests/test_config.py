@@ -3,9 +3,11 @@
 from pathlib import Path
 
 from boundry.config import (
+    BeamBlock,
     DesignConfig,
     IdealizeConfig,
     InterfaceConfig,
+    IterateBlock,
     PipelineConfig,
     RelaxConfig,
     WorkflowConfig,
@@ -230,6 +232,7 @@ class TestWorkflowConfig:
         config = WorkflowConfig(input="input.pdb")
         assert config.input == "input.pdb"
         assert config.output is None
+        assert config.workflow_version == 1
         assert config.steps == []
 
     def test_full_config(self):
@@ -262,3 +265,29 @@ class TestWorkflowConfig:
         config2 = WorkflowConfig(input="b.pdb")
         config1.steps.append(WorkflowStep(operation="idealize"))
         assert len(config2.steps) == 0
+
+
+class TestIterateBlock:
+    """Tests for IterateBlock dataclass."""
+
+    def test_defaults(self):
+        block = IterateBlock(steps=[WorkflowStep(operation="idealize")])
+        assert block.n == 1
+        assert block.max_n == 100
+        assert block.until is None
+        assert block.seed_param is None
+        assert block.output is None
+
+
+class TestBeamBlock:
+    """Tests for BeamBlock dataclass."""
+
+    def test_defaults(self):
+        block = BeamBlock(steps=[WorkflowStep(operation="relax")])
+        assert block.width == 5
+        assert block.rounds == 10
+        assert block.metric == "dG"
+        assert block.direction == "min"
+        assert block.until is None
+        assert block.expand == 1
+        assert block.output is None

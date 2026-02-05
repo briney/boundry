@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 
 ModelType = Literal["protein_mpnn", "ligand_mpnn", "soluble_mpnn"]
@@ -118,14 +118,42 @@ class WorkflowStep:
 
 
 @dataclass
-class WorkflowConfig:
-    """Configuration for a YAML-based linear workflow.
+class IterateBlock:
+    """Repeat a group of steps for a fixed count or until convergence."""
 
-    A workflow is a sequence of :class:`WorkflowStep` instances
-    executed in order, with the output of each step fed as input
-    to the next.
+    steps: List["WorkflowStepOrBlock"]
+    n: int = 1
+    max_n: int = 100
+    until: Optional[str] = None
+    seed_param: Optional[str] = None
+    output: Optional[str] = None
+
+
+@dataclass
+class BeamBlock:
+    """Population-based beam search over a nested group of steps."""
+
+    steps: List["WorkflowStepOrBlock"]
+    width: int = 5
+    rounds: int = 10
+    metric: str = "dG"
+    direction: Literal["min", "max"] = "min"
+    until: Optional[str] = None
+    expand: int = 1
+    output: Optional[str] = None
+
+
+WorkflowStepOrBlock = Union[WorkflowStep, IterateBlock, BeamBlock]
+
+
+@dataclass
+class WorkflowConfig:
+    """Configuration for a YAML-based workflow.
+
+    Workflows are versioned schemas so the parser can evolve safely.
     """
 
     input: str  # Input PDB/CIF path
     output: Optional[str] = None  # Final output path
-    steps: List[WorkflowStep] = field(default_factory=list)
+    workflow_version: int = 1
+    steps: List[WorkflowStepOrBlock] = field(default_factory=list)

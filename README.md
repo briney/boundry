@@ -211,10 +211,12 @@ for row in result.per_position.rows:
 
 ## Workflows
 
-Workflows define a linear sequence of operations in YAML. Each step's output is fed as input to the next step.
+Workflows define operations and compound control-flow blocks in YAML.
+Each step's output is fed as input to the next step (or candidate set).
 
 ```yaml
 # workflow.yaml
+workflow_version: 1
 input: input.pdb
 output: final.pdb
 
@@ -240,6 +242,16 @@ from boundry import Workflow
 workflow = Workflow.from_yaml("workflow.yaml")
 result = workflow.run()
 ```
+
+Compound block nodes are also supported:
+
+- `iterate`: repeat nested steps for `n` cycles or until `until` condition.
+- `beam`: population search with `width`, `rounds`, `metric`, and pruning.
+
+See `examples/workflows/iterate_relax.yaml`,
+`examples/workflows/converge_design.yaml`,
+`examples/workflows/beam_design.yaml`, and
+`examples/workflows/full_pipeline.yaml` for complete examples.
 
 ### Supported Operations
 
