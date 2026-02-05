@@ -12,7 +12,7 @@ steps:
   - iterate:
       until: "delta({final_energy}) < 0.5"
       max_n: 20
-      seed_param: seed
+      seed: true
       output: converge_relax_cycle_{cycle}.pdb
       steps:
         - operation: relax

@@ -41,7 +41,7 @@ SEED_PARAM_BY_OPERATION: Dict[str, str] = {
     "mpnn": "seed",
     "relax": "seed",
     "design": "seed",
-    "analyze_interface": "relax_separated_seed",
+    "analyze_interface": "seed",
 }
 
 
@@ -53,6 +53,29 @@ def _extract_fields(params: Dict[str, Any], cls: type) -> Dict[str, Any]:
     """Pop keys from *params* that match fields of dataclass *cls*."""
     fields = {f.name for f in dataclasses.fields(cls)}
     return {k: params.pop(k) for k in list(params) if k in fields}
+
+
+_STRUCTURE_EXTENSIONS = frozenset({".pdb", ".cif", ".mmcif"})
+
+
+def _is_directory_output(path_template: str) -> bool:
+    """A path is a directory if it ends with '/' or has no recognized file extension."""
+    if path_template.endswith("/"):
+        return True
+    stripped = path_template.replace("{", "").replace("}", "")
+    return Path(stripped).suffix.lower() not in _STRUCTURE_EXTENSIONS
+
+
+_DEFAULT_STEM: Dict[str, str] = {
+    "idealize": "idealized",
+    "minimize": "minimized",
+    "repack": "repacked",
+    "relax": "relaxed",
+    "mpnn": "designed_mpnn",
+    "design": "designed",
+    "renumber": "renumbered",
+    "analyze_interface": "interface_analysis",
+}
 
 
 ParserFn = Callable[[Dict[str, Any], str], WorkflowStepOrBlock]
@@ -185,7 +208,7 @@ def _parse_iterate(step_data: Dict[str, Any], label: str) -> IterateBlock:
 
     _validate_unknown_keys(
         block_data,
-        {"steps", "n", "max_n", "until", "seed_param", "output"},
+        {"steps", "n", "max_n", "until", "seed", "output"},
         f"{label}.iterate",
     )
 
@@ -209,11 +232,7 @@ def _parse_iterate(step_data: Dict[str, Any], label: str) -> IterateBlock:
         f"{label}.iterate",
         "until",
     )
-    seed_param = _parse_optional_str(
-        block_data.get("seed_param"),
-        f"{label}.iterate",
-        "seed_param",
-    )
+    seed = bool(block_data.get("seed", False))
     output = _parse_optional_str(
         block_data.get("output"),
         f"{label}.iterate",
@@ -232,7 +251,7 @@ def _parse_iterate(step_data: Dict[str, Any], label: str) -> IterateBlock:
         n=n,
         max_n=max_n,
         until=until,
-        seed_param=seed_param,
+        seed=seed,
         output=output,
     )
 
@@ -461,10 +480,19 @@ class Workflow:
             logger.info(f"Step {i}/{total}: {self._describe_item(item)}")
             current = self._execute_item(item, current, seed_base=None)
             if isinstance(item, WorkflowStep) and item.output is not None:
-                self._write_population(current.population, item.output)
+                self._write_population(
+                    current.population, item.output, operation=item.operation
+                )
 
         if self.config.output is not None:
-            self._write_population(current.population, self.config.output)
+            last_op = None
+            if self.config.steps:
+                last = self.config.steps[-1]
+                if isinstance(last, WorkflowStep):
+                    last_op = last.operation
+            self._write_population(
+                current.population, self.config.output, operation=last_op
+            )
 
         self.last_population = list(current.population)
         return list(current.population)
@@ -474,7 +502,6 @@ class Workflow:
         item: WorkflowStepOrBlock,
         context: _ExecutionContext,
         seed_base: Optional[int],
-        seed_param_override: Optional[str] = None,
     ) -> _ExecutionContext:
         method_name = self._EXECUTE_DISPATCH.get(type(item))
         if method_name is None:
@@ -482,14 +509,13 @@ class Workflow:
                 f"Unsupported node type '{type(item).__name__}'"
             )
         handler = getattr(self, method_name)
-        return handler(item, context, seed_base, seed_param_override)
+        return handler(item, context, seed_base)
 
     def _execute_step(
         self,
         step: WorkflowStep,
         context: _ExecutionContext,
         seed_base: Optional[int],
-        seed_param_override: Optional[str],
     ) -> _ExecutionContext:
         from boundry.operations import Structure
 
@@ -514,7 +540,6 @@ class Workflow:
                 dict(step.params),
                 seed_base,
                 idx,
-                seed_param_override,
             )
             result = handler(structure, params)
             merged = merge_metadata(
@@ -536,7 +561,6 @@ class Workflow:
         block: IterateBlock,
         context: _ExecutionContext,
         seed_base: Optional[int],
-        seed_param_override: Optional[str],
     ) -> _ExecutionContext:
         current = context
         previous_metadata: Optional[Dict[str, Any]] = None
@@ -545,19 +569,22 @@ class Workflow:
 
         for cycle in range(1, max_iters + 1):
             cycle_seed = _compose_seed(seed_base, cycle)
-            inner_seed = cycle_seed if block.seed_param is not None else None
+            inner_seed = cycle_seed if block.seed else None
             for inner in block.steps:
                 current = self._execute_item(
                     inner,
                     current,
                     inner_seed,
-                    seed_param_override=block.seed_param,
                 )
 
             if block.output is not None:
+                last_op = None
+                if block.steps and isinstance(block.steps[-1], WorkflowStep):
+                    last_op = block.steps[-1].operation
                 self._write_population(
                     current.population,
                     block.output,
+                    operation=last_op,
                     cycle=cycle,
                 )
 
@@ -601,7 +628,6 @@ class Workflow:
         block: BeamBlock,
         context: _ExecutionContext,
         seed_base: Optional[int],
-        seed_param_override: Optional[str],
     ) -> _ExecutionContext:
         population = list(context.population)
         previous_best_metadata: Optional[Dict[str, Any]] = None
@@ -630,7 +656,6 @@ class Workflow:
                             inner,
                             branch,
                             branch_seed,
-                            seed_param_override=seed_param_override,
                         )
                     expanded.extend(branch.population)
 
@@ -666,9 +691,13 @@ class Workflow:
             )
 
             if block.output is not None:
+                last_op = None
+                if block.steps and isinstance(block.steps[-1], WorkflowStep):
+                    last_op = block.steps[-1].operation
                 self._write_population(
                     population,
                     block.output,
+                    operation=last_op,
                     round=round_num,
                 )
 
@@ -707,13 +736,10 @@ class Workflow:
         params: Dict[str, Any],
         seed_base: Optional[int],
         candidate_offset: int,
-        seed_param_override: Optional[str],
     ) -> Dict[str, Any]:
         if seed_base is None:
             return params
-        seed_param = seed_param_override or SEED_PARAM_BY_OPERATION.get(
-            operation
-        )
+        seed_param = SEED_PARAM_BY_OPERATION.get(operation)
         if seed_param is None:
             return params
         params[seed_param] = seed_base + candidate_offset
@@ -750,10 +776,15 @@ class Workflow:
         self,
         population: List["Structure"],
         path_template: str,
+        operation: Optional[str] = None,
         **tokens: int,
     ) -> None:
         if not population:
             return
+        if _is_directory_output(path_template):
+            return self._write_population_to_dir(
+                population, path_template, operation, **tokens
+            )
 
         if len(population) == 1:
             path = self._render_path(path_template, rank=1, **tokens)
@@ -774,6 +805,79 @@ class Workflow:
                 path = _add_rank_suffix(base, rank)
             structure.write(path)
             logger.info(f"  Wrote output rank {rank}: {path}")
+
+    def _write_population_to_dir(
+        self,
+        population: List["Structure"],
+        dir_template: str,
+        operation: Optional[str],
+        **tokens: int,
+    ) -> None:
+        dir_path = Path(self._render_path(dir_template, **tokens))
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+        stem = _DEFAULT_STEM.get(operation, "output") if operation else "output"
+
+        # Build token suffix: "cycle_3", "round_2", etc.
+        token_parts = [f"{k}_{v}" for k, v in sorted(tokens.items())]
+        suffix = "_".join(token_parts)
+
+        for rank, structure in enumerate(population, 1):
+            parts = [stem]
+            if suffix:
+                parts.append(suffix)
+            if len(population) > 1:
+                parts.append(f"rank_{rank}")
+            filename = "_".join(parts)
+
+            # Write structure PDB
+            pdb_path = dir_path / f"{filename}.pdb"
+            structure.write(pdb_path)
+            logger.info(f"  Wrote output: {pdb_path}")
+
+            # Write auxiliary files based on metadata
+            self._write_auxiliary_files(structure, dir_path, filename, operation)
+
+    @staticmethod
+    def _write_auxiliary_files(structure, dir_path, filename, operation):
+        """Auto-write all available auxiliary outputs to the directory."""
+        import json
+
+        meta = structure.metadata
+
+        # Per-position CSV (from analyze_interface)
+        per_position = meta.get("per_position")
+        if per_position is not None:
+            from boundry.interface_position_energetics import write_position_csv
+
+            csv_path = dir_path / f"{filename}_positions.csv"
+            write_position_csv(per_position, csv_path)
+            logger.info(f"  Wrote per-position CSV: {csv_path}")
+
+        # Metrics JSON — write workflow metrics for any operation that produces them
+        wf = meta.get("_workflow", {})
+        metrics = wf.get("metrics")
+        if metrics:
+            json_path = dir_path / f"{filename}_metrics.json"
+            with open(json_path, "w") as f:
+                json.dump(metrics, f, indent=2, default=str)
+            logger.info(f"  Wrote metrics: {json_path}")
+
+        # Energy breakdown (from relax, design, minimize)
+        energy = meta.get("energy_breakdown")
+        if energy:
+            json_path = dir_path / f"{filename}_energy.json"
+            with open(json_path, "w") as f:
+                json.dump(energy, f, indent=2, default=str)
+            logger.info(f"  Wrote energy breakdown: {json_path}")
+
+        # Interface-specific metrics
+        interface_metrics = meta.get("metrics", {}).get("interface")
+        if interface_metrics:
+            json_path = dir_path / f"{filename}_interface.json"
+            with open(json_path, "w") as f:
+                json.dump(interface_metrics, f, indent=2, default=str)
+            logger.info(f"  Wrote interface metrics: {json_path}")
 
     @staticmethod
     def _render_path(path_template: str, **tokens: int) -> str:
@@ -799,7 +903,10 @@ class Workflow:
         from boundry.config import IdealizeConfig
         from boundry.operations import idealize
 
-        config = IdealizeConfig(enabled=True, **params)
+        idealize_params = _extract_fields(params, IdealizeConfig)
+        if params:
+            logger.warning(f"Unknown idealize params ignored: {params}")
+        config = IdealizeConfig(enabled=True, **idealize_params)
         return idealize(structure, config=config)
 
     @staticmethod
@@ -808,7 +915,10 @@ class Workflow:
         from boundry.operations import minimize
 
         pre_idealize = params.pop("pre_idealize", False)
-        config = RelaxConfig(**params)
+        relax_params = _extract_fields(params, RelaxConfig)
+        if params:
+            logger.warning(f"Unknown minimize params ignored: {params}")
+        config = RelaxConfig(**relax_params)
         return minimize(
             structure,
             config=config,
@@ -823,8 +933,11 @@ class Workflow:
 
         pre_idealize = params.pop("pre_idealize", False)
         resfile = params.pop("resfile", None)
+        design_params = _extract_fields(params, DesignConfig)
+        if params:
+            logger.warning(f"Unknown repack params ignored: {params}")
         ensure_weights()
-        config = DesignConfig(**params)
+        config = DesignConfig(**design_params)
         return repack(
             structure,
             config=config,
@@ -869,8 +982,11 @@ class Workflow:
 
         pre_idealize = params.pop("pre_idealize", False)
         resfile = params.pop("resfile", None)
+        design_params = _extract_fields(params, DesignConfig)
+        if params:
+            logger.warning(f"Unknown mpnn params ignored: {params}")
         ensure_weights()
-        config = DesignConfig(**params)
+        config = DesignConfig(**design_params)
         return mpnn(
             structure,
             config=config,
@@ -935,7 +1051,10 @@ class Workflow:
         if chain_pairs is not None:
             params["chain_pairs"] = chain_pairs
 
-        config = InterfaceConfig(enabled=True, **params)
+        interface_params = _extract_fields(params, InterfaceConfig)
+        if params:
+            logger.warning(f"Unknown analyze_interface params ignored: {params}")
+        config = InterfaceConfig(enabled=True, **interface_params)
 
         relaxer = None
         designer = None

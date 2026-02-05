@@ -557,7 +557,7 @@ class TestCompoundExecution:
         assert calls["n"] == 3
 
     @patch("boundry.workflow.Workflow._run_relax")
-    def test_iterate_seed_param_injected(self, mock_relax, tmp_path):
+    def test_iterate_seed_injected(self, mock_relax, tmp_path):
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
@@ -577,7 +577,7 @@ class TestCompoundExecution:
                 {
                     "iterate": {
                         "n": 3,
-                        "seed_param": "seed",
+                        "seed": True,
                         "steps": [{"operation": "relax"}],
                     }
                 }
@@ -910,3 +910,297 @@ class TestValidOperations:
     def test_renumber_in_valid_operations(self):
         """Renumber is a valid workflow operation."""
         assert "renumber" in VALID_OPERATIONS
+
+
+# ------------------------------------------------------------------
+# Directory output detection
+# ------------------------------------------------------------------
+
+
+class TestIsDirectoryOutput:
+    """Tests for _is_directory_output helper."""
+
+    def test_trailing_slash(self):
+        from boundry.workflow import _is_directory_output
+
+        assert _is_directory_output("results/") is True
+
+    def test_pdb_extension(self):
+        from boundry.workflow import _is_directory_output
+
+        assert _is_directory_output("output.pdb") is False
+
+    def test_cif_extension(self):
+        from boundry.workflow import _is_directory_output
+
+        assert _is_directory_output("output.cif") is False
+
+    def test_mmcif_extension(self):
+        from boundry.workflow import _is_directory_output
+
+        assert _is_directory_output("output.mmcif") is False
+
+    def test_no_extension(self):
+        from boundry.workflow import _is_directory_output
+
+        assert _is_directory_output("results") is True
+
+    def test_template_with_pdb(self):
+        from boundry.workflow import _is_directory_output
+
+        assert _is_directory_output("output_{cycle}.pdb") is False
+
+    def test_template_dir_with_slash(self):
+        from boundry.workflow import _is_directory_output
+
+        assert _is_directory_output("results/cycle_{cycle}/") is True
+
+    def test_non_structure_extension(self):
+        from boundry.workflow import _is_directory_output
+
+        assert _is_directory_output("output.json") is True
+
+
+# ------------------------------------------------------------------
+# Directory output writing
+# ------------------------------------------------------------------
+
+
+class TestDirectoryOutput:
+    """Tests for directory output writing."""
+
+    def _make_workflow(self, tmp_path, steps, output=None):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": str(tmp_path / "input.pdb"),
+                    "output": (
+                        str(tmp_path / output) if output else None
+                    ),
+                    "steps": steps,
+                }
+            )
+        )
+        return Workflow.from_yaml(wf_file)
+
+    def _make_input(self, tmp_path):
+        pdb = tmp_path / "input.pdb"
+        pdb.write_text(
+            "ATOM      1  N   ALA A   1       0.000   0.000   0.000"
+            "  1.00  0.00           N\nEND\n"
+        )
+        return pdb
+
+    @patch("boundry.workflow.Workflow._run_idealize")
+    def test_directory_output_creates_pdb(self, mock_idealize, tmp_path):
+        """Test that directory output creates a PDB file."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        mock_idealize.return_value = Structure(
+            pdb_string=(
+                "ATOM      1  N   ALA A   1       "
+                "1.000   1.000   1.000  1.00  0.00"
+                "           N\nEND\n"
+            )
+        )
+
+        output_dir = tmp_path / "results"
+        wf = self._make_workflow(
+            tmp_path,
+            [{"operation": "idealize"}],
+            output="results/",
+        )
+        wf.run()
+
+        assert output_dir.exists()
+        pdb_files = list(output_dir.glob("*.pdb"))
+        assert len(pdb_files) == 1
+        assert "idealized" in pdb_files[0].stem
+
+    @patch("boundry.workflow.Workflow._run_idealize")
+    def test_directory_output_energy_json(self, mock_idealize, tmp_path):
+        """Test that energy breakdown is written as JSON."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        mock_idealize.return_value = Structure(
+            pdb_string=(
+                "ATOM      1  N   ALA A   1       "
+                "1.000   1.000   1.000  1.00  0.00"
+                "           N\nEND\n"
+            ),
+            metadata={"energy_breakdown": {"total_energy": -100.0}},
+        )
+
+        wf = self._make_workflow(
+            tmp_path,
+            [{"operation": "idealize"}],
+            output="results/",
+        )
+        wf.run()
+
+        output_dir = tmp_path / "results"
+        json_files = list(output_dir.glob("*_energy.json"))
+        assert len(json_files) == 1
+
+    @patch("boundry.workflow.Workflow._run_relax")
+    def test_directory_output_with_tokens(self, mock_relax, tmp_path):
+        """Test that tokens are incorporated into filenames."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        call_count = {"n": 0}
+
+        def _side_effect(structure, params):
+            call_count["n"] += 1
+            return Structure(
+                pdb_string=(
+                    "ATOM      1  N   ALA A   1       "
+                    "1.000   1.000   1.000  1.00  0.00"
+                    "           N\nEND\n"
+                ),
+                metadata={"final_energy": -1.0 * call_count["n"]},
+            )
+
+        mock_relax.side_effect = _side_effect
+
+        output_dir = tmp_path / "results"
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {
+                    "iterate": {
+                        "n": 2,
+                        "output": str(output_dir) + "/",
+                        "steps": [{"operation": "relax"}],
+                    }
+                }
+            ],
+        )
+        wf.run()
+
+        assert output_dir.exists()
+        pdb_files = list(output_dir.glob("*.pdb"))
+        assert len(pdb_files) == 2
+        # Token should be in filename
+        filenames = sorted(f.stem for f in pdb_files)
+        assert any("cycle_1" in f for f in filenames)
+        assert any("cycle_2" in f for f in filenames)
+
+    @patch("boundry.workflow.Workflow._run_idealize")
+    def test_directory_output_multiple_population(
+        self, mock_idealize, tmp_path
+    ):
+        """Test that multiple structures get rank suffixes."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        mock_idealize.return_value = Structure(
+            pdb_string=(
+                "ATOM      1  N   ALA A   1       "
+                "1.000   1.000   1.000  1.00  0.00"
+                "           N\nEND\n"
+            ),
+        )
+
+        wf = self._make_workflow(
+            tmp_path,
+            [{"operation": "idealize"}],
+            output="results/",
+        )
+        # Manually set up a multi-structure population for _write_population
+        from boundry.operations import Structure as S
+
+        population = [
+            S(pdb_string=(
+                "ATOM      1  N   ALA A   1       "
+                "1.000   1.000   1.000  1.00  0.00"
+                "           N\nEND\n"
+            )),
+            S(pdb_string=(
+                "ATOM      1  N   ALA A   1       "
+                "2.000   2.000   2.000  1.00  0.00"
+                "           N\nEND\n"
+            )),
+        ]
+
+        output_dir = tmp_path / "results"
+        wf._write_population(population, str(output_dir) + "/", operation="relax")
+
+        pdb_files = list(output_dir.glob("*.pdb"))
+        assert len(pdb_files) == 2
+        filenames = sorted(f.stem for f in pdb_files)
+        assert any("rank_1" in f for f in filenames)
+        assert any("rank_2" in f for f in filenames)
+
+
+# ------------------------------------------------------------------
+# Safe param handling in _run_* methods
+# ------------------------------------------------------------------
+
+
+class TestSafeParamHandling:
+    """Tests that _run_* methods gracefully handle unknown params."""
+
+    @patch("boundry.operations.idealize")
+    def test_idealize_ignores_unknown_params(self, mock_op):
+        from boundry.operations import Structure
+
+        struct = Structure(pdb_string="ATOM\nEND\n")
+        mock_op.return_value = struct
+
+        # Should not raise, even with unknown 'bogus' param
+        Workflow._run_idealize(struct, {"fix_cis_omega": False, "bogus": 42})
+
+        _, kwargs = mock_op.call_args
+        config = kwargs["config"]
+        assert config.fix_cis_omega is False
+
+    @patch("boundry.operations.minimize")
+    def test_minimize_ignores_unknown_params(self, mock_op):
+        from boundry.operations import Structure
+
+        struct = Structure(pdb_string="ATOM\nEND\n")
+        mock_op.return_value = struct
+
+        Workflow._run_minimize(
+            struct, {"constrained": True, "bogus": 42}
+        )
+
+        _, kwargs = mock_op.call_args
+        config = kwargs["config"]
+        assert config.constrained is True
+
+    @patch("boundry.weights.ensure_weights")
+    @patch("boundry.operations.repack")
+    def test_repack_ignores_unknown_params(self, mock_op, mock_weights):
+        from boundry.operations import Structure
+
+        struct = Structure(pdb_string="ATOM\nEND\n")
+        mock_op.return_value = struct
+
+        Workflow._run_repack(
+            struct, {"temperature": 0.2, "bogus": 42}
+        )
+
+        _, kwargs = mock_op.call_args
+        config = kwargs["config"]
+        assert config.temperature == 0.2
+
+    @patch("boundry.weights.ensure_weights")
+    @patch("boundry.operations.mpnn")
+    def test_mpnn_ignores_unknown_params(self, mock_op, mock_weights):
+        from boundry.operations import Structure
+
+        struct = Structure(pdb_string="ATOM\nEND\n")
+        mock_op.return_value = struct
+
+        Workflow._run_mpnn(
+            struct, {"temperature": 0.2, "bogus": 42}
+        )
+
+        _, kwargs = mock_op.call_args
+        config = kwargs["config"]
+        assert config.temperature == 0.2

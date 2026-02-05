@@ -56,7 +56,7 @@ Allowed keys:
 ```yaml
 - iterate:
     n: 5
-    seed_param: seed
+    seed: true
     output: iterate_cycle_{cycle}.pdb
     steps:
       - operation: relax
@@ -78,13 +78,13 @@ Fields:
 - `n` (default `1`) for fixed-count mode (`until` omitted)
 - `until` (optional condition string) for convergence mode
 - `max_n` (default `100`) safety cap when `until` is set
-- `seed_param` (optional) explicit seed param name to inject each cycle
-- `output` (optional path template)
+- `seed` (bool, default `false`) inject deterministic seeds into each cycle
+- `output` (optional path template or directory path)
 
 Notes:
 
 - If `until` uses `delta(...)`, cycle 1 is treated as "not yet converged" (bootstrap).
-- Seed injection only happens for iterate when `seed_param` is set.
+- Seed injection only happens for iterate when `seed` is `true`.
 
 ### 2.3 Beam Block
 
@@ -299,7 +299,7 @@ Workflow `params`:
 - `calculate_shape_complementarity` (bool, default `false`)
 - `relax_separated` (bool, default `false`)
 - `relax_separated_iterations` (int, default `1`)
-- `relax_separated_seed` (int, optional)
+- `seed` (int, optional)
 - `sasa_probe_radius` (float, default `1.4`)
 - `per_position` (bool, default `false`)
 - `alanine_scan` (bool, default `false`)

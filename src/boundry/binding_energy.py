@@ -134,7 +134,7 @@ def calculate_binding_energy(
     relax_separated: bool = False,
     designer: Optional["Designer"] = None,  # noqa: F821
     relax_separated_iterations: int = 1,
-    relax_separated_seed: Optional[int] = None,
+    seed: Optional[int] = None,
 ) -> BindingEnergyResult:
     """
     Calculate binding energy by comparing complex and separated chain energies.
@@ -155,7 +155,7 @@ def calculate_binding_energy(
         designer: Designer instance (required if relax_separated is True)
         relax_separated_iterations: Number of repack+minimize iterations
             (samples rotamer space, selects lowest energy)
-        relax_separated_seed: Base random seed for iterations
+        seed: Base random seed for iterations
 
     Returns:
         BindingEnergyResult with energies and interface info
@@ -229,8 +229,8 @@ def calculate_binding_energy(
                 # Set seed for this iteration
                 if designer is not None:
                     iter_seed = (
-                        relax_separated_seed
-                        if relax_separated_seed is not None
+                        seed
+                        if seed is not None
                         else 0
                     ) + iter_idx
                     designer.set_seed(iter_seed)

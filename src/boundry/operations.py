@@ -797,7 +797,7 @@ def analyze_interface(
             relax_separated=config.relax_separated,
             designer=designer,
             relax_separated_iterations=config.relax_separated_iterations,
-            relax_separated_seed=config.relax_separated_seed,
+            seed=config.seed,
         )
         if result.binding_energy.binding_energy is not None:
             logger.info(

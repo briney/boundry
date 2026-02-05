@@ -757,7 +757,7 @@ def analyze_interface(
         calculate_shape_complementarity=shape_complementarity,
         relax_separated=relax_separated,
         relax_separated_iterations=relax_separated_iterations,
-        relax_separated_seed=relax_separated_seed,
+        seed=relax_separated_seed,
         per_position=per_position,
         alanine_scan=alanine_scan,
         scan_chains=parsed_scan_chains,

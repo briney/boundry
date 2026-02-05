@@ -275,7 +275,7 @@ class TestIterateBlock:
         assert block.n == 1
         assert block.max_n == 100
         assert block.until is None
-        assert block.seed_param is None
+        assert block.seed is False
         assert block.output is None
 
 
