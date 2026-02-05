@@ -151,6 +151,7 @@ class TestPipelineConfig:
         assert config.scorefile is None
         assert config.verbose is False
         assert config.remove_waters is True
+        assert config.show_progress is False
         assert isinstance(config.design, DesignConfig)
         assert isinstance(config.relax, RelaxConfig)
         assert isinstance(config.idealize, IdealizeConfig)
@@ -185,6 +186,11 @@ class TestPipelineConfig:
         config = PipelineConfig(n_iterations=10, n_outputs=5)
         assert config.n_iterations == 10
         assert config.n_outputs == 5
+
+    def test_show_progress_flag(self):
+        """Test show_progress flag setting."""
+        config = PipelineConfig(show_progress=True)
+        assert config.show_progress is True
 
 
 class TestWorkflowStep:

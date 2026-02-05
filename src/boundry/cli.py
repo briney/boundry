@@ -396,6 +396,9 @@ def relax(
     no_implicit_solvent: bool = typer.Option(
         False, help="Disable GBn2 implicit solvation"
     ),
+    no_progress: bool = typer.Option(
+        False, "--no-progress", help="Suppress progress bar"
+    ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Enable detailed logging from all components"
     ),
@@ -428,6 +431,7 @@ def relax(
             split_chains_at_gaps=not no_split_gaps,
             implicit_solvent=not no_implicit_solvent,
         ),
+        show_progress=not no_progress,
     )
 
     logger.info(
@@ -549,6 +553,9 @@ def design(
     no_implicit_solvent: bool = typer.Option(
         False, help="Disable GBn2 implicit solvation"
     ),
+    no_progress: bool = typer.Option(
+        False, "--no-progress", help="Suppress progress bar"
+    ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Enable detailed logging from all components"
     ),
@@ -581,6 +588,7 @@ def design(
             split_chains_at_gaps=not no_split_gaps,
             implicit_solvent=not no_implicit_solvent,
         ),
+        show_progress=not no_progress,
     )
 
     logger.info(

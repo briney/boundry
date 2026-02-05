@@ -408,7 +408,16 @@ def relax(
     iterations: list[dict[str, Any]] = []
     current_pdb = pdb_string
 
-    for i in range(1, n_iterations + 1):
+    # Set up optional progress bar
+    iterable = range(1, n_iterations + 1)
+    pbar = None
+    if config.show_progress:
+        from tqdm import tqdm
+
+        pbar = tqdm(iterable, desc="Relaxing", unit="iter")
+        iterable = pbar
+
+    for i in iterable:
         logger.info(f"Iteration {i}/{n_iterations}")
 
         # Repack
@@ -432,6 +441,10 @@ def relax(
                 "sequence": repack_result["sequence"],
             }
         )
+
+        # Update progress bar with energy
+        if pbar is not None:
+            pbar.set_postfix(E=f"{relax_info['final_energy']:.1f}")
 
         logger.info(
             f"  E_init={relax_info['initial_energy']:.2f}, "
@@ -599,7 +612,16 @@ def design(
     current_pdb = pdb_string
     original_native_sequence: Optional[str] = None
 
-    for i in range(1, n_iterations + 1):
+    # Set up optional progress bar
+    iterable = range(1, n_iterations + 1)
+    pbar = None
+    if config.show_progress:
+        from tqdm import tqdm
+
+        pbar = tqdm(iterable, desc="Designing", unit="iter")
+        iterable = pbar
+
+    for i in iterable:
         logger.info(f"Iteration {i}/{n_iterations}")
 
         # Design
@@ -640,6 +662,10 @@ def design(
                 "ligandmpnn_loss": float(design_result["loss"][0]),
             }
         )
+
+        # Update progress bar with energy
+        if pbar is not None:
+            pbar.set_postfix(E=f"{relax_info['final_energy']:.1f}")
 
         logger.info(
             f"  E_init={relax_info['initial_energy']:.2f}, "

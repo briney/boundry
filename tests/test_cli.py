@@ -142,6 +142,11 @@ class TestRelax:
         assert "--constrained" in result.output
         assert "--stiffness" in result.output
 
+    def test_has_no_progress_option(self):
+        """Test that --no-progress option is available."""
+        result = runner.invoke(app, ["relax", "--help"])
+        assert "--no-progress" in result.output
+
 
 class TestMpnn:
     """Tests for the mpnn subcommand."""
@@ -181,6 +186,11 @@ class TestDesign:
         assert "--temperature" in result.output
         assert "--constrained" in result.output
         assert "--model-type" in result.output
+
+    def test_has_no_progress_option(self):
+        """Test that --no-progress option is available."""
+        result = runner.invoke(app, ["design", "--help"])
+        assert "--no-progress" in result.output
 
 
 class TestRenumber:

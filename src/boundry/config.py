@@ -91,6 +91,7 @@ class PipelineConfig:
     scorefile: Optional[Path] = None  # If set, write scores to this file
     verbose: bool = False
     remove_waters: bool = True  # Remove water molecules from input
+    show_progress: bool = False  # Show tqdm progress bar for iterations
     design: DesignConfig = field(default_factory=DesignConfig)
     relax: RelaxConfig = field(default_factory=RelaxConfig)
     idealize: IdealizeConfig = field(default_factory=IdealizeConfig)
