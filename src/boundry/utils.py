@@ -1,13 +1,43 @@
 """Utility functions for scoring and I/O."""
 
+import contextlib
 import logging
 import math
+import os
 from pathlib import Path
 from typing import Optional
 
 from boundry.structure_io import StructureFormat
 
 logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def suppress_stderr():
+    """Temporarily redirect fd 2 (stderr) to /dev/null.
+
+    This context manager captures C library output from dependencies like
+    PDBFixer, OpenMM, and FreeSASA that bypass Python's logging system
+    and write directly to stderr.
+
+    Use this to suppress noisy output in non-verbose CLI runs.
+
+    Example::
+
+        with suppress_stderr():
+            # C-level stderr noise is silenced here
+            run_openmm_operation()
+    """
+    stderr_fd = 2
+    saved_fd = os.dup(stderr_fd)
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, stderr_fd)
+        os.close(devnull)
+        yield
+    finally:
+        os.dup2(saved_fd, stderr_fd)
+        os.close(saved_fd)
 
 
 def remove_waters(structure_string: str, fmt: StructureFormat = None) -> str:

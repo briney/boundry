@@ -16,7 +16,9 @@ app = typer.Typer(
         "Protein engineering with LigandMPNN design and AMBER relaxation.\n\n"
         "Boundry combines neural network-based sequence design (LigandMPNN) "
         "with physics-based energy minimization (OpenMM AMBER), similar to "
-        "Rosetta FastRelax and FastDesign protocols."
+        "Rosetta FastRelax and FastDesign protocols.\n\n"
+        "By default, commands run quietly with minimal output. Use --verbose "
+        "to enable detailed logging from OpenMM, ProDy, and other dependencies."
     ),
     no_args_is_help=True,
     add_completion=False,
@@ -29,17 +31,30 @@ app = typer.Typer(
 
 
 def _setup_logging(verbose: bool) -> None:
-    """Configure logging for the CLI."""
+    """Configure logging for the CLI.
+
+    Default (non-verbose) runs are quiet - only warnings and errors from
+    Boundry itself are shown. Third-party dependency logging, Python
+    warnings from OpenMM/PDBFixer/FreeSASA/torch, and absl logging from
+    OpenFold are all suppressed.
+
+    With --verbose, detailed logs from all components are enabled.
+    """
+    import warnings
+
     level = logging.DEBUG if verbose else logging.WARNING
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
+        force=True,  # Override any existing handlers
     )
-    if not verbose:
-        # Suppress noisy dependency loggers
-        import warnings
 
+    if verbose:
+        # In verbose mode, capture Python warnings into logging
+        logging.captureWarnings(True)
+    else:
+        # Suppress noisy dependency loggers
         for name in (
             "openmm",
             "pdbfixer",
@@ -48,12 +63,56 @@ def _setup_logging(verbose: bool) -> None:
             "torch",
             "absl",
             "prody",
+            "py.warnings",
         ):
             logging.getLogger(name).setLevel(logging.ERROR)
+
+        # Suppress Python warnings from dependencies
         warnings.filterwarnings(
             "ignore",
-            module=r"(openmm|pdbfixer|Bio|freesasa|torch|absl|openfold)",
+            module=r"(openmm|pdbfixer|Bio|freesasa|torch|absl|openfold|simtk)",
         )
+        # Suppress simtk deprecation warnings specifically
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*simtk.*",
+            category=DeprecationWarning,
+        )
+
+        # Suppress absl logging (used by OpenFold)
+        try:
+            from absl import logging as absl_logging
+
+            absl_logging.set_verbosity(absl_logging.ERROR)
+            absl_logging.set_stderrthreshold(absl_logging.ERROR)
+        except ImportError:
+            pass  # absl not installed, nothing to suppress
+
+        # Suppress ProDy logger explicitly
+        try:
+            import prody
+
+            prody.confProDy(verbosity="none")
+        except ImportError:
+            pass  # prody not installed
+
+
+def _quiet_context(verbose: bool):
+    """Return context manager to suppress C-level stderr when not verbose.
+
+    C libraries (OpenMM, PDBFixer, FreeSASA) write directly to stderr,
+    bypassing Python's logging system. This function returns:
+    - nullcontext() if verbose=True (stderr passes through)
+    - suppress_stderr() if verbose=False (stderr redirected to /dev/null)
+    """
+    import contextlib
+
+    if verbose:
+        return contextlib.nullcontext()
+    else:
+        from boundry.utils import suppress_stderr
+
+        return suppress_stderr()
 
 
 def _validate_input(path: Path) -> None:
@@ -151,7 +210,7 @@ def idealize(
         10.0, help="Restraint stiffness in kcal/mol/A^2"
     ),
     verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Enable verbose output"
+        False, "--verbose", "-v", help="Enable detailed logging from all components"
     ),
 ):
     """Fix backbone geometry while preserving dihedral angles."""
@@ -170,7 +229,8 @@ def idealize(
     )
 
     logger.info(f"Idealizing {input_file} -> {output_file}")
-    result = _idealize(input_file, config=config)
+    with _quiet_context(verbose):
+        result = _idealize(input_file, config=config)
     result.write(output_file)
     logger.info(f"Wrote idealized structure to {output_file}")
 
@@ -204,7 +264,7 @@ def minimize(
         False, help="Disable GBn2 implicit solvation"
     ),
     verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Enable verbose output"
+        False, "--verbose", "-v", help="Enable detailed logging from all components"
     ),
 ):
     """Energy minimization using OpenMM AMBER force field."""
@@ -224,9 +284,10 @@ def minimize(
     )
 
     logger.info(f"Minimizing {input_file} -> {output_file}")
-    result = _minimize(
-        input_file, config=config, pre_idealize=pre_idealize
-    )
+    with _quiet_context(verbose):
+        result = _minimize(
+            input_file, config=config, pre_idealize=pre_idealize
+        )
     result.write(output_file)
 
     energy = result.metadata.get("final_energy")
@@ -260,7 +321,7 @@ def repack(
         None, help="Random seed for reproducibility"
     ),
     verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Enable verbose output"
+        False, "--verbose", "-v", help="Enable detailed logging from all components"
     ),
 ):
     """Repack side chains without changing sequence."""
@@ -280,12 +341,13 @@ def repack(
     )
 
     logger.info(f"Repacking {input_file} -> {output_file}")
-    result = _repack(
-        input_file,
-        config=config,
-        resfile=resfile,
-        pre_idealize=pre_idealize,
-    )
+    with _quiet_context(verbose):
+        result = _repack(
+            input_file,
+            config=config,
+            resfile=resfile,
+            pre_idealize=pre_idealize,
+        )
     result.write(output_file)
     logger.info(f"Wrote repacked structure to {output_file}")
 
@@ -335,7 +397,7 @@ def relax(
         False, help="Disable GBn2 implicit solvation"
     ),
     verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Enable verbose output"
+        False, "--verbose", "-v", help="Enable detailed logging from all components"
     ),
 ):
     """Iterative side-chain repacking and energy minimization.
@@ -371,13 +433,14 @@ def relax(
     logger.info(
         f"Relaxing {input_file} -> {output_file} ({n_iter} iterations)"
     )
-    result = _relax(
-        input_file,
-        config=config,
-        resfile=resfile,
-        pre_idealize=pre_idealize,
-        n_iterations=n_iter,
-    )
+    with _quiet_context(verbose):
+        result = _relax(
+            input_file,
+            config=config,
+            resfile=resfile,
+            pre_idealize=pre_idealize,
+            n_iterations=n_iter,
+        )
     result.write(output_file)
 
     energy = result.metadata.get("final_energy")
@@ -411,7 +474,7 @@ def mpnn(
         None, help="Random seed for reproducibility"
     ),
     verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Enable verbose output"
+        False, "--verbose", "-v", help="Enable detailed logging from all components"
     ),
 ):
     """Sequence design using LigandMPNN."""
@@ -431,12 +494,13 @@ def mpnn(
     )
 
     logger.info(f"Designing {input_file} -> {output_file}")
-    result = _mpnn(
-        input_file,
-        config=config,
-        resfile=resfile,
-        pre_idealize=pre_idealize,
-    )
+    with _quiet_context(verbose):
+        result = _mpnn(
+            input_file,
+            config=config,
+            resfile=resfile,
+            pre_idealize=pre_idealize,
+        )
     result.write(output_file)
     logger.info(f"Wrote designed structure to {output_file}")
 
@@ -486,7 +550,7 @@ def design(
         False, help="Disable GBn2 implicit solvation"
     ),
     verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Enable verbose output"
+        False, "--verbose", "-v", help="Enable detailed logging from all components"
     ),
 ):
     """Iterative sequence design and energy minimization.
@@ -522,13 +586,14 @@ def design(
     logger.info(
         f"Designing {input_file} -> {output_file} ({n_iter} iterations)"
     )
-    result = _design(
-        input_file,
-        config=config,
-        resfile=resfile,
-        pre_idealize=pre_idealize,
-        n_iterations=n_iter,
-    )
+    with _quiet_context(verbose):
+        result = _design(
+            input_file,
+            config=config,
+            resfile=resfile,
+            pre_idealize=pre_idealize,
+            n_iterations=n_iter,
+        )
     result.write(output_file)
 
     energy = result.metadata.get("final_energy")
@@ -546,7 +611,7 @@ def renumber(
         ..., metavar="OUTPUT", help="Output structure file"
     ),
     verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Enable verbose output"
+        False, "--verbose", "-v", help="Enable detailed logging from all components"
     ),
 ):
     """Renumber residues sequentially, removing insertion codes.
@@ -641,7 +706,7 @@ def analyze_interface(
         "(useful for large interfaces)",
     ),
     verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Enable verbose output"
+        False, "--verbose", "-v", help="Enable detailed logging from all components"
     ),
 ):
     """Analyze protein-protein interface properties.
@@ -767,7 +832,7 @@ def run(
         ..., metavar="WORKFLOW", help="YAML workflow file"
     ),
     verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Enable verbose output"
+        False, "--verbose", "-v", help="Enable detailed logging from all components"
     ),
 ):
     """Execute a YAML workflow."""

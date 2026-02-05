@@ -7,11 +7,10 @@ Provides per-residue binding energy decomposition and alanine-scanning
 - ``ΔΔG = dG_ala - dG_wt`` (positive = destabilising hotspot)
 """
 
-import csv
 import contextlib
+import csv
 import io
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
@@ -23,6 +22,7 @@ from boundry.binding_energy import (
     extract_chain,
 )
 from boundry.interface import InterfaceResidue
+from boundry.utils import suppress_stderr as _suppress_stderr
 
 if TYPE_CHECKING:
     from boundry.designer import Designer
@@ -35,30 +35,6 @@ _ALANINE_SCAN_SKIP = {"ALA", "GLY", "PRO"}
 
 # Atoms retained when mutating to alanine
 _ALA_ATOMS = {"N", "CA", "C", "O", "CB", "OXT", "H", "HA"}
-
-
-# ------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------
-
-
-@contextlib.contextmanager
-def _suppress_stderr():
-    """Temporarily redirect fd 2 (stderr) to /dev/null.
-
-    Catches C library output from PDBFixer, OpenMM, and FreeSASA that
-    bypasses Python logging.
-    """
-    stderr_fd = 2
-    saved_fd = os.dup(stderr_fd)
-    try:
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, stderr_fd)
-        os.close(devnull)
-        yield
-    finally:
-        os.dup2(saved_fd, stderr_fd)
-        os.close(saved_fd)
 
 
 # ------------------------------------------------------------------
