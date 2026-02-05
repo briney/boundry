@@ -588,11 +588,8 @@ def analyze_interface(
         "--shape-complementarity",
         help="Calculate shape complementarity (experimental)",
     ),
-    pack_separated: bool = typer.Option(
-        False, help="Repack side chains on separated partners"
-    ),
     relax_separated: bool = typer.Option(
-        False, help="Minimize separated partners after repacking"
+        False, help="Repack and minimize separated partners (full relax)"
     ),
     constrained: bool = typer.Option(
         False,
@@ -614,10 +611,10 @@ def analyze_interface(
         help="Restrict per-position / alanine scan to these chains "
         "(comma-separated, e.g. 'A,B')",
     ),
-    position_repack: str = typer.Option(
-        "both",
-        "--position-repack",
-        help="Repack policy for per-position scans: "
+    position_relax: str = typer.Option(
+        "none",
+        "--position-relax",
+        help="Relax policy for per-position scans: "
         "both (bound+unbound), unbound, none",
     ),
     position_csv: Optional[Path] = typer.Option(
@@ -647,10 +644,10 @@ def analyze_interface(
     _setup_logging(verbose)
     _validate_input(input_file)
 
-    if position_repack not in ("both", "unbound", "none"):
+    if position_relax not in ("both", "unbound", "none"):
         typer.echo(
-            f"Error: --position-repack must be 'both', 'unbound', "
-            f"or 'none' (got '{position_repack}')",
+            f"Error: --position-relax must be 'both', 'unbound', "
+            f"or 'none' (got '{position_relax}')",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -673,12 +670,11 @@ def analyze_interface(
         calculate_binding_energy=not no_binding_energy,
         calculate_sasa=sasa,
         calculate_shape_complementarity=shape_complementarity,
-        pack_separated=pack_separated,
-        relax_separated_chains=relax_separated,
+        relax_separated=relax_separated,
         per_position=per_position,
         alanine_scan=alanine_scan,
         scan_chains=parsed_scan_chains,
-        position_repack=position_repack,
+        position_relax=position_relax,
         position_csv=position_csv,
         max_scan_sites=max_scan_sites,
         show_progress=per_position or alanine_scan,
@@ -690,10 +686,10 @@ def analyze_interface(
 
     needs_relaxer = not no_binding_energy or per_position or alanine_scan
     needs_designer = (
-        pack_separated
+        relax_separated
         or (
             (per_position or alanine_scan)
-            and position_repack != "none"
+            and position_relax != "none"
         )
     )
 

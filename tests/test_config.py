@@ -115,9 +115,9 @@ class TestInterfaceConfig:
         assert config.calculate_binding_energy is True
         assert config.calculate_sasa is False
         assert config.calculate_shape_complementarity is False
-        assert config.pack_separated is False
-        assert config.relax_separated_chains is False
+        assert config.relax_separated is False
         assert config.sasa_probe_radius == 1.4
+        assert config.position_relax == "none"
         assert config.show_progress is False
         assert config.quiet is False
 

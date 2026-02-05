@@ -116,7 +116,7 @@ class PerPositionResult:
     dG_wt: Optional[float] = None
     distance_cutoff: float = 8.0
     chain_pairs: List[Tuple[str, str]] = field(default_factory=list)
-    position_repack: str = "both"
+    position_relax: str = "none"
     relax_separated: bool = False
     constrained: bool = False
 
@@ -230,9 +230,8 @@ def _compute_rosetta_dG(
     relaxer: "Relaxer",
     chain_pairs: List[Tuple[str, str]],
     distance_cutoff: float = 8.0,
-    pack_separated: bool = False,
     relax_separated: bool = False,
-    repacker: Optional["Designer"] = None,
+    designer: Optional["Designer"] = None,
 ) -> float:
     """Compute binding energy dG = E_bound - E_unbound (negative = favorable).
 
@@ -246,9 +245,8 @@ def _compute_rosetta_dG(
         relaxer,
         chain_pairs=chain_pairs,
         distance_cutoff=distance_cutoff,
-        pack_separated=pack_separated,
         relax_separated=relax_separated,
-        repacker=repacker,
+        designer=designer,
     )
     if result.binding_energy is None:
         raise RuntimeError(
@@ -258,18 +256,18 @@ def _compute_rosetta_dG(
     return result.binding_energy
 
 
-def _apply_repack_policy(
+def _apply_relax_policy(
     pdb_string: str,
     chain_groups: List[List[str]],
-    position_repack: str,
+    position_relax: str,
     designer: Optional["Designer"],
 ) -> Tuple[str, List[str]]:
-    """Apply the repack policy and return (bound_pdb, [unbound_pdbs]).
+    """Apply the relax policy and return (bound_pdb, [unbound_pdbs]).
 
-    ``position_repack`` is one of ``"both"``, ``"unbound"``, ``"none"``.
+    ``position_relax`` is one of ``"both"``, ``"unbound"``, ``"none"``.
     """
     bound_pdb = pdb_string
-    if position_repack == "both" and designer is not None:
+    if position_relax == "both" and designer is not None:
         try:
             bound_pdb = _repack_with_designer(pdb_string, designer)
         except Exception as e:
@@ -278,7 +276,7 @@ def _apply_repack_policy(
     unbound_pdbs: list[str] = []
     for group in chain_groups:
         chain_pdb = extract_chain(pdb_string, group)
-        if position_repack in ("both", "unbound") and designer is not None:
+        if position_relax in ("both", "unbound") and designer is not None:
             try:
                 chain_pdb = _repack_with_designer(chain_pdb, designer)
             except Exception as e:
@@ -302,7 +300,7 @@ def compute_alanine_scan(
     dG_wt: float,
     designer: Optional["Designer"] = None,
     distance_cutoff: float = 8.0,
-    position_repack: str = "both",
+    position_relax: str = "none",
     relax_separated: bool = False,
     scan_chains: Optional[List[str]] = None,
     max_scan_sites: Optional[int] = None,
@@ -315,8 +313,8 @@ def compute_alanine_scan(
     scanned residue.  Residues that are GLY, PRO, or already ALA are
     skipped and mapped to ``(None, None)``.
     """
-    pack_sep = position_repack in ("both", "unbound")
-    repacker = designer if pack_sep else None
+    relax_sep = position_relax in ("both", "unbound")
+    relax_designer = designer if relax_sep else None
 
     scan_sites = _select_scan_sites(
         interface_residues, scan_chains, max_scan_sites
@@ -363,9 +361,8 @@ def compute_alanine_scan(
                     relaxer,
                     chain_pairs=chain_pairs,
                     distance_cutoff=distance_cutoff,
-                    pack_separated=pack_sep,
-                    relax_separated=relax_separated,
-                    repacker=repacker,
+                    relax_separated=relax_sep or relax_separated,
+                    designer=relax_designer,
                 )
             delta_ddG = dG_ala - dG_wt
             results[key] = (dG_ala, delta_ddG)
@@ -392,7 +389,7 @@ def compute_per_position_dG(
     dG_total: float,
     designer: Optional["Designer"] = None,
     distance_cutoff: float = 8.0,
-    position_repack: str = "both",
+    position_relax: str = "none",
     relax_separated: bool = False,
     scan_chains: Optional[List[str]] = None,
     max_scan_sites: Optional[int] = None,
@@ -406,8 +403,8 @@ def compute_per_position_dG(
     A positive ``dG_i`` means residue *i* contributes favourably to
     binding (removing it makes binding *worse*).
     """
-    pack_sep = position_repack in ("both", "unbound")
-    repacker = designer if pack_sep else None
+    relax_sep = position_relax in ("both", "unbound")
+    relax_designer = designer if relax_sep else None
 
     scan_sites = _select_scan_sites(
         interface_residues, scan_chains, max_scan_sites
@@ -450,9 +447,8 @@ def compute_per_position_dG(
                     relaxer,
                     chain_pairs=chain_pairs,
                     distance_cutoff=distance_cutoff,
-                    pack_separated=pack_sep,
-                    relax_separated=relax_separated,
-                    repacker=repacker,
+                    relax_separated=relax_sep or relax_separated,
+                    designer=relax_designer,
                 )
             dG_i = dG_total - dG_without_i
             results[key] = dG_i
@@ -516,7 +512,7 @@ def compute_position_energetics(
     relaxer: "Relaxer",
     designer: Optional["Designer"] = None,
     distance_cutoff: float = 8.0,
-    position_repack: str = "both",
+    position_relax: str = "none",
     relax_separated: bool = False,
     scan_chains: Optional[List[str]] = None,
     max_scan_sites: Optional[int] = None,
@@ -543,8 +539,8 @@ def compute_position_energetics(
         )
 
     # Compute WT dG
-    pack_sep = position_repack in ("both", "unbound")
-    repacker = designer if pack_sep else None
+    relax_sep = position_relax in ("both", "unbound")
+    relax_designer = designer if relax_sep else None
 
     logger.info("Computing WT binding energy...")
     ctx = _suppress_stderr() if quiet else contextlib.nullcontext()
@@ -554,9 +550,8 @@ def compute_position_energetics(
             relaxer,
             chain_pairs=chain_pairs,
             distance_cutoff=distance_cutoff,
-            pack_separated=pack_sep,
-            relax_separated=relax_separated,
-            repacker=repacker,
+            relax_separated=relax_sep or relax_separated,
+            designer=relax_designer,
         )
     logger.info(f"  dG_wt = {dG_wt:.2f} kcal/mol")
 
@@ -574,7 +569,7 @@ def compute_position_energetics(
             dG_wt,
             designer=designer,
             distance_cutoff=distance_cutoff,
-            position_repack=position_repack,
+            position_relax=position_relax,
             relax_separated=relax_separated,
             scan_chains=scan_chains,
             max_scan_sites=max_scan_sites,
@@ -594,7 +589,7 @@ def compute_position_energetics(
             dG_wt,
             designer=designer,
             distance_cutoff=distance_cutoff,
-            position_repack=position_repack,
+            position_relax=position_relax,
             relax_separated=relax_separated,
             scan_chains=scan_chains,
             max_scan_sites=max_scan_sites,
@@ -651,7 +646,7 @@ def compute_position_energetics(
         dG_wt=dG_wt,
         distance_cutoff=distance_cutoff,
         chain_pairs=chain_pairs,
-        position_repack=position_repack,
+        position_relax=position_relax,
         relax_separated=relax_separated,
     )
 
@@ -680,7 +675,7 @@ _CSV_COLUMNS = [
 _METADATA_KEYS = [
     "distance_cutoff",
     "chain_pairs",
-    "position_repack",
+    "position_relax",
     "relax_separated",
 ]
 
@@ -702,7 +697,7 @@ def write_position_csv(
             f"{a}:{b}" for a, b in result.chain_pairs
         )
         f.write(f"# chain_pairs={pairs_str}\n")
-        f.write(f"# position_repack={result.position_repack}\n")
+        f.write(f"# position_relax={result.position_relax}\n")
         f.write(f"# relax_separated={result.relax_separated}\n")
         if result.dG_wt is not None:
             f.write(f"# dG_wt={result.dG_wt:.4f}\n")

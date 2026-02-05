@@ -233,7 +233,7 @@ class TestAnalyzeInterface:
         assert "--sasa" in result.output
         # Rich may truncate long option names; match prefix
         assert "--shape-complement" in result.output
-        assert "--pack-separated" in result.output
+        assert "--relax-separated" in result.output
 
     def test_no_output_file_argument(self):
         """Test that analyze-interface takes only one positional arg."""

@@ -722,8 +722,8 @@ def analyze_interface(
             not provided.
         relaxer: Relaxer instance (required for binding energy
             calculation).
-        designer: Designer instance (required if ``pack_separated``
-            is enabled in *config*).
+        designer: Designer instance (required if ``relax_separated``
+            is enabled or per-position scans use relaxation).
 
     Returns:
         InterfaceAnalysisResult with interface properties.
@@ -764,9 +764,8 @@ def analyze_interface(
             relaxer,
             chain_pairs=interface_info.chain_pairs,
             distance_cutoff=config.distance_cutoff,
-            pack_separated=config.pack_separated,
-            relax_separated=config.relax_separated_chains,
-            repacker=(designer if config.pack_separated else None),
+            relax_separated=config.relax_separated,
+            designer=designer,
         )
         if result.binding_energy.binding_energy is not None:
             logger.info(
@@ -821,8 +820,8 @@ def analyze_interface(
             relaxer,
             designer=designer,
             distance_cutoff=config.distance_cutoff,
-            position_repack=config.position_repack,
-            relax_separated=config.relax_separated_chains,
+            position_relax=config.position_relax,
+            relax_separated=config.relax_separated,
             scan_chains=config.scan_chains,
             max_scan_sites=config.max_scan_sites,
             run_per_position=config.per_position,

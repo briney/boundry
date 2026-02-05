@@ -330,7 +330,11 @@ class Workflow:
 
             relaxer = Relaxer(RelaxConfig(constrained=constrained))
 
-        if config.pack_separated:
+        needs_designer = config.relax_separated or (
+            (config.per_position or config.alanine_scan)
+            and config.position_relax != "none"
+        )
+        if needs_designer:
             from boundry.designer import Designer
             from boundry.weights import ensure_weights
 

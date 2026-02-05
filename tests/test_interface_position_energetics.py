@@ -344,7 +344,7 @@ class TestAlanineScanMath:
             chain_pairs=[("A", "B")],
             relaxer=relaxer,
             dG_wt=-10.0,
-            position_repack="none",
+            position_relax="none",
         )
 
         key = ResidueKey("A", 1, "")
@@ -372,7 +372,7 @@ class TestAlanineScanMath:
             chain_pairs=[("A", "B")],
             relaxer=relaxer,
             dG_wt=-10.0,
-            position_repack="none",
+            position_relax="none",
         )
 
         # GLY, PRO, ALA skipped
@@ -409,7 +409,7 @@ class TestPerPositionDGi:
             chain_pairs=[("A", "B")],
             relaxer=relaxer,
             dG_total=-10.0,
-            position_repack="none",
+            position_relax="none",
         )
 
         key = ResidueKey("A", 1, "")
@@ -430,7 +430,7 @@ class TestPerPositionDGi:
             chain_pairs=[("A", "B")],
             relaxer=relaxer,
             dG_total=-10.0,
-            position_repack="none",
+            position_relax="none",
         )
 
         key = ResidueKey("A", 1, "")
@@ -474,7 +474,7 @@ class TestComputePositionEnergetics:
             relaxer=relaxer,
             run_alanine_scan=True,
             run_per_position=False,
-            position_repack="none",
+            position_relax="none",
         )
 
         assert result.dG_wt == -10.0
@@ -499,7 +499,7 @@ class TestComputePositionEnergetics:
             relaxer=relaxer,
             run_alanine_scan=False,
             run_per_position=True,
-            position_repack="none",
+            position_relax="none",
         )
 
         assert result.dG_wt == -10.0
@@ -521,7 +521,7 @@ class TestComputePositionEnergetics:
             chain_pairs=[("A", "B")],
             relaxer=relaxer,
             run_alanine_scan=True,
-            position_repack="none",
+            position_relax="none",
         )
 
         row = result.rows[0]
@@ -543,7 +543,7 @@ class TestComputePositionEnergetics:
             relaxer=relaxer,
             run_alanine_scan=False,
             run_per_position=False,
-            position_repack="none",
+            position_relax="none",
             sasa_delta={"A1": 42.5},
         )
 
@@ -578,7 +578,7 @@ class TestWritePositionCSV:
             dG_wt=-10.0,
             distance_cutoff=8.0,
             chain_pairs=[("A", "B")],
-            position_repack="both",
+            position_relax="both",
         )
 
         csv_path = tmp_path / "test.csv"
@@ -588,7 +588,7 @@ class TestWritePositionCSV:
         # Metadata comments
         assert "# distance_cutoff=8.0" in content
         assert "# chain_pairs=A:B" in content
-        assert "# position_repack=both" in content
+        assert "# position_relax=both" in content
         assert "# dG_wt=-10.0000" in content
 
         # Parse data rows (skip comments)
@@ -717,13 +717,13 @@ class TestCLINewOptions:
         result = CliRunner().invoke(app, ["analyze-interface", "--help"])
         assert "--scan-chains" in result.output
 
-    def test_position_repack_option(self):
+    def test_position_relax_option(self):
         from typer.testing import CliRunner
 
         from boundry.cli import app
 
         result = CliRunner().invoke(app, ["analyze-interface", "--help"])
-        assert "--position-repack" in result.output
+        assert "--position-relax" in result.output
 
     def test_position_csv_option(self):
         from typer.testing import CliRunner

@@ -41,8 +41,8 @@ class TestInterfaceConfig:
         assert config.calculate_binding_energy is True
         assert config.calculate_sasa is False
         assert config.calculate_shape_complementarity is False
-        assert config.pack_separated is False
-        assert config.relax_separated_chains is False
+        assert config.relax_separated is False
+        assert config.position_relax == "none"
         assert config.sasa_probe_radius == 1.4
 
     def test_custom_values(self):
@@ -108,11 +108,6 @@ class TestCLIInterfaceArgs:
         result = runner.invoke(app, ["analyze-interface", "--help"])
         # Rich may truncate long option names
         assert "--shape-complement" in result.output
-
-    def test_pack_separated_option(self):
-        """Test --pack-separated option is available."""
-        result = runner.invoke(app, ["analyze-interface", "--help"])
-        assert "--pack-separated" in result.output
 
     def test_relax_separated_option(self):
         """Test --relax-separated option is available."""

@@ -127,9 +127,8 @@ def calculate_binding_energy(
     relaxer: "Relaxer",  # noqa: F821
     chain_pairs: Optional[List[Tuple[str, str]]] = None,
     distance_cutoff: float = 8.0,
-    pack_separated: bool = False,
     relax_separated: bool = False,
-    repacker: Optional["Designer"] = None,  # noqa: F821
+    designer: Optional["Designer"] = None,  # noqa: F821
 ) -> BindingEnergyResult:
     """
     Calculate binding energy by comparing complex and separated chain energies.
@@ -138,7 +137,7 @@ def calculate_binding_energy(
     1. Get energy of the complex (already relaxed)
     2. Identify interface residues
     3. Extract each side of the interface to separate PDBs
-    4. Optionally repack side chains (pack_separated) and/or relax separated chains
+    4. Optionally repack and minimize separated chains (relax_separated)
     5. Calculate dG = E_complex - sum(E_separated) (negative = favorable)
 
     Args:
@@ -146,7 +145,8 @@ def calculate_binding_energy(
         relaxer: Configured Relaxer instance
         chain_pairs: Chain pairs to analyze (auto-detect if None)
         distance_cutoff: Interface distance cutoff (angstroms)
-        relax_separated: Whether to relax separated chains
+        relax_separated: Whether to repack and minimize separated chains
+        designer: Designer instance (required if relax_separated is True)
 
     Returns:
         BindingEnergyResult with energies and interface info
@@ -201,19 +201,19 @@ def calculate_binding_energy(
         # Also filter extracted chains for defense-in-depth
         chain_pdb = filter_protein_only(chain_pdb)
 
-        # Rosetta default: rigid-body separation (no repack/min)
-        if pack_separated and repacker is not None:
-            try:
-                chain_pdb = _repack_with_designer(chain_pdb, repacker)
-                logger.info(f"    Repacked chain(s) {group_label}")
-            except Exception as e:
-                logger.warning(
-                    f"    Failed to repack chain(s) {group_label}: {e}"
-                )
-
         if relax_separated:
-            # Optional separated minimization (backbone allowed)
+            # Repack then minimize separated chains (full relax)
             try:
+                # Repack side chains if designer is provided
+                if designer is not None:
+                    try:
+                        chain_pdb = _repack_with_designer(chain_pdb, designer)
+                        logger.info(f"    Repacked chain(s) {group_label}")
+                    except Exception as e:
+                        logger.warning(
+                            f"    Failed to repack chain(s) {group_label}: {e}"
+                        )
+                # Then minimize
                 relaxed_pdb, relax_info, _ = relaxer.relax(chain_pdb)
                 chain_breakdown = relaxer.get_energy_breakdown(relaxed_pdb)
                 chain_energy = chain_breakdown.get("total_energy")

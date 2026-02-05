@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 
 
 ModelType = Literal["protein_mpnn", "ligand_mpnn", "soluble_mpnn"]
-PositionRepackMode = Literal["both", "unbound", "none"]
+PositionRelaxMode = Literal["both", "unbound", "none"]
 
 
 @dataclass
@@ -62,14 +62,13 @@ class InterfaceConfig:
         False  # Simplified Sc (experimental)
     )
     # Rosetta InterfaceAnalyzer default: rigid-body separation (no repack/min)
-    pack_separated: bool = False  # Repack side chains on separated partners
-    relax_separated_chains: bool = False  # Backbone minimization of separated chains
+    relax_separated: bool = False  # Repack and minimize separated partners
     sasa_probe_radius: float = 1.4  # Probe radius for SASA (A)
     # Per-position energetics
     per_position: bool = False  # IAM-like per-residue dG_i via residue removal
     alanine_scan: bool = False  # AlaScan per-residue ddG
     scan_chains: Optional[List[str]] = None  # Restrict scan to these chains
-    position_repack: PositionRepackMode = "both"  # Repack policy for scans
+    position_relax: PositionRelaxMode = "none"  # Relax policy for scans
     position_csv: Optional[Path] = None  # Write per-position CSV to this path
     max_scan_sites: Optional[int] = None  # Limit number of residues scanned
     show_progress: bool = False  # Show tqdm progress bar for per-position scans
