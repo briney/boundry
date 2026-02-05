@@ -591,6 +591,17 @@ def analyze_interface(
     relax_separated: bool = typer.Option(
         False, help="Repack and minimize separated partners (full relax)"
     ),
+    relax_separated_iterations: int = typer.Option(
+        1,
+        "--relax-separated-iterations",
+        help="Number of repack+minimize iterations "
+        "(samples rotamer space, selects lowest energy)",
+    ),
+    relax_separated_seed: Optional[int] = typer.Option(
+        None,
+        "--relax-separated-seed",
+        help="Base random seed for relax-separated iterations",
+    ),
     constrained: bool = typer.Option(
         False,
         help="Use constrained minimization for binding energy calculation",
@@ -671,6 +682,8 @@ def analyze_interface(
         calculate_sasa=sasa,
         calculate_shape_complementarity=shape_complementarity,
         relax_separated=relax_separated,
+        relax_separated_iterations=relax_separated_iterations,
+        relax_separated_seed=relax_separated_seed,
         per_position=per_position,
         alanine_scan=alanine_scan,
         scan_chains=parsed_scan_chains,

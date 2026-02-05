@@ -71,6 +71,16 @@ class Designer:
             torch.manual_seed(self.config.seed)
             np.random.seed(self.config.seed)
 
+    def set_seed(self, seed: int) -> None:
+        """Update random seeds for subsequent operations.
+
+        Args:
+            seed: New random seed value
+        """
+        self.config.seed = seed
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
     def _load_models(self):
         """Lazy load models on first use."""
         if self._model is not None:

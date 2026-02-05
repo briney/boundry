@@ -63,6 +63,8 @@ class InterfaceConfig:
     )
     # Rosetta InterfaceAnalyzer default: rigid-body separation (no repack/min)
     relax_separated: bool = False  # Repack and minimize separated partners
+    relax_separated_iterations: int = 1  # Number of repack+min iterations
+    relax_separated_seed: Optional[int] = None  # Base seed for iterations
     sasa_probe_radius: float = 1.4  # Probe radius for SASA (A)
     # Per-position energetics
     per_position: bool = False  # IAM-like per-residue dG_i via residue removal

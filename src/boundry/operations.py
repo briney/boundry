@@ -766,6 +766,8 @@ def analyze_interface(
             distance_cutoff=config.distance_cutoff,
             relax_separated=config.relax_separated,
             designer=designer,
+            relax_separated_iterations=config.relax_separated_iterations,
+            relax_separated_seed=config.relax_separated_seed,
         )
         if result.binding_energy.binding_energy is not None:
             logger.info(

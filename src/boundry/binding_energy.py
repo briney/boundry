@@ -28,6 +28,10 @@ class BindingEnergyResult:
     )
     interface_residues: List[InterfaceResidue] = field(default_factory=list)
     interface_energy: Optional[float] = None
+    # Multi-iteration sampling results
+    iteration_energies: Optional[Dict[str, List[float]]] = None
+    n_iterations: int = 1
+    best_iteration: Optional[Dict[str, int]] = None
 
 
 class _ChainSelector(Select):
@@ -129,6 +133,8 @@ def calculate_binding_energy(
     distance_cutoff: float = 8.0,
     relax_separated: bool = False,
     designer: Optional["Designer"] = None,  # noqa: F821
+    relax_separated_iterations: int = 1,
+    relax_separated_seed: Optional[int] = None,
 ) -> BindingEnergyResult:
     """
     Calculate binding energy by comparing complex and separated chain energies.
@@ -147,6 +153,9 @@ def calculate_binding_energy(
         distance_cutoff: Interface distance cutoff (angstroms)
         relax_separated: Whether to repack and minimize separated chains
         designer: Designer instance (required if relax_separated is True)
+        relax_separated_iterations: Number of repack+minimize iterations
+            (samples rotamer space, selects lowest energy)
+        relax_separated_seed: Base random seed for iterations
 
     Returns:
         BindingEnergyResult with energies and interface info
@@ -192,54 +201,101 @@ def calculate_binding_energy(
 
     # Step 4: Compute separated chain energies
     separated_energies: Dict[str, Optional[float]] = {}
+    iteration_energies: Dict[str, List[float]] = {
+        "+".join(g): [] for g in chain_groups
+    }
+    best_iteration: Dict[str, int] = {}
     energy_failed = False
+    n_iter = max(1, relax_separated_iterations) if relax_separated else 1
+
+    if relax_separated and n_iter > 1:
+        logger.info(
+            f"  Running {n_iter} repack+minimize iterations per chain group"
+        )
+
     for group in chain_groups:
         group_label = "+".join(group)
         logger.info(f"  Computing energy for chain(s) {group_label}...")
 
-        chain_pdb = extract_chain(pdb_string, group)
-        # Also filter extracted chains for defense-in-depth
-        chain_pdb = filter_protein_only(chain_pdb)
+        # Extract chain once (used as starting point for each iteration)
+        base_chain_pdb = extract_chain(pdb_string, group)
+        base_chain_pdb = filter_protein_only(base_chain_pdb)
 
         if relax_separated:
-            # Repack then minimize separated chains (full relax)
-            try:
-                # Repack side chains if designer is provided
+            # Multi-iteration repack+minimize loop
+            best_energy: Optional[float] = None
+
+            for iter_idx in range(n_iter):
+                # Set seed for this iteration
                 if designer is not None:
-                    try:
-                        chain_pdb = _repack_with_designer(chain_pdb, designer)
-                        logger.info(f"    Repacked chain(s) {group_label}")
-                    except Exception as e:
-                        logger.warning(
-                            f"    Failed to repack chain(s) {group_label}: {e}"
-                        )
-                # Then minimize
-                relaxed_pdb, relax_info, _ = relaxer.relax(chain_pdb)
-                chain_breakdown = relaxer.get_energy_breakdown(relaxed_pdb)
-                chain_energy = chain_breakdown.get("total_energy")
-                if chain_energy is not None:
-                    logger.info(
-                        f"    Chain(s) {group_label}: "
-                        f"E_init={relax_info['initial_energy']:.2f}, "
-                        f"E_final={chain_energy:.2f}"
+                    iter_seed = (
+                        relax_separated_seed
+                        if relax_separated_seed is not None
+                        else 0
+                    ) + iter_idx
+                    designer.set_seed(iter_seed)
+
+                try:
+                    chain_pdb = base_chain_pdb
+                    # Repack side chains
+                    if designer is not None:
+                        try:
+                            chain_pdb = _repack_with_designer(
+                                chain_pdb, designer
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"    Iter {iter_idx + 1}: "
+                                f"Failed to repack {group_label}: {e}"
+                            )
+                            continue
+
+                    # Minimize
+                    relaxed_pdb, relax_info, _ = relaxer.relax(chain_pdb)
+                    chain_breakdown = relaxer.get_energy_breakdown(relaxed_pdb)
+                    chain_energy = chain_breakdown.get("total_energy")
+
+                    if chain_energy is not None:
+                        iteration_energies[group_label].append(chain_energy)
+
+                        if n_iter > 1:
+                            logger.info(
+                                f"    Iter {iter_idx + 1}/{n_iter}: "
+                                f"E={chain_energy:.2f}"
+                            )
+
+                        # Track best
+                        if best_energy is None or chain_energy < best_energy:
+                            best_energy = chain_energy
+                            best_iteration[group_label] = iter_idx
+
+                except Exception as e:
+                    logger.warning(
+                        f"    Iter {iter_idx + 1}: "
+                        f"Failed to relax {group_label}: {e}"
                     )
-                else:
-                    energy_failed = True
-            except Exception as e:
-                logger.warning(
-                    f"    Failed to relax chain(s) {group_label}: {e}"
+
+            # Log summary if multiple iterations
+            if n_iter > 1 and iteration_energies[group_label]:
+                energies = iteration_energies[group_label]
+                logger.info(
+                    f"    Best: {min(energies):.2f} "
+                    f"(iter {best_iteration[group_label] + 1}), "
+                    f"range=[{min(energies):.2f}, {max(energies):.2f}]"
                 )
-                chain_breakdown = relaxer.get_energy_breakdown(chain_pdb)
-                chain_energy = chain_breakdown.get("total_energy")
-                if chain_energy is None:
-                    energy_failed = True
+
+            if best_energy is not None:
+                separated_energies[group_label] = best_energy
+            else:
+                energy_failed = True
+                separated_energies[group_label] = None
         else:
-            chain_breakdown = relaxer.get_energy_breakdown(chain_pdb)
+            # No relaxation - just compute energy of extracted chains
+            chain_breakdown = relaxer.get_energy_breakdown(base_chain_pdb)
             chain_energy = chain_breakdown.get("total_energy")
             if chain_energy is None:
                 energy_failed = True
-
-        separated_energies[group_label] = chain_energy
+            separated_energies[group_label] = chain_energy
 
     # Step 5: Calculate dG = E_bound - E_unbound (negative = favorable)
     if energy_failed:
@@ -253,6 +309,11 @@ def calculate_binding_energy(
             binding_energy=None,
             energy_breakdown=complex_breakdown,
             interface_residues=interface_info.interface_residues,
+            iteration_energies=(
+                iteration_energies if relax_separated else None
+            ),
+            n_iterations=n_iter,
+            best_iteration=best_iteration if relax_separated else None,
         )
 
     total_separated = sum(
@@ -272,4 +333,7 @@ def calculate_binding_energy(
         binding_energy=binding_energy,
         energy_breakdown=complex_breakdown,
         interface_residues=interface_info.interface_residues,
+        iteration_energies=iteration_energies if relax_separated else None,
+        n_iterations=n_iter,
+        best_iteration=best_iteration if relax_separated else None,
     )
