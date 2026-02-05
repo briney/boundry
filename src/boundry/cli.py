@@ -839,6 +839,11 @@ def run(
     workflow_file: Path = typer.Argument(
         ..., metavar="WORKFLOW", help="YAML workflow file"
     ),
+    seed: Optional[int] = typer.Option(
+        None,
+        "--seed",
+        help="Random seed for reproducibility (overrides YAML seed)",
+    ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Enable detailed logging from all components"
     ),
@@ -862,7 +867,7 @@ def run(
         )
         raise typer.Exit(code=1)
 
-    workflow = Workflow.from_yaml(workflow_file)
+    workflow = Workflow.from_yaml(workflow_file, seed=seed)
     workflow.run()
 
 

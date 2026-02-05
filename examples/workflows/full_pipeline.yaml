@@ -6,13 +6,13 @@
 workflow_version: 1
 input: input.pdb
 output: full_pipeline_{rank}.pdb
+seed: 42
 
 steps:
   - operation: idealize
   - iterate:
       until: "delta({final_energy}) < 0.5"
       max_n: 20
-      seed: true
       output: converge_relax_cycle_{cycle}.pdb
       steps:
         - operation: relax

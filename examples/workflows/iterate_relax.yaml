@@ -1,18 +1,18 @@
 # Fixed-count iterate workflow
 #
 # Idealize once, then run relax + interface analysis for 5 cycles with
-# cycle-based seed injection. Output to a directory for automatic
+# deterministic seed derivation. Output to a directory for automatic
 # auxiliary file generation (per-position CSV, metrics JSON, etc.).
 
 workflow_version: 1
 input: input.pdb
 output: results/
+seed: 42
 
 steps:
   - operation: idealize
   - iterate:
       n: 5
-      seed: true
       output: results/cycle_{cycle}/
       steps:
         - operation: relax

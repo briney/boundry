@@ -208,7 +208,7 @@ def _parse_iterate(step_data: Dict[str, Any], label: str) -> IterateBlock:
 
     _validate_unknown_keys(
         block_data,
-        {"steps", "n", "max_n", "until", "seed", "output"},
+        {"steps", "n", "max_n", "until", "output"},
         f"{label}.iterate",
     )
 
@@ -232,7 +232,6 @@ def _parse_iterate(step_data: Dict[str, Any], label: str) -> IterateBlock:
         f"{label}.iterate",
         "until",
     )
-    seed = bool(block_data.get("seed", False))
     output = _parse_optional_str(
         block_data.get("output"),
         f"{label}.iterate",
@@ -251,7 +250,6 @@ def _parse_iterate(step_data: Dict[str, Any], label: str) -> IterateBlock:
         n=n,
         max_n=max_n,
         until=until,
-        seed=seed,
         output=output,
     )
 
@@ -363,8 +361,21 @@ class Workflow:
         self._validate()
 
     @classmethod
-    def from_yaml(cls, path: Union[str, Path]) -> "Workflow":
-        """Load a workflow from a YAML file."""
+    def from_yaml(
+        cls,
+        path: Union[str, Path],
+        seed: Optional[int] = None,
+    ) -> "Workflow":
+        """Load a workflow from a YAML file.
+
+        Parameters
+        ----------
+        path : str or Path
+            Path to the YAML workflow file.
+        seed : int, optional
+            Workflow-level seed for reproducibility. Overrides YAML
+            ``seed`` when both are present.
+        """
         path = Path(path)
         with open(path) as f:
             data = yaml.safe_load(f)
@@ -377,7 +388,7 @@ class Workflow:
 
         _validate_unknown_keys(
             data,
-            {"workflow_version", "input", "output", "steps"},
+            {"workflow_version", "input", "output", "seed", "steps"},
             "Workflow",
         )
 
@@ -395,10 +406,23 @@ class Workflow:
         if isinstance(version, bool) or not isinstance(version, int):
             raise WorkflowError("workflow_version must be an integer")
 
+        # Parse seed: CLI argument overrides YAML value
+        yaml_seed = data.get("seed")
+        if yaml_seed is not None:
+            if isinstance(yaml_seed, bool) or not isinstance(
+                yaml_seed, int
+            ):
+                raise WorkflowError(
+                    "Workflow 'seed' must be an integer, "
+                    f"got {type(yaml_seed).__name__}"
+                )
+        effective_seed = seed if seed is not None else yaml_seed
+
         steps = _parse_steps(data["steps"])
         config = WorkflowConfig(
             input=input_path,
             output=output_path,
+            seed=effective_seed,
             workflow_version=version,
             steps=steps,
         )
@@ -478,7 +502,7 @@ class Workflow:
         total = len(self.config.steps)
         for i, item in enumerate(self.config.steps, 1):
             logger.info(f"Step {i}/{total}: {self._describe_item(item)}")
-            current = self._execute_item(item, current, seed_base=None)
+            current = self._execute_item(item, current, seed_base=self.config.seed)
             if isinstance(item, WorkflowStep) and item.output is not None:
                 self._write_population(
                     current.population, item.output, operation=item.operation
@@ -569,7 +593,7 @@ class Workflow:
 
         for cycle in range(1, max_iters + 1):
             cycle_seed = _compose_seed(seed_base, cycle)
-            inner_seed = cycle_seed if block.seed else None
+            inner_seed = cycle_seed if seed_base is not None else None
             for inner in block.steps:
                 current = self._execute_item(
                     inner,
@@ -742,7 +766,9 @@ class Workflow:
         seed_param = SEED_PARAM_BY_OPERATION.get(operation)
         if seed_param is None:
             return params
-        params[seed_param] = seed_base + candidate_offset
+        # Explicit step-level seed takes precedence over workflow seed
+        if seed_param not in params:
+            params[seed_param] = seed_base + candidate_offset
         return params
 
     @staticmethod

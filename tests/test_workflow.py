@@ -484,6 +484,24 @@ class TestCompoundExecution:
         )
         return Workflow.from_yaml(wf_file)
 
+    def _make_workflow_with_seed(
+        self, tmp_path, steps, seed, output=None
+    ):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": str(tmp_path / "input.pdb"),
+                    "output": (
+                        str(tmp_path / output) if output else None
+                    ),
+                    "seed": seed,
+                    "steps": steps,
+                }
+            )
+        )
+        return Workflow.from_yaml(wf_file)
+
     def _make_input(self, tmp_path):
         pdb = tmp_path / "input.pdb"
         pdb.write_text(
@@ -557,14 +575,48 @@ class TestCompoundExecution:
         assert calls["n"] == 3
 
     @patch("boundry.workflow.Workflow._run_relax")
-    def test_iterate_seed_injected(self, mock_relax, tmp_path):
+    def test_iterate_seed_injected_with_workflow_seed(
+        self, mock_relax, tmp_path
+    ):
+        from boundry.workflow import _compose_seed
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
         seen_seeds = []
 
         def _side_effect(structure, params):
-            seen_seeds.append(params["seed"])
+            seen_seeds.append(params.get("seed"))
+            return Structure(
+                pdb_string="ATOM\nEND\n",
+                metadata={"final_energy": -1.0},
+            )
+
+        mock_relax.side_effect = _side_effect
+        wf = self._make_workflow_with_seed(
+            tmp_path,
+            [
+                {
+                    "iterate": {
+                        "n": 3,
+                        "steps": [{"operation": "relax"}],
+                    }
+                }
+            ],
+            seed=42,
+        )
+        wf.run()
+        expected = [_compose_seed(42, c) for c in range(1, 4)]
+        assert seen_seeds == expected
+
+    @patch("boundry.workflow.Workflow._run_relax")
+    def test_no_seed_means_no_injection(self, mock_relax, tmp_path):
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        seen_seeds = []
+
+        def _side_effect(structure, params):
+            seen_seeds.append(params.get("seed"))
             return Structure(
                 pdb_string="ATOM\nEND\n",
                 metadata={"final_energy": -1.0},
@@ -576,15 +628,83 @@ class TestCompoundExecution:
             [
                 {
                     "iterate": {
-                        "n": 3,
-                        "seed": True,
+                        "n": 2,
                         "steps": [{"operation": "relax"}],
                     }
                 }
             ],
         )
         wf.run()
-        assert seen_seeds == [1, 2, 3]
+        assert seen_seeds == [None, None]
+
+    @patch("boundry.workflow.Workflow._run_relax")
+    def test_step_seed_wins_over_workflow_seed(
+        self, mock_relax, tmp_path
+    ):
+        """Explicit step-level seed takes precedence."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        seen_seeds = []
+
+        def _side_effect(structure, params):
+            seen_seeds.append(params.get("seed"))
+            return Structure(
+                pdb_string="ATOM\nEND\n",
+                metadata={"final_energy": -1.0},
+            )
+
+        mock_relax.side_effect = _side_effect
+        wf = self._make_workflow_with_seed(
+            tmp_path,
+            [
+                {
+                    "operation": "relax",
+                    "params": {"seed": 999},
+                }
+            ],
+            seed=42,
+        )
+        wf.run()
+        assert seen_seeds == [999]
+
+    @patch("boundry.workflow.Workflow._run_relax")
+    def test_step_seed_wins_inside_iterate(
+        self, mock_relax, tmp_path
+    ):
+        """Explicit step-level seed inside iterate block is preserved."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        seen_seeds = []
+
+        def _side_effect(structure, params):
+            seen_seeds.append(params.get("seed"))
+            return Structure(
+                pdb_string="ATOM\nEND\n",
+                metadata={"final_energy": -1.0},
+            )
+
+        mock_relax.side_effect = _side_effect
+        wf = self._make_workflow_with_seed(
+            tmp_path,
+            [
+                {
+                    "iterate": {
+                        "n": 2,
+                        "steps": [
+                            {
+                                "operation": "relax",
+                                "params": {"seed": 999},
+                            }
+                        ],
+                    }
+                }
+            ],
+            seed=42,
+        )
+        wf.run()
+        assert seen_seeds == [999, 999]
 
     @patch("boundry.workflow.Workflow._run_minimize")
     @patch("boundry.workflow.Workflow._run_analyze_interface")
@@ -1204,3 +1324,150 @@ class TestSafeParamHandling:
         _, kwargs = mock_op.call_args
         config = kwargs["config"]
         assert config.temperature == 0.2
+
+
+# ------------------------------------------------------------------
+# Workflow-level seed parsing and validation
+# ------------------------------------------------------------------
+
+
+class TestWorkflowSeedParsing:
+    """Tests for workflow-level seed YAML/CLI parsing."""
+
+    def test_yaml_seed_parsed(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "seed": 42,
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert wf.config.seed == 42
+
+    def test_yaml_seed_null(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "seed:\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert wf.config.seed is None
+
+    def test_cli_seed_overrides_yaml(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "seed": 42,
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file, seed=99)
+        assert wf.config.seed == 99
+
+    def test_cli_seed_when_yaml_has_none(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file, seed=7)
+        assert wf.config.seed == 7
+
+    def test_invalid_seed_type_raises(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "seed": "not_an_int",
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        with pytest.raises(WorkflowError, match="seed.*must be an integer"):
+            Workflow.from_yaml(wf_file)
+
+    def test_bool_seed_rejected(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "seed": True,
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        with pytest.raises(WorkflowError, match="seed.*must be an integer"):
+            Workflow.from_yaml(wf_file)
+
+    def test_old_iterate_seed_key_rejected(self, tmp_path):
+        """The old iterate-level seed: true key should be rejected."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [
+                        {
+                            "iterate": {
+                                "n": 3,
+                                "seed": True,
+                                "steps": [{"operation": "relax"}],
+                            }
+                        }
+                    ],
+                }
+            )
+        )
+        with pytest.raises(WorkflowError, match="unknown fields"):
+            Workflow.from_yaml(wf_file)
+
+
+# ------------------------------------------------------------------
+# _with_seed unit tests
+# ------------------------------------------------------------------
+
+
+class TestWithSeed:
+    """Tests for Workflow._with_seed static method."""
+
+    def test_no_seed_base_returns_params_unchanged(self):
+        params = {"temperature": 0.1}
+        result = Workflow._with_seed("relax", params, None, 0)
+        assert result == {"temperature": 0.1}
+        assert "seed" not in result
+
+    def test_seed_injected_for_supported_operation(self):
+        params = {"temperature": 0.1}
+        result = Workflow._with_seed("relax", params, 42, 0)
+        assert result["seed"] == 42
+
+    def test_seed_with_candidate_offset(self):
+        params = {}
+        result = Workflow._with_seed("mpnn", params, 100, 3)
+        assert result["seed"] == 103
+
+    def test_seed_not_injected_for_unsupported_operation(self):
+        params = {}
+        result = Workflow._with_seed("idealize", params, 42, 0)
+        assert "seed" not in result
+
+    def test_explicit_step_seed_preserved(self):
+        """Step-level seed takes precedence over workflow seed."""
+        params = {"seed": 999}
+        result = Workflow._with_seed("relax", params, 42, 0)
+        assert result["seed"] == 999

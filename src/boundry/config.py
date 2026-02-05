@@ -125,7 +125,6 @@ class IterateBlock:
     n: int = 1
     max_n: int = 100
     until: Optional[str] = None
-    seed: bool = False
     output: Optional[str] = None
 
 
@@ -155,5 +154,6 @@ class WorkflowConfig:
 
     input: str  # Input PDB/CIF path
     output: Optional[str] = None  # Final output path
+    seed: Optional[int] = None  # Workflow-level seed for reproducibility
     workflow_version: int = 1
     steps: List[WorkflowStepOrBlock] = field(default_factory=list)

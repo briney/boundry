@@ -261,6 +261,11 @@ class TestRun:
         assert result.exit_code == 0
         assert "workflow" in result.output.lower()
 
+    def test_has_seed_option(self):
+        """Test that --seed option is available."""
+        result = runner.invoke(app, ["run", "--help"])
+        assert "--seed" in result.output
+
     def test_missing_workflow_file(self, tmp_path):
         """Test run with nonexistent workflow file."""
         result = runner.invoke(

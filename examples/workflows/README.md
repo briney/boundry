@@ -18,14 +18,31 @@ All workflows use this top-level shape:
 workflow_version: 1          # optional, defaults to 1
 input: input.pdb             # required
 output: final.pdb            # optional
+seed: 42                     # optional, workflow-level seed
 steps:                       # required, non-empty
   - operation: idealize
 ```
 
 Top-level keys are strict:
 
-- Allowed: `workflow_version`, `input`, `output`, `steps`
+- Allowed: `workflow_version`, `input`, `output`, `seed`, `steps`
 - Unknown keys raise an error.
+
+### Deterministic Seeds
+
+Set `seed` at the workflow level to enable deterministic seed derivation
+for all stochastic operations (`repack`, `mpnn`, `relax`, `design`,
+`analyze_interface`). Seeds are composed hierarchically:
+
+- Top-level step: seed = `seed`
+- Iterate cycle *c*: seed = `seed * 100000 + c`
+- Beam round *r*, candidate *k*, expansion *e*: seed = `seed * 100000 + (r*10000 + k*100 + e)`
+
+If a step explicitly sets `seed` in its `params`, that value takes
+precedence over the workflow-derived seed. Omit the workflow `seed`
+(or set it to `null`) for fully stochastic runs.
+
+The `--seed` CLI flag overrides the YAML `seed` when both are present.
 
 ## 2. Step Node Types
 
@@ -56,7 +73,6 @@ Allowed keys:
 ```yaml
 - iterate:
     n: 5
-    seed: true
     output: iterate_cycle_{cycle}.pdb
     steps:
       - operation: relax
@@ -78,13 +94,12 @@ Fields:
 - `n` (default `1`) for fixed-count mode (`until` omitted)
 - `until` (optional condition string) for convergence mode
 - `max_n` (default `100`) safety cap when `until` is set
-- `seed` (bool, default `false`) inject deterministic seeds into each cycle
 - `output` (optional path template or directory path)
 
 Notes:
 
 - If `until` uses `delta(...)`, cycle 1 is treated as "not yet converged" (bootstrap).
-- Seed injection only happens for iterate when `seed` is `true`.
+- Seed injection is controlled by the workflow-level `seed` (see §1).
 
 ### 2.3 Beam Block
 
