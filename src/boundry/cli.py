@@ -47,11 +47,12 @@ def _setup_logging(verbose: bool) -> None:
             "freesasa",
             "torch",
             "absl",
+            "prody",
         ):
             logging.getLogger(name).setLevel(logging.ERROR)
         warnings.filterwarnings(
             "ignore",
-            module=r"(openmm|pdbfixer|Bio|freesasa|torch|absl)",
+            module=r"(openmm|pdbfixer|Bio|freesasa|torch|absl|openfold)",
         )
 
 
