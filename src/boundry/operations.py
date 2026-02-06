@@ -109,6 +109,57 @@ class InterfaceAnalysisResult:
     shape_complementarity: Optional[ShapeComplementarityResult] = None
     per_position: Optional[PerPositionResult] = None
 
+    def to_metadata(self) -> Dict[str, Any]:
+        """Build a metadata dict from the analysis results."""
+        meta: Dict[str, Any] = {
+            "operation": "analyze_interface",
+            "metrics": {"interface": {}},
+        }
+        iface = meta["metrics"]["interface"]
+
+        if self.binding_energy is not None:
+            meta["dG"] = self.binding_energy.binding_energy
+            meta["complex_energy"] = self.binding_energy.complex_energy
+            iface["dG"] = self.binding_energy.binding_energy
+            iface["complex_energy"] = self.binding_energy.complex_energy
+
+        if self.sasa is not None:
+            meta["buried_sasa"] = self.sasa.buried_sasa
+            iface["buried_sasa"] = self.sasa.buried_sasa
+
+        if self.shape_complementarity is not None:
+            meta["sc_score"] = self.shape_complementarity.sc_score
+            iface["sc_score"] = self.shape_complementarity.sc_score
+
+        if self.interface_info is not None:
+            meta["n_interface_residues"] = (
+                self.interface_info.n_interface_residues
+            )
+            iface["n_interface_residues"] = (
+                self.interface_info.n_interface_residues
+            )
+
+        if self.per_position is not None:
+            meta["per_position"] = self.per_position
+
+        return meta
+
+    def to_structure(
+        self,
+        pdb_string: str,
+        source_path: Optional[str] = None,
+        base_metadata: Optional[Dict[str, Any]] = None,
+    ) -> "Structure":
+        """Build a :class:`Structure` by merging *base_metadata* with
+        the analysis metadata from :meth:`to_metadata`."""
+        merged = dict(base_metadata) if base_metadata else {}
+        merged.update(self.to_metadata())
+        return Structure(
+            pdb_string=pdb_string,
+            metadata=merged,
+            source_path=source_path,
+        )
+
 
 # -------------------------------------------------------------------
 # Helpers

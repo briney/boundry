@@ -22,19 +22,6 @@ from boundry.workflow_metadata import extract_numeric_metric, merge_metadata
 
 logger = logging.getLogger(__name__)
 
-VALID_OPERATIONS = frozenset(
-    {
-        "idealize",
-        "minimize",
-        "repack",
-        "relax",
-        "mpnn",
-        "design",
-        "renumber",
-        "analyze_interface",
-    }
-)
-
 SEED_PARAM_BY_OPERATION: Dict[str, str] = {
     "repack": "seed",
     "mpnn": "seed",
@@ -350,24 +337,60 @@ def _ensure_resolvers() -> None:
         )
 
 
+@dataclass(frozen=True)
+class _SimpleSpec:
+    """Spec for operations that use a single config class."""
+
+    op_name: str
+    config_cls: Optional[str]
+    config_overrides: Dict[str, Any]
+    extra_params: tuple[str, ...]
+    needs_weights: bool
+
+
+@dataclass(frozen=True)
+class _PipelineSpec:
+    """Spec for operations that use PipelineConfig (design + relax)."""
+
+    op_name: str
+    extra_params: tuple[str, ...]
+    needs_weights: bool = True
+
+
+_OPERATION_REGISTRY: Dict[str, Optional[Union[_SimpleSpec, _PipelineSpec]]] = {
+    "idealize": _SimpleSpec(
+        "idealize", "IdealizeConfig", {"enabled": True}, (), False
+    ),
+    "minimize": _SimpleSpec(
+        "minimize", "RelaxConfig", {}, ("pre_idealize",), False
+    ),
+    "repack": _SimpleSpec(
+        "repack", "DesignConfig", {}, ("pre_idealize", "resfile"), True
+    ),
+    "mpnn": _SimpleSpec(
+        "mpnn", "DesignConfig", {}, ("pre_idealize", "resfile"), True
+    ),
+    "relax": _PipelineSpec(
+        "relax", ("pre_idealize", "resfile", "n_iterations")
+    ),
+    "design": _PipelineSpec(
+        "design", ("pre_idealize", "resfile", "n_iterations")
+    ),
+    "renumber": _SimpleSpec("renumber", None, {}, (), False),
+    "analyze_interface": None,  # special-cased
+}
+
+VALID_OPERATIONS = frozenset(_OPERATION_REGISTRY)
+
+
 @dataclass
 class _ExecutionContext:
     population: List["Structure"]
+    last_operation: Optional[str] = None
 
 
 class Workflow:
     """YAML-defined workflow runner with composable compound blocks."""
-
-    _VALIDATE_DISPATCH = {
-        WorkflowStep: "_validate_step",
-        IterateBlock: "_validate_iterate",
-        BeamBlock: "_validate_beam",
-    }
-    _EXECUTE_DISPATCH = {
-        WorkflowStep: "_execute_step",
-        IterateBlock: "_execute_iterate",
-        BeamBlock: "_execute_beam",
-    }
 
     def __init__(
         self,
@@ -540,13 +563,17 @@ class Workflow:
     ) -> None:
         for i, item in enumerate(steps, 1):
             label = f"{prefix}Step {i}"
-            method_name = self._VALIDATE_DISPATCH.get(type(item))
-            if method_name is None:
+            if isinstance(item, WorkflowStep):
+                self._validate_step(item, label)
+            elif isinstance(item, IterateBlock):
+                self._validate_iterate(item, label)
+            elif isinstance(item, BeamBlock):
+                self._validate_beam(item, label)
+            else:
                 raise WorkflowError(
                     f"{label}: unsupported node type "
                     f"'{type(item).__name__}'"
                 )
-            getattr(self, method_name)(item, label)
 
     def _validate_step(self, step: WorkflowStep, label: str) -> None:
         if step.operation not in VALID_OPERATIONS:
@@ -554,16 +581,12 @@ class Workflow:
                 f"{label}: unknown operation '{step.operation}'. "
                 f"Valid: {', '.join(sorted(VALID_OPERATIONS))}"
             )
-        if not isinstance(step.params, dict):
-            raise WorkflowError(f"{label}: params must be a mapping")
 
     def _validate_iterate(self, block: IterateBlock, label: str) -> None:
         if block.until is None and block.n < 1:
             raise WorkflowError(f"{label}: iterate n must be >= 1")
-        if block.until is not None:
-            parse_condition(block.until)
-            if block.max_n < 1:
-                raise WorkflowError(f"{label}: iterate max_n must be >= 1")
+        if block.until is not None and block.max_n < 1:
+            raise WorkflowError(f"{label}: iterate max_n must be >= 1")
         self._validate_steps(block.steps, prefix=f"{label}.iterate.")
 
     def _validate_beam(self, block: BeamBlock, label: str) -> None:
@@ -575,8 +598,6 @@ class Workflow:
             raise WorkflowError(
                 f"{label}: beam direction must be 'min' or 'max'"
             )
-        if block.until is not None:
-            parse_condition(block.until)
         self._validate_steps(block.steps, prefix=f"{label}.beam.")
 
     def run(self) -> "Structure":
@@ -612,13 +633,10 @@ class Workflow:
                 )
 
         if self.config.output is not None:
-            last_op = None
-            if self.config.steps:
-                last = self.config.steps[-1]
-                if isinstance(last, WorkflowStep):
-                    last_op = last.operation
             self._write_population(
-                current.population, self.config.output, operation=last_op
+                current.population,
+                self.config.output,
+                operation=current.last_operation,
             )
 
         self.last_population = list(current.population)
@@ -651,13 +669,15 @@ class Workflow:
         context: _ExecutionContext,
         seed_base: Optional[int],
     ) -> _ExecutionContext:
-        method_name = self._EXECUTE_DISPATCH.get(type(item))
-        if method_name is None:
-            raise WorkflowError(
-                f"Unsupported node type '{type(item).__name__}'"
-            )
-        handler = getattr(self, method_name)
-        return handler(item, context, seed_base)
+        if isinstance(item, WorkflowStep):
+            return self._execute_step(item, context, seed_base)
+        if isinstance(item, IterateBlock):
+            return self._execute_iterate(item, context, seed_base)
+        if isinstance(item, BeamBlock):
+            return self._execute_beam(item, context, seed_base)
+        raise WorkflowError(
+            f"Unsupported node type '{type(item).__name__}'"
+        )
 
     def _execute_step(
         self,
@@ -667,18 +687,7 @@ class Workflow:
     ) -> _ExecutionContext:
         from boundry.operations import Structure
 
-        dispatch = {
-            "idealize": self._run_idealize,
-            "minimize": self._run_minimize,
-            "repack": self._run_repack,
-            "relax": self._run_relax,
-            "mpnn": self._run_mpnn,
-            "design": self._run_design,
-            "renumber": self._run_renumber,
-            "analyze_interface": self._run_analyze_interface,
-        }
-        handler = dispatch.get(step.operation)
-        if handler is None:
+        if step.operation not in _OPERATION_REGISTRY:
             raise WorkflowError(f"Unknown operation '{step.operation}'")
 
         updated: List[Structure] = []
@@ -689,7 +698,9 @@ class Workflow:
                 seed_base,
                 idx,
             )
-            result = handler(structure, params)
+            result = self._run_operation(
+                step.operation, structure, params
+            )
             merged = merge_metadata(
                 structure.metadata,
                 result.metadata,
@@ -702,7 +713,10 @@ class Workflow:
                     source_path=result.source_path or structure.source_path,
                 )
             )
-        return _ExecutionContext(population=updated)
+        return _ExecutionContext(
+            population=updated,
+            last_operation=step.operation,
+        )
 
     def _execute_iterate(
         self,
@@ -726,37 +740,21 @@ class Workflow:
                 )
 
             if block.output is not None:
-                last_op = None
-                if block.steps and isinstance(block.steps[-1], WorkflowStep):
-                    last_op = block.steps[-1].operation
                 self._write_population(
                     current.population,
                     block.output,
-                    operation=last_op,
+                    operation=current.last_operation,
                     cycle=cycle,
                 )
 
             if block.until is not None:
-                best = current.population[0]
-                try:
-                    converged = check_condition(
-                        block.until,
-                        best.metadata,
-                        previous_metadata,
-                    )
-                except ConditionError as exc:
-                    if self._is_initial_delta_bootstrap(
-                        block.until,
-                        cycle,
-                        previous_metadata,
-                    ):
-                        converged = False
-                    else:
-                        raise WorkflowError(
-                            f"Iterate condition failed: {exc}"
-                        ) from exc
-
-                previous_metadata = copy.deepcopy(best.metadata)
+                converged, previous_metadata = self._check_convergence(
+                    block.until,
+                    current.population[0].metadata,
+                    previous_metadata,
+                    cycle,
+                    "Iterate",
+                )
                 if converged:
                     logger.info(
                         f"Iterate block converged at cycle {cycle}"
@@ -839,37 +837,21 @@ class Workflow:
             )
 
             if block.output is not None:
-                last_op = None
-                if block.steps and isinstance(block.steps[-1], WorkflowStep):
-                    last_op = block.steps[-1].operation
                 self._write_population(
                     population,
                     block.output,
-                    operation=last_op,
+                    operation=branch.last_operation,
                     round=round_num,
                 )
 
             if block.until is not None:
-                best = population[0]
-                try:
-                    done = check_condition(
-                        block.until,
-                        best.metadata,
-                        previous_best_metadata,
-                    )
-                except ConditionError as exc:
-                    if self._is_initial_delta_bootstrap(
-                        block.until,
-                        round_num,
-                        previous_best_metadata,
-                    ):
-                        done = False
-                    else:
-                        raise WorkflowError(
-                            f"Beam condition failed: {exc}"
-                        ) from exc
-
-                previous_best_metadata = copy.deepcopy(best.metadata)
+                done, previous_best_metadata = self._check_convergence(
+                    block.until,
+                    population[0].metadata,
+                    previous_best_metadata,
+                    round_num,
+                    "Beam",
+                )
                 if done:
                     logger.info(
                         f"Beam block converged at round {round_num}"
@@ -877,6 +859,38 @@ class Workflow:
                     break
 
         return _ExecutionContext(population=population)
+
+    def _check_convergence(
+        self,
+        condition: str,
+        best_metadata: Dict[str, Any],
+        previous_metadata: Optional[Dict[str, Any]],
+        cycle: int,
+        block_label: str,
+    ) -> tuple[bool, Dict[str, Any]]:
+        """Check convergence condition.
+
+        Returns ``(converged, new_previous_metadata)``.
+        """
+        try:
+            converged = check_condition(
+                condition,
+                best_metadata,
+                previous_metadata,
+            )
+        except ConditionError as exc:
+            if self._is_initial_delta_bootstrap(
+                condition,
+                cycle,
+                previous_metadata,
+            ):
+                converged = False
+            else:
+                raise WorkflowError(
+                    f"{block_label} condition failed: {exc}"
+                ) from exc
+
+        return converged, copy.deepcopy(best_metadata)
 
     @staticmethod
     def _with_seed(
@@ -1049,135 +1063,71 @@ class Workflow:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _run_idealize(structure, params):
-        from boundry.config import IdealizeConfig
-        from boundry.operations import idealize
+    def _run_operation(name, structure, params):
+        """Unified operation dispatch driven by _OPERATION_REGISTRY."""
+        import boundry.config as _cfg
+        import boundry.operations as _ops
 
-        idealize_params = _extract_fields(params, IdealizeConfig)
+        spec = _OPERATION_REGISTRY.get(name)
+
+        # analyze_interface is special-cased
+        if spec is None:
+            return Workflow._run_analyze_interface(structure, params)
+
+        if spec.needs_weights:
+            from boundry.weights import ensure_weights
+
+            ensure_weights()
+
+        # Pop extra params before extracting config fields
+        extras: Dict[str, Any] = {}
+        for key in spec.extra_params:
+            if key in params:
+                extras[key] = params.pop(key)
+
+        if isinstance(spec, _PipelineSpec):
+            design_params = _extract_fields(params, _cfg.DesignConfig)
+            relax_params = _extract_fields(params, _cfg.RelaxConfig)
+            if params:
+                logger.warning(
+                    f"Unknown {name} params ignored: {params}"
+                )
+            config = _cfg.PipelineConfig(
+                design=_cfg.DesignConfig(**design_params),
+                relax=_cfg.RelaxConfig(**relax_params),
+            )
+            op_fn = getattr(_ops, spec.op_name)
+            return op_fn(
+                structure,
+                config=config,
+                pre_idealize=extras.get("pre_idealize", False),
+                resfile=extras.get("resfile"),
+                n_iterations=extras.get("n_iterations", 5),
+            )
+
+        # _SimpleSpec
+        if spec.config_cls is None:
+            # e.g. renumber — no config
+            op_fn = getattr(_ops, spec.op_name)
+            return op_fn(structure)
+
+        config_class = getattr(_cfg, spec.config_cls)
+        config_fields = _extract_fields(params, config_class)
         if params:
-            logger.warning(f"Unknown idealize params ignored: {params}")
-        config = IdealizeConfig(enabled=True, **idealize_params)
-        return idealize(structure, config=config)
+            logger.warning(
+                f"Unknown {name} params ignored: {params}"
+            )
+        config = config_class(**spec.config_overrides, **config_fields)
+        op_fn = getattr(_ops, spec.op_name)
 
-    @staticmethod
-    def _run_minimize(structure, params):
-        from boundry.config import RelaxConfig
-        from boundry.operations import minimize
+        kwargs: Dict[str, Any] = {"config": config}
+        for key in spec.extra_params:
+            if key in extras:
+                kwargs[key] = extras[key]
+            elif key == "pre_idealize":
+                kwargs[key] = False
 
-        pre_idealize = params.pop("pre_idealize", False)
-        relax_params = _extract_fields(params, RelaxConfig)
-        if params:
-            logger.warning(f"Unknown minimize params ignored: {params}")
-        config = RelaxConfig(**relax_params)
-        return minimize(
-            structure,
-            config=config,
-            pre_idealize=pre_idealize,
-        )
-
-    @staticmethod
-    def _run_repack(structure, params):
-        from boundry.config import DesignConfig
-        from boundry.operations import repack
-        from boundry.weights import ensure_weights
-
-        pre_idealize = params.pop("pre_idealize", False)
-        resfile = params.pop("resfile", None)
-        design_params = _extract_fields(params, DesignConfig)
-        if params:
-            logger.warning(f"Unknown repack params ignored: {params}")
-        ensure_weights()
-        config = DesignConfig(**design_params)
-        return repack(
-            structure,
-            config=config,
-            resfile=resfile,
-            pre_idealize=pre_idealize,
-        )
-
-    @staticmethod
-    def _run_relax(structure, params):
-        from boundry.config import DesignConfig, PipelineConfig, RelaxConfig
-        from boundry.operations import relax
-        from boundry.weights import ensure_weights
-
-        pre_idealize = params.pop("pre_idealize", False)
-        resfile = params.pop("resfile", None)
-        n_iterations = params.pop("n_iterations", 5)
-
-        design_params = _extract_fields(params, DesignConfig)
-        relax_params = _extract_fields(params, RelaxConfig)
-
-        if params:
-            logger.warning(f"Unknown relax params ignored: {params}")
-
-        ensure_weights()
-        config = PipelineConfig(
-            design=DesignConfig(**design_params),
-            relax=RelaxConfig(**relax_params),
-        )
-        return relax(
-            structure,
-            config=config,
-            resfile=resfile,
-            pre_idealize=pre_idealize,
-            n_iterations=n_iterations,
-        )
-
-    @staticmethod
-    def _run_mpnn(structure, params):
-        from boundry.config import DesignConfig
-        from boundry.operations import mpnn
-        from boundry.weights import ensure_weights
-
-        pre_idealize = params.pop("pre_idealize", False)
-        resfile = params.pop("resfile", None)
-        design_params = _extract_fields(params, DesignConfig)
-        if params:
-            logger.warning(f"Unknown mpnn params ignored: {params}")
-        ensure_weights()
-        config = DesignConfig(**design_params)
-        return mpnn(
-            structure,
-            config=config,
-            resfile=resfile,
-            pre_idealize=pre_idealize,
-        )
-
-    @staticmethod
-    def _run_design(structure, params):
-        from boundry.config import DesignConfig, PipelineConfig, RelaxConfig
-        from boundry.operations import design
-        from boundry.weights import ensure_weights
-
-        pre_idealize = params.pop("pre_idealize", False)
-        resfile = params.pop("resfile", None)
-        n_iterations = params.pop("n_iterations", 5)
-
-        design_params = _extract_fields(params, DesignConfig)
-        relax_params = _extract_fields(params, RelaxConfig)
-
-        if params:
-            logger.warning(f"Unknown design params ignored: {params}")
-
-        ensure_weights()
-        config = PipelineConfig(
-            design=DesignConfig(**design_params),
-            relax=RelaxConfig(**relax_params),
-        )
-        return design(
-            structure,
-            config=config,
-            resfile=resfile,
-            pre_idealize=pre_idealize,
-            n_iterations=n_iterations,
-        )
-
-    @staticmethod
-    def _run_renumber(structure, params):
-        from boundry.operations import renumber
-
-        return renumber(structure)
+        return op_fn(structure, **kwargs)
 
     @staticmethod
     def _run_analyze_interface(structure, params):
@@ -1246,54 +1196,10 @@ class Workflow:
                 f"{result.sasa.buried_sasa:.1f} sq. angstroms"
             )
 
-        analysis_metadata: Dict[str, Any] = {
-            "operation": "analyze_interface",
-            "metrics": {"interface": {}},
-        }
-
-        if result.binding_energy is not None:
-            analysis_metadata["dG"] = result.binding_energy.binding_energy
-            analysis_metadata["complex_energy"] = (
-                result.binding_energy.complex_energy
-            )
-            analysis_metadata["metrics"]["interface"]["dG"] = (
-                result.binding_energy.binding_energy
-            )
-            analysis_metadata["metrics"]["interface"]["complex_energy"] = (
-                result.binding_energy.complex_energy
-            )
-
-        if result.sasa is not None:
-            analysis_metadata["buried_sasa"] = result.sasa.buried_sasa
-            analysis_metadata["metrics"]["interface"]["buried_sasa"] = (
-                result.sasa.buried_sasa
-            )
-
-        if result.shape_complementarity is not None:
-            analysis_metadata["sc_score"] = (
-                result.shape_complementarity.sc_score
-            )
-            analysis_metadata["metrics"]["interface"]["sc_score"] = (
-                result.shape_complementarity.sc_score
-            )
-
-        if result.interface_info is not None:
-            analysis_metadata["n_interface_residues"] = (
-                result.interface_info.n_interface_residues
-            )
-            analysis_metadata["metrics"]["interface"][
-                "n_interface_residues"
-            ] = result.interface_info.n_interface_residues
-
-        if result.per_position is not None:
-            analysis_metadata["per_position"] = result.per_position
-
-        merged = dict(structure.metadata)
-        merged.update(analysis_metadata)
-        return Structure(
-            pdb_string=structure.pdb_string,
-            metadata=merged,
+        return result.to_structure(
+            structure.pdb_string,
             source_path=structure.source_path,
+            base_metadata=structure.metadata,
         )
 
 

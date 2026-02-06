@@ -157,6 +157,83 @@ class TestInterfaceAnalysisResult:
         assert r.sasa is None
         assert r.shape_complementarity is None
 
+    def test_to_metadata_empty(self):
+        """Test to_metadata with no results populated."""
+        r = InterfaceAnalysisResult()
+        meta = r.to_metadata()
+        assert meta["operation"] == "analyze_interface"
+        assert meta["metrics"]["interface"] == {}
+
+    def test_to_metadata_binding_energy(self):
+        """Test to_metadata with binding energy populated."""
+        be = MagicMock()
+        be.binding_energy = -5.0
+        be.complex_energy = -100.0
+        r = InterfaceAnalysisResult(binding_energy=be)
+        meta = r.to_metadata()
+        assert meta["dG"] == -5.0
+        assert meta["complex_energy"] == -100.0
+        assert meta["metrics"]["interface"]["dG"] == -5.0
+        assert meta["metrics"]["interface"]["complex_energy"] == -100.0
+
+    def test_to_metadata_sasa(self):
+        """Test to_metadata with SASA populated."""
+        sasa = MagicMock()
+        sasa.buried_sasa = 500.0
+        r = InterfaceAnalysisResult(sasa=sasa)
+        meta = r.to_metadata()
+        assert meta["buried_sasa"] == 500.0
+        assert meta["metrics"]["interface"]["buried_sasa"] == 500.0
+
+    def test_to_metadata_shape_complementarity(self):
+        """Test to_metadata with shape complementarity populated."""
+        sc = MagicMock()
+        sc.sc_score = 0.75
+        r = InterfaceAnalysisResult(shape_complementarity=sc)
+        meta = r.to_metadata()
+        assert meta["sc_score"] == 0.75
+        assert meta["metrics"]["interface"]["sc_score"] == 0.75
+
+    def test_to_metadata_interface_info(self):
+        """Test to_metadata with interface info populated."""
+        info = MagicMock()
+        info.n_interface_residues = 42
+        r = InterfaceAnalysisResult(interface_info=info)
+        meta = r.to_metadata()
+        assert meta["n_interface_residues"] == 42
+        assert meta["metrics"]["interface"]["n_interface_residues"] == 42
+
+    def test_to_metadata_per_position(self):
+        """Test to_metadata with per-position results."""
+        pp = MagicMock()
+        r = InterfaceAnalysisResult(per_position=pp)
+        meta = r.to_metadata()
+        assert meta["per_position"] is pp
+
+    def test_to_structure(self):
+        """Test to_structure merges metadata and returns Structure."""
+        be = MagicMock()
+        be.binding_energy = -5.0
+        be.complex_energy = -100.0
+        r = InterfaceAnalysisResult(binding_energy=be)
+        s = r.to_structure(
+            "ATOM\nEND\n",
+            source_path="/test.pdb",
+            base_metadata={"existing": True},
+        )
+        assert isinstance(s, Structure)
+        assert s.pdb_string == "ATOM\nEND\n"
+        assert s.source_path == "/test.pdb"
+        assert s.metadata["existing"] is True
+        assert s.metadata["dG"] == -5.0
+        assert s.metadata["operation"] == "analyze_interface"
+
+    def test_to_structure_no_base_metadata(self):
+        """Test to_structure without base_metadata."""
+        r = InterfaceAnalysisResult()
+        s = r.to_structure("ATOM\nEND\n")
+        assert s.metadata["operation"] == "analyze_interface"
+
 
 # ------------------------------------------------------------------
 # _resolve_input helper

@@ -321,15 +321,15 @@ class TestWorkflowRun:
         )
         return pdb
 
-    @patch("boundry.workflow.Workflow._run_idealize")
+    @patch("boundry.workflow.Workflow._run_operation")
     def test_run_requires_output_by_default(
-        self, mock_idealize, tmp_path
+        self, mock_op, tmp_path
     ):
         """Workflow.run() requires output paths unless opted out."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
-        mock_idealize.return_value = Structure(pdb_string="ATOM\nEND\n")
+        mock_op.return_value = Structure(pdb_string="ATOM\nEND\n")
 
         wf_file = tmp_path / "wf.yaml"
         wf_file.write_text(
@@ -344,15 +344,15 @@ class TestWorkflowRun:
         with pytest.raises(WorkflowError, match="output is required"):
             wf.run()
 
-    @patch("boundry.workflow.Workflow._run_idealize")
+    @patch("boundry.workflow.Workflow._run_operation")
     def test_run_can_opt_out_of_output_requirement(
-        self, mock_idealize, tmp_path
+        self, mock_op, tmp_path
     ):
         """Programmatic workflows can still run fully in-memory."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
-        mock_idealize.return_value = Structure(
+        mock_op.return_value = Structure(
             pdb_string="ATOM idealized\nEND\n"
         )
 
@@ -369,13 +369,13 @@ class TestWorkflowRun:
         result = wf.run()
         assert "idealized" in result.pdb_string
 
-    @patch("boundry.workflow.Workflow._run_idealize")
-    def test_single_step(self, mock_idealize, tmp_path):
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_single_step(self, mock_op, tmp_path):
         """Test running a single-step workflow."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
-        mock_idealize.return_value = Structure(
+        mock_op.return_value = Structure(
             pdb_string="ATOM idealized\nEND\n"
         )
 
@@ -384,14 +384,11 @@ class TestWorkflowRun:
         )
         result = wf.run()
 
-        mock_idealize.assert_called_once()
+        mock_op.assert_called_once()
         assert result.pdb_string == "ATOM idealized\nEND\n"
 
-    @patch("boundry.workflow.Workflow._run_minimize")
-    @patch("boundry.workflow.Workflow._run_idealize")
-    def test_multi_step_chaining(
-        self, mock_idealize, mock_minimize, tmp_path
-    ):
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_multi_step_chaining(self, mock_op, tmp_path):
         """Test that output of step 1 feeds into step 2."""
         from boundry.operations import Structure
 
@@ -403,8 +400,13 @@ class TestWorkflowRun:
         struct_after_min = Structure(
             pdb_string="ATOM minimized\nEND\n"
         )
-        mock_idealize.return_value = struct_after_ideal
-        mock_minimize.return_value = struct_after_min
+
+        def _dispatch(name, structure, params):
+            if name == "idealize":
+                return struct_after_ideal
+            return struct_after_min
+
+        mock_op.side_effect = _dispatch
 
         wf = self._make_workflow(
             tmp_path,
@@ -416,17 +418,20 @@ class TestWorkflowRun:
         result = wf.run()
 
         # Step 2 should receive output of step 1
-        call_args = mock_minimize.call_args
-        assert call_args[0][0].pdb_string == struct_after_ideal.pdb_string
+        min_call = [
+            c for c in mock_op.call_args_list
+            if c[0][0] == "minimize"
+        ][0]
+        assert min_call[0][1].pdb_string == struct_after_ideal.pdb_string
         assert result.pdb_string == struct_after_min.pdb_string
 
-    @patch("boundry.workflow.Workflow._run_idealize")
-    def test_final_output_written(self, mock_idealize, tmp_path):
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_final_output_written(self, mock_op, tmp_path):
         """Test that final output is written to disk."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
-        mock_idealize.return_value = Structure(
+        mock_op.return_value = Structure(
             pdb_string=(
                 "ATOM      1  N   ALA A   1       "
                 "1.000   1.000   1.000  1.00  0.00"
@@ -445,11 +450,8 @@ class TestWorkflowRun:
         assert output_path.exists()
         assert "ATOM" in output_path.read_text()
 
-    @patch("boundry.workflow.Workflow._run_minimize")
-    @patch("boundry.workflow.Workflow._run_idealize")
-    def test_intermediate_output_written(
-        self, mock_idealize, mock_minimize, tmp_path
-    ):
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_intermediate_output_written(self, mock_op, tmp_path):
         """Test that intermediate output is written."""
         from boundry.operations import Structure
 
@@ -463,10 +465,13 @@ class TestWorkflowRun:
                 "           N\nEND\n"
             )
         )
-        mock_idealize.return_value = intermediate_struct
-        mock_minimize.return_value = Structure(
-            pdb_string="ATOM minimized\nEND\n"
-        )
+
+        def _dispatch(name, structure, params):
+            if name == "idealize":
+                return intermediate_struct
+            return Structure(pdb_string="ATOM minimized\nEND\n")
+
+        mock_op.side_effect = _dispatch
 
         wf = self._make_workflow(
             tmp_path,
@@ -492,13 +497,13 @@ class TestWorkflowRun:
         with pytest.raises(WorkflowError, match="not found"):
             wf.run()
 
-    @patch("boundry.workflow.Workflow._run_idealize")
-    def test_params_passed_to_handler(self, mock_idealize, tmp_path):
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_params_passed_to_handler(self, mock_op, tmp_path):
         """Test that step params are forwarded to the handler."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
-        mock_idealize.return_value = Structure(
+        mock_op.return_value = Structure(
             pdb_string="ATOM\nEND\n"
         )
 
@@ -513,8 +518,8 @@ class TestWorkflowRun:
         )
         wf.run()
 
-        call_args = mock_idealize.call_args
-        params = call_args[0][1]  # second positional arg
+        call_args = mock_op.call_args
+        params = call_args[0][2]  # third positional arg
         assert params == {"fix_cis_omega": False}
 
 
@@ -562,21 +567,21 @@ class TestCompoundExecution:
         )
         return pdb
 
-    @patch("boundry.workflow.Workflow._run_relax")
-    def test_iterate_fixed_count_runs_n_times(self, mock_relax, tmp_path):
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_iterate_fixed_count_runs_n_times(self, mock_op, tmp_path):
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
         call_count = {"n": 0}
 
-        def _side_effect(structure, params):
+        def _side_effect(name, structure, params):
             call_count["n"] += 1
             return Structure(
                 pdb_string=f"ATOM iter {call_count['n']}\nEND\n",
                 metadata={"final_energy": -1.0 * call_count["n"]},
             )
 
-        mock_relax.side_effect = _side_effect
+        mock_op.side_effect = _side_effect
         wf = self._make_workflow(
             tmp_path,
             [
@@ -592,9 +597,9 @@ class TestCompoundExecution:
         assert call_count["n"] == 3
         assert "iter 3" in result.pdb_string
 
-    @patch("boundry.workflow.Workflow._run_analyze_interface")
+    @patch("boundry.workflow.Workflow._run_operation")
     def test_iterate_convergence_stops_early(
-        self, mock_analyze, tmp_path
+        self, mock_op, tmp_path
     ):
         from boundry.operations import Structure
 
@@ -602,7 +607,7 @@ class TestCompoundExecution:
         dgs = [-1.0, -2.0, -4.0, -6.0]
         calls = {"n": 0}
 
-        def _side_effect(structure, params):
+        def _side_effect(name, structure, params):
             idx = calls["n"]
             calls["n"] += 1
             return Structure(
@@ -610,7 +615,7 @@ class TestCompoundExecution:
                 metadata={"dG": dgs[idx]},
             )
 
-        mock_analyze.side_effect = _side_effect
+        mock_op.side_effect = _side_effect
         wf = self._make_workflow(
             tmp_path,
             [
@@ -626,9 +631,9 @@ class TestCompoundExecution:
         wf.run()
         assert calls["n"] == 3
 
-    @patch("boundry.workflow.Workflow._run_relax")
+    @patch("boundry.workflow.Workflow._run_operation")
     def test_iterate_seed_injected_with_workflow_seed(
-        self, mock_relax, tmp_path
+        self, mock_op, tmp_path
     ):
         from boundry.workflow import _compose_seed
         from boundry.operations import Structure
@@ -636,14 +641,14 @@ class TestCompoundExecution:
         self._make_input(tmp_path)
         seen_seeds = []
 
-        def _side_effect(structure, params):
+        def _side_effect(name, structure, params):
             seen_seeds.append(params.get("seed"))
             return Structure(
                 pdb_string="ATOM\nEND\n",
                 metadata={"final_energy": -1.0},
             )
 
-        mock_relax.side_effect = _side_effect
+        mock_op.side_effect = _side_effect
         wf = self._make_workflow_with_seed(
             tmp_path,
             [
@@ -660,21 +665,21 @@ class TestCompoundExecution:
         expected = [_compose_seed(42, c) for c in range(1, 4)]
         assert seen_seeds == expected
 
-    @patch("boundry.workflow.Workflow._run_relax")
-    def test_no_seed_means_no_injection(self, mock_relax, tmp_path):
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_no_seed_means_no_injection(self, mock_op, tmp_path):
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
         seen_seeds = []
 
-        def _side_effect(structure, params):
+        def _side_effect(name, structure, params):
             seen_seeds.append(params.get("seed"))
             return Structure(
                 pdb_string="ATOM\nEND\n",
                 metadata={"final_energy": -1.0},
             )
 
-        mock_relax.side_effect = _side_effect
+        mock_op.side_effect = _side_effect
         wf = self._make_workflow(
             tmp_path,
             [
@@ -689,9 +694,9 @@ class TestCompoundExecution:
         wf.run()
         assert seen_seeds == [None, None]
 
-    @patch("boundry.workflow.Workflow._run_relax")
+    @patch("boundry.workflow.Workflow._run_operation")
     def test_step_seed_wins_over_workflow_seed(
-        self, mock_relax, tmp_path
+        self, mock_op, tmp_path
     ):
         """Explicit step-level seed takes precedence."""
         from boundry.operations import Structure
@@ -699,14 +704,14 @@ class TestCompoundExecution:
         self._make_input(tmp_path)
         seen_seeds = []
 
-        def _side_effect(structure, params):
+        def _side_effect(name, structure, params):
             seen_seeds.append(params.get("seed"))
             return Structure(
                 pdb_string="ATOM\nEND\n",
                 metadata={"final_energy": -1.0},
             )
 
-        mock_relax.side_effect = _side_effect
+        mock_op.side_effect = _side_effect
         wf = self._make_workflow_with_seed(
             tmp_path,
             [
@@ -720,9 +725,9 @@ class TestCompoundExecution:
         wf.run()
         assert seen_seeds == [999]
 
-    @patch("boundry.workflow.Workflow._run_relax")
+    @patch("boundry.workflow.Workflow._run_operation")
     def test_step_seed_wins_inside_iterate(
-        self, mock_relax, tmp_path
+        self, mock_op, tmp_path
     ):
         """Explicit step-level seed inside iterate block is preserved."""
         from boundry.operations import Structure
@@ -730,14 +735,14 @@ class TestCompoundExecution:
         self._make_input(tmp_path)
         seen_seeds = []
 
-        def _side_effect(structure, params):
+        def _side_effect(name, structure, params):
             seen_seeds.append(params.get("seed"))
             return Structure(
                 pdb_string="ATOM\nEND\n",
                 metadata={"final_energy": -1.0},
             )
 
-        mock_relax.side_effect = _side_effect
+        mock_op.side_effect = _side_effect
         wf = self._make_workflow_with_seed(
             tmp_path,
             [
@@ -758,10 +763,9 @@ class TestCompoundExecution:
         wf.run()
         assert seen_seeds == [999, 999]
 
-    @patch("boundry.workflow.Workflow._run_minimize")
-    @patch("boundry.workflow.Workflow._run_analyze_interface")
+    @patch("boundry.workflow.Workflow._run_operation")
     def test_beam_top_k_continues_to_next_step(
-        self, mock_analyze, mock_minimize, tmp_path
+        self, mock_op, tmp_path
     ):
         from boundry.operations import Structure
 
@@ -769,22 +773,20 @@ class TestCompoundExecution:
         scores = [5.0, 1.0, 3.0, 2.0]
         call_idx = {"i": 0}
 
-        def _analyze(structure, params):
-            i = call_idx["i"]
-            call_idx["i"] += 1
-            return Structure(
-                pdb_string=f"ATOM beam {i}\nEND\n",
-                metadata={"dG": scores[i]},
-            )
-
-        def _minimize(structure, params):
+        def _dispatch(name, structure, params):
+            if name == "analyze_interface":
+                i = call_idx["i"]
+                call_idx["i"] += 1
+                return Structure(
+                    pdb_string=f"ATOM beam {i}\nEND\n",
+                    metadata={"dG": scores[i]},
+                )
             return Structure(
                 pdb_string=structure.pdb_string,
                 metadata={"final_energy": -10.0},
             )
 
-        mock_analyze.side_effect = _analyze
-        mock_minimize.side_effect = _minimize
+        mock_op.side_effect = _dispatch
 
         wf = self._make_workflow(
             tmp_path,
@@ -804,14 +806,18 @@ class TestCompoundExecution:
         )
         population = wf.run_population()
         assert len(population) == 2
-        assert mock_minimize.call_count == 2
+        minimize_calls = [
+            c for c in mock_op.call_args_list
+            if c[0][0] == "minimize"
+        ]
+        assert len(minimize_calls) == 2
 
-    @patch("boundry.workflow.Workflow._run_idealize")
-    def test_beam_missing_metric_raises(self, mock_idealize, tmp_path):
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_beam_missing_metric_raises(self, mock_op, tmp_path):
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
-        mock_idealize.return_value = Structure(
+        mock_op.return_value = Structure(
             pdb_string="ATOM\nEND\n",
             metadata={"final_energy": -10.0},
         )
@@ -847,8 +853,8 @@ class TestRunIdealize:
         struct = Structure(pdb_string="ATOM\nEND\n")
         mock_op.return_value = struct
 
-        Workflow._run_idealize(
-            struct, {"fix_cis_omega": False}
+        Workflow._run_operation(
+            "idealize", struct, {"fix_cis_omega": False}
         )
 
         _, kwargs = mock_op.call_args
@@ -867,8 +873,8 @@ class TestRunMinimize:
         struct = Structure(pdb_string="ATOM\nEND\n")
         mock_op.return_value = struct
 
-        Workflow._run_minimize(
-            struct, {"constrained": True, "max_iterations": 500}
+        Workflow._run_operation(
+            "minimize", struct, {"constrained": True, "max_iterations": 500}
         )
 
         _, kwargs = mock_op.call_args
@@ -883,7 +889,7 @@ class TestRunMinimize:
         struct = Structure(pdb_string="ATOM\nEND\n")
         mock_op.return_value = struct
 
-        Workflow._run_minimize(struct, {"pre_idealize": True})
+        Workflow._run_operation("minimize", struct, {"pre_idealize": True})
 
         _, kwargs = mock_op.call_args
         assert kwargs["pre_idealize"] is True
@@ -902,7 +908,8 @@ class TestRunRelax:
         struct = Structure(pdb_string="ATOM\nEND\n")
         mock_op.return_value = struct
 
-        Workflow._run_relax(
+        Workflow._run_operation(
+            "relax",
             struct,
             {
                 "temperature": 0.2,
@@ -925,8 +932,8 @@ class TestRunRelax:
         struct = Structure(pdb_string="ATOM\nEND\n")
         mock_op.return_value = struct
 
-        Workflow._run_relax(
-            struct, {"resfile": "design.resfile"}
+        Workflow._run_operation(
+            "relax", struct, {"resfile": "design.resfile"}
         )
 
         _, kwargs = mock_op.call_args
@@ -944,7 +951,8 @@ class TestRunDesign:
         struct = Structure(pdb_string="ATOM\nEND\n")
         mock_op.return_value = struct
 
-        Workflow._run_design(
+        Workflow._run_operation(
+            "design",
             struct,
             {
                 "model_type": "protein_mpnn",
@@ -1164,13 +1172,13 @@ class TestDirectoryOutput:
         )
         return pdb
 
-    @patch("boundry.workflow.Workflow._run_idealize")
-    def test_directory_output_creates_pdb(self, mock_idealize, tmp_path):
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_directory_output_creates_pdb(self, mock_op, tmp_path):
         """Test that directory output creates a PDB file."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
-        mock_idealize.return_value = Structure(
+        mock_op.return_value = Structure(
             pdb_string=(
                 "ATOM      1  N   ALA A   1       "
                 "1.000   1.000   1.000  1.00  0.00"
@@ -1191,13 +1199,13 @@ class TestDirectoryOutput:
         assert len(pdb_files) == 1
         assert "idealized" in pdb_files[0].stem
 
-    @patch("boundry.workflow.Workflow._run_idealize")
-    def test_directory_output_energy_json(self, mock_idealize, tmp_path):
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_directory_output_energy_json(self, mock_op, tmp_path):
         """Test that energy breakdown is written as JSON."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
-        mock_idealize.return_value = Structure(
+        mock_op.return_value = Structure(
             pdb_string=(
                 "ATOM      1  N   ALA A   1       "
                 "1.000   1.000   1.000  1.00  0.00"
@@ -1217,15 +1225,15 @@ class TestDirectoryOutput:
         json_files = list(output_dir.glob("*_energy.json"))
         assert len(json_files) == 1
 
-    @patch("boundry.workflow.Workflow._run_relax")
-    def test_directory_output_with_tokens(self, mock_relax, tmp_path):
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_directory_output_with_tokens(self, mock_op, tmp_path):
         """Test that tokens are incorporated into filenames."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
         call_count = {"n": 0}
 
-        def _side_effect(structure, params):
+        def _side_effect(name, structure, params):
             call_count["n"] += 1
             return Structure(
                 pdb_string=(
@@ -1236,7 +1244,7 @@ class TestDirectoryOutput:
                 metadata={"final_energy": -1.0 * call_count["n"]},
             )
 
-        mock_relax.side_effect = _side_effect
+        mock_op.side_effect = _side_effect
 
         output_dir = tmp_path / "results"
         wf = self._make_workflow(
@@ -1261,15 +1269,15 @@ class TestDirectoryOutput:
         assert any("cycle_1" in f for f in filenames)
         assert any("cycle_2" in f for f in filenames)
 
-    @patch("boundry.workflow.Workflow._run_idealize")
+    @patch("boundry.workflow.Workflow._run_operation")
     def test_directory_output_multiple_population(
-        self, mock_idealize, tmp_path
+        self, mock_op, tmp_path
     ):
         """Test that multiple structures get rank suffixes."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
-        mock_idealize.return_value = Structure(
+        mock_op.return_value = Structure(
             pdb_string=(
                 "ATOM      1  N   ALA A   1       "
                 "1.000   1.000   1.000  1.00  0.00"
@@ -1324,7 +1332,7 @@ class TestSafeParamHandling:
         mock_op.return_value = struct
 
         # Should not raise, even with unknown 'bogus' param
-        Workflow._run_idealize(struct, {"fix_cis_omega": False, "bogus": 42})
+        Workflow._run_operation("idealize", struct, {"fix_cis_omega": False, "bogus": 42})
 
         _, kwargs = mock_op.call_args
         config = kwargs["config"]
@@ -1337,8 +1345,8 @@ class TestSafeParamHandling:
         struct = Structure(pdb_string="ATOM\nEND\n")
         mock_op.return_value = struct
 
-        Workflow._run_minimize(
-            struct, {"constrained": True, "bogus": 42}
+        Workflow._run_operation(
+            "minimize", struct, {"constrained": True, "bogus": 42}
         )
 
         _, kwargs = mock_op.call_args
@@ -1353,8 +1361,8 @@ class TestSafeParamHandling:
         struct = Structure(pdb_string="ATOM\nEND\n")
         mock_op.return_value = struct
 
-        Workflow._run_repack(
-            struct, {"temperature": 0.2, "bogus": 42}
+        Workflow._run_operation(
+            "repack", struct, {"temperature": 0.2, "bogus": 42}
         )
 
         _, kwargs = mock_op.call_args
@@ -1369,8 +1377,8 @@ class TestSafeParamHandling:
         struct = Structure(pdb_string="ATOM\nEND\n")
         mock_op.return_value = struct
 
-        Workflow._run_mpnn(
-            struct, {"temperature": 0.2, "bogus": 42}
+        Workflow._run_operation(
+            "mpnn", struct, {"temperature": 0.2, "bogus": 42}
         )
 
         _, kwargs = mock_op.call_args
