@@ -11,7 +11,13 @@ from boundry.config import (
     WorkflowConfig,
     WorkflowStep,
 )
-from boundry.workflow import VALID_OPERATIONS, Workflow, WorkflowError
+from boundry.workflow import (
+    VALID_OPERATIONS,
+    Workflow,
+    WorkflowError,
+    _build_var_namespace,
+    _resolve_vars,
+)
 
 
 # ------------------------------------------------------------------
@@ -1471,3 +1477,410 @@ class TestWithSeed:
         params = {"seed": 999}
         result = Workflow._with_seed("relax", params, 42, 0)
         assert result["seed"] == 999
+
+
+# ------------------------------------------------------------------
+# Variable interpolation
+# ------------------------------------------------------------------
+
+
+class TestVarInterpolation:
+    """Tests for ${key} variable interpolation in workflow YAML."""
+
+    def test_output_referenced_in_step(self, tmp_path):
+        """${output} in a step output resolves to top-level output."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "output: results\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+            "    output: ${output}/idealized.pdb\n"
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert wf.config.steps[0].output == "results/idealized.pdb"
+
+    def test_output_referenced_in_iterate(self, tmp_path):
+        """${output} in iterate output resolves correctly."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "output: results\n"
+            "steps:\n"
+            "  - iterate:\n"
+            "      n: 3\n"
+            "      output: ${output}/cycle_{cycle}/\n"
+            "      steps:\n"
+            "        - operation: relax\n"
+        )
+        wf = Workflow.from_yaml(wf_file)
+        block = wf.config.steps[0]
+        assert block.output == "results/cycle_{cycle}/"
+
+    def test_input_referenceable(self, tmp_path):
+        """${input} resolves to the top-level input value."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: structures/my_protein.pdb\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+            "    output: ${input}_idealized.pdb\n"
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert (
+            wf.config.steps[0].output
+            == "structures/my_protein.pdb_idealized.pdb"
+        )
+
+    def test_user_var_in_step_output(self, tmp_path):
+        """Custom user-defined key in step output."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "project: my_project\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+            "    output: ${project}/idealized.pdb\n"
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert wf.config.steps[0].output == "my_project/idealized.pdb"
+
+    def test_user_var_in_params(self, tmp_path):
+        """Custom key referenced in params."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "resfile_path: design.resfile\n"
+            "steps:\n"
+            "  - operation: relax\n"
+            "    params:\n"
+            "      resfile: ${resfile_path}\n"
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert wf.config.steps[0].params["resfile"] == "design.resfile"
+
+    def test_cross_reference(self, tmp_path):
+        """User var can reference another variable."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "output: results\n"
+            "run_dir: ${output}/run_1\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+            "    output: ${run_dir}/idealized.pdb\n"
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert (
+            wf.config.steps[0].output
+            == "results/run_1/idealized.pdb"
+        )
+
+    def test_multiple_refs_in_one_string(self, tmp_path):
+        """Multiple ${...} in a single string."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "output: results\n"
+            "project: myproj\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+            "    output: ${output}/${project}/final.pdb\n"
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert (
+            wf.config.steps[0].output
+            == "results/myproj/final.pdb"
+        )
+
+    def test_vars_coexist_with_runtime_tokens(self, tmp_path):
+        """${var} resolved at load, {cycle} preserved for runtime."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "output: results\n"
+            "steps:\n"
+            "  - iterate:\n"
+            "      n: 2\n"
+            "      output: ${output}/cycle_{cycle}/\n"
+            "      steps:\n"
+            "        - operation: relax\n"
+        )
+        wf = Workflow.from_yaml(wf_file)
+        block = wf.config.steps[0]
+        assert block.output == "results/cycle_{cycle}/"
+        assert "${" not in block.output
+        assert "{cycle}" in block.output
+
+    def test_no_var_references(self, tmp_path):
+        """Existing workflows without ${...} work unchanged."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "output": "output.pdb",
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert wf.config.input == "input.pdb"
+        assert wf.config.output == "output.pdb"
+
+    def test_numeric_var_coerced(self, tmp_path):
+        """Numeric user var is coerced to string in namespace."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "run_id: 42\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+            "    output: run_${run_id}/idealized.pdb\n"
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert wf.config.steps[0].output == "run_42/idealized.pdb"
+
+    def test_numeric_params_not_affected(self, tmp_path):
+        """Int/float params pass through unchanged."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "steps:\n"
+            "  - operation: relax\n"
+            "    params:\n"
+            "      n_iterations: 5\n"
+            "      temperature: 0.1\n"
+        )
+        wf = Workflow.from_yaml(wf_file)
+        params = wf.config.steps[0].params
+        assert params["n_iterations"] == 5
+        assert params["temperature"] == 0.1
+
+    def test_user_vars_stored_on_config(self, tmp_path):
+        """User-defined vars are accessible via workflow.config.vars."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "project: my_project\n"
+            "run_id: 7\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert wf.config.vars == {
+            "project": "my_project",
+            "run_id": "7",
+        }
+
+    def test_undefined_var_raises(self, tmp_path):
+        """${nonexistent} raises WorkflowError."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+            "    output: ${nonexistent}/out.pdb\n"
+        )
+        with pytest.raises(WorkflowError, match="Undefined variable"):
+            Workflow.from_yaml(wf_file)
+
+    def test_non_scalar_user_var_raises(self, tmp_path):
+        """List/dict user var values are rejected."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "my_list:\n"
+            "  - a\n"
+            "  - b\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+        )
+        with pytest.raises(WorkflowError, match="scalar"):
+            Workflow.from_yaml(wf_file)
+
+    def test_invalid_var_name_raises(self, tmp_path):
+        """Hyphens in user var names are rejected."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "my-var: value\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+        )
+        with pytest.raises(WorkflowError, match="Invalid variable name"):
+            Workflow.from_yaml(wf_file)
+
+    def test_circular_reference_raises(self, tmp_path):
+        """Circular cross-references are detected."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "a: ${b}\n"
+            "b: ${a}\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+        )
+        with pytest.raises(WorkflowError, match="Circular"):
+            Workflow.from_yaml(wf_file)
+
+    def test_steps_not_referenceable(self, tmp_path):
+        """${steps} is undefined because steps is non-scalar."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+            "    output: ${steps}/out.pdb\n"
+        )
+        with pytest.raises(WorkflowError, match="Undefined variable"):
+            Workflow.from_yaml(wf_file)
+
+    def test_bool_user_var_rejected(self, tmp_path):
+        """Boolean user var values are rejected."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "flag: true\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+        )
+        with pytest.raises(WorkflowError, match="scalar"):
+            Workflow.from_yaml(wf_file)
+
+    def test_partial_dollar_brace_left_alone(self, tmp_path):
+        """Partial ${ without } is left as-is."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            'input: input.pdb\n'
+            'steps:\n'
+            '  - operation: idealize\n'
+            '    output: "some_${_incomplete"\n'
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert wf.config.steps[0].output == "some_${_incomplete"
+
+    def test_seed_in_namespace(self, tmp_path):
+        """${seed} resolves to the YAML seed value."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "seed: 42\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+            "    output: run_seed_${seed}.pdb\n"
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert wf.config.steps[0].output == "run_seed_42.pdb"
+
+
+# ------------------------------------------------------------------
+# _resolve_vars unit tests
+# ------------------------------------------------------------------
+
+
+class TestResolveVars:
+    """Tests for the _resolve_vars helper."""
+
+    def test_string_substitution(self):
+        ns = {"output": "results"}
+        assert _resolve_vars("${output}/file.pdb", ns) == "results/file.pdb"
+
+    def test_no_vars_passthrough(self):
+        ns = {"output": "results"}
+        assert _resolve_vars("plain_string", ns) == "plain_string"
+
+    def test_dict_values_resolved(self):
+        ns = {"output": "results"}
+        data = {"key": "${output}/file.pdb", "other": 42}
+        result = _resolve_vars(data, ns)
+        assert result == {"key": "results/file.pdb", "other": 42}
+
+    def test_dict_keys_not_resolved(self):
+        ns = {"output": "results"}
+        data = {"${output}": "value"}
+        result = _resolve_vars(data, ns)
+        assert "${output}" in result
+
+    def test_list_resolved(self):
+        ns = {"dir": "out"}
+        data = ["${dir}/a.pdb", "${dir}/b.pdb"]
+        result = _resolve_vars(data, ns)
+        assert result == ["out/a.pdb", "out/b.pdb"]
+
+    def test_nested_structures(self):
+        ns = {"base": "root"}
+        data = {"steps": [{"output": "${base}/step1.pdb"}]}
+        result = _resolve_vars(data, ns)
+        assert result == {"steps": [{"output": "root/step1.pdb"}]}
+
+    def test_non_string_scalars_passthrough(self):
+        ns = {"x": "1"}
+        assert _resolve_vars(42, ns) == 42
+        assert _resolve_vars(3.14, ns) == 3.14
+        assert _resolve_vars(True, ns) is True
+        assert _resolve_vars(None, ns) is None
+
+    def test_undefined_raises(self):
+        ns = {"output": "results"}
+        with pytest.raises(WorkflowError, match="Undefined variable"):
+            _resolve_vars("${missing}/file.pdb", ns)
+
+    def test_multiple_refs(self):
+        ns = {"a": "foo", "b": "bar"}
+        result = _resolve_vars("${a}/${b}/file.pdb", ns)
+        assert result == "foo/bar/file.pdb"
+
+
+# ------------------------------------------------------------------
+# _build_var_namespace unit tests
+# ------------------------------------------------------------------
+
+
+class TestBuildVarNamespace:
+    """Tests for the _build_var_namespace helper."""
+
+    def test_basic_scalars(self):
+        data = {"input": "in.pdb", "output": "out", "seed": 42}
+        ns = _build_var_namespace(data)
+        assert ns == {"input": "in.pdb", "output": "out", "seed": "42"}
+
+    def test_skips_non_scalars(self):
+        data = {
+            "input": "in.pdb",
+            "steps": [{"operation": "idealize"}],
+        }
+        ns = _build_var_namespace(data)
+        assert "steps" not in ns
+
+    def test_skips_bools(self):
+        data = {"input": "in.pdb", "flag": True}
+        ns = _build_var_namespace(data)
+        assert "flag" not in ns
+
+    def test_cross_reference_resolved(self):
+        data = {
+            "output": "results",
+            "run_dir": "${output}/run_1",
+        }
+        ns = _build_var_namespace(data)
+        assert ns["run_dir"] == "results/run_1"
+
+    def test_circular_raises(self):
+        data = {"a": "${b}", "b": "${a}"}
+        with pytest.raises(WorkflowError, match="Circular"):
+            _build_var_namespace(data)
+
+    def test_float_coerced(self):
+        data = {"temp": 0.5}
+        ns = _build_var_namespace(data)
+        assert ns["temp"] == "0.5"
+
+    def test_transitive_cross_reference(self):
+        data = {
+            "base": "root",
+            "mid": "${base}/mid",
+            "leaf": "${mid}/leaf",
+        }
+        ns = _build_var_namespace(data)
+        assert ns["leaf"] == "root/mid/leaf"

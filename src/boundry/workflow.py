@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -56,6 +57,87 @@ def _extract_fields(params: Dict[str, Any], cls: type) -> Dict[str, Any]:
 
 
 _STRUCTURE_EXTENSIONS = frozenset({".pdb", ".cif", ".mmcif"})
+
+_VAR_PATTERN = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+_KNOWN_KEYS = frozenset(
+    {"workflow_version", "input", "output", "seed", "steps"}
+)
+
+
+def _build_var_namespace(data: Dict[str, Any]) -> Dict[str, str]:
+    """Build a variable namespace from top-level scalar keys.
+
+    Collects all top-level keys whose values are str, int, or float
+    (excluding bools and non-scalars) and returns them as a
+    ``{name: stringified_value}`` dict.  Cross-references among
+    namespace values are resolved via iterative passes.
+    """
+    namespace: Dict[str, str] = {}
+    for key, value in data.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (str, int, float)):
+            namespace[key] = str(value)
+
+    # Resolve cross-references within the namespace (max 10 passes).
+    _MAX_PASSES = 10
+    for _ in range(_MAX_PASSES):
+        changed = False
+        for key in namespace:
+            original = namespace[key]
+            resolved = _VAR_PATTERN.sub(
+                lambda m: namespace.get(m.group(1), m.group(0)),
+                original,
+            )
+            if resolved != original:
+                namespace[key] = resolved
+                changed = True
+        if not changed:
+            break
+
+    # Detect remaining unresolved self/cross references (cycles).
+    for key, value in namespace.items():
+        remaining = _VAR_PATTERN.findall(value)
+        for ref in remaining:
+            if ref in namespace:
+                raise WorkflowError(
+                    f"Circular variable reference detected: "
+                    f"'{key}' references '${{{ref}}}' which "
+                    f"cannot be fully resolved"
+                )
+
+    return namespace
+
+
+def _resolve_vars(
+    data: Any, namespace: Dict[str, str]
+) -> Any:
+    """Recursively resolve ``${name}`` references in *data*.
+
+    Strings are regex-substituted using *namespace*.  Dicts have
+    their values (not keys) resolved.  Lists are resolved
+    element-wise.  Non-string scalars pass through unchanged.
+    """
+    if isinstance(data, str):
+        def _replacer(match: re.Match) -> str:
+            name = match.group(1)
+            if name not in namespace:
+                raise WorkflowError(
+                    f"Undefined variable '${{{name}}}' in "
+                    f"workflow. Defined variables: "
+                    f"{sorted(namespace)}"
+                )
+            return namespace[name]
+
+        return _VAR_PATTERN.sub(_replacer, data)
+
+    if isinstance(data, dict):
+        return {k: _resolve_vars(v, namespace) for k, v in data.items()}
+
+    if isinstance(data, list):
+        return [_resolve_vars(item, namespace) for item in data]
+
+    return data
 
 
 def _is_directory_output(path_template: str) -> bool:
@@ -386,22 +468,53 @@ class Workflow:
                 f"got {type(data).__name__}"
             )
 
-        _validate_unknown_keys(
-            data,
-            {"workflow_version", "input", "output", "seed", "steps"},
-            "Workflow",
-        )
-
         if "input" not in data:
             raise WorkflowError("Workflow must specify 'input' field")
         if "steps" not in data:
             raise WorkflowError("Workflow must specify 'steps' field")
 
+        # Validate user-defined keys (non-known keys must be valid
+        # identifiers with scalar values).
+        user_vars: Dict[str, str] = {}
+        for key in list(data):
+            if key in _KNOWN_KEYS:
+                continue
+            if not key.isidentifier():
+                raise WorkflowError(
+                    f"Invalid variable name '{key}'. "
+                    "User-defined keys must be valid Python "
+                    "identifiers (letters, digits, underscores; "
+                    "cannot start with a digit)."
+                )
+            value = data[key]
+            if isinstance(value, bool) or not isinstance(
+                value, (str, int, float)
+            ):
+                raise WorkflowError(
+                    f"User-defined variable '{key}' must have "
+                    f"a scalar value (string, int, or float), "
+                    f"got {type(value).__name__}"
+                )
+
+        # Build namespace from all scalar top-level keys and resolve
+        # cross-references within the namespace.
+        namespace = _build_var_namespace(data)
+
+        # Resolve ${...} throughout the data dict.
+        data = _resolve_vars(data, namespace)
+
+        # Separate user-defined keys before parsing known fields.
+        for key in list(data):
+            if key not in _KNOWN_KEYS:
+                user_vars[key] = str(data.pop(key))
+
         input_path = data["input"]
         if not isinstance(input_path, str):
             raise WorkflowError("Workflow 'input' must be a string")
 
-        output_path = _parse_optional_str(data.get("output"), "Workflow", "output")
+        output_path = _parse_optional_str(
+            data.get("output"), "Workflow", "output"
+        )
         version = data.get("workflow_version", 1)
         if isinstance(version, bool) or not isinstance(version, int):
             raise WorkflowError("workflow_version must be an integer")
@@ -425,6 +538,7 @@ class Workflow:
             seed=effective_seed,
             workflow_version=version,
             steps=steps,
+            vars=user_vars,
         )
         return cls(config)
 

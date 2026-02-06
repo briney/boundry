@@ -157,3 +157,4 @@ class WorkflowConfig:
     seed: Optional[int] = None  # Workflow-level seed for reproducibility
     workflow_version: int = 1
     steps: List[WorkflowStepOrBlock] = field(default_factory=list)
+    vars: Dict[str, str] = field(default_factory=dict)

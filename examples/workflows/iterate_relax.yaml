@@ -3,17 +3,20 @@
 # Idealize once, then run relax + interface analysis for 5 cycles with
 # deterministic seed derivation. Output to a directory for automatic
 # auxiliary file generation (per-position CSV, metrics JSON, etc.).
+#
+# Uses ${output} variable interpolation so the base directory is
+# defined in one place.
 
 workflow_version: 1
 input: input.pdb
-output: results/
+output: results
 seed: 42
 
 steps:
   - operation: idealize
   - iterate:
       n: 5
-      output: results/cycle_{cycle}/
+      output: ${output}/cycle_{cycle}/
       steps:
         - operation: relax
           params:

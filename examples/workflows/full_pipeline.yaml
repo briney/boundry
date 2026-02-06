@@ -2,10 +2,13 @@
 #
 # Idealize -> convergence loop -> beam search. Demonstrates nested,
 # composable block structures.
+#
+# Uses ${output} variable interpolation so the base output directory
+# is defined in one place.
 
 workflow_version: 1
 input: input.pdb
-output: full_pipeline_{rank}.pdb
+output: full_pipeline_results
 seed: 42
 
 steps:
@@ -13,7 +16,7 @@ steps:
   - iterate:
       until: "delta({final_energy}) < 0.5"
       max_n: 20
-      output: converge_relax_cycle_{cycle}.pdb
+      output: ${output}/converge_cycle_{cycle}.pdb
       steps:
         - operation: relax
           params:
@@ -27,7 +30,7 @@ steps:
       expand: 3
       metric: dG
       direction: min
-      output: full_beam_round_{round}_rank_{rank}.pdb
+      output: ${output}/beam_round_{round}_rank_{rank}.pdb
       steps:
         - operation: design
           params:
