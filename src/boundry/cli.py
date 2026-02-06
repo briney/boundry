@@ -184,6 +184,33 @@ def _parse_chain_pairs(chain_string: str) -> list:
     return pairs
 
 
+def _run_structure_command(
+    *,
+    operation_name: str,
+    operation,
+    input_file: Path,
+    output_file: Path,
+    operation_kwargs: Optional[dict] = None,
+):
+    """Run a structure-producing operation with CLI output policy."""
+    from boundry.invocation import (
+        InvocationMode,
+        OutputPolicy,
+        OutputRequirement,
+    )
+    from boundry.runner import run_structure_operation
+
+    return run_structure_operation(
+        name=operation_name,
+        operation=operation,
+        structure=input_file,
+        output=output_file,
+        mode=InvocationMode.CLI,
+        output_policy=OutputPolicy(OutputRequirement.REQUIRED),
+        **(operation_kwargs or {}),
+    )
+
+
 # -------------------------------------------------------------------
 # Commands
 # -------------------------------------------------------------------
@@ -230,8 +257,13 @@ def idealize(
 
     logger.info(f"Idealizing {input_file} -> {output_file}")
     with _quiet_context(verbose):
-        result = _idealize(input_file, config=config)
-    result.write(output_file)
+        result = _run_structure_command(
+            operation_name="idealize",
+            operation=_idealize,
+            input_file=input_file,
+            output_file=output_file,
+            operation_kwargs={"config": config},
+        )
     logger.info(f"Wrote idealized structure to {output_file}")
 
 
@@ -285,10 +317,16 @@ def minimize(
 
     logger.info(f"Minimizing {input_file} -> {output_file}")
     with _quiet_context(verbose):
-        result = _minimize(
-            input_file, config=config, pre_idealize=pre_idealize
+        result = _run_structure_command(
+            operation_name="minimize",
+            operation=_minimize,
+            input_file=input_file,
+            output_file=output_file,
+            operation_kwargs={
+                "config": config,
+                "pre_idealize": pre_idealize,
+            },
         )
-    result.write(output_file)
 
     energy = result.metadata.get("final_energy")
     if energy is not None:
@@ -342,13 +380,17 @@ def repack(
 
     logger.info(f"Repacking {input_file} -> {output_file}")
     with _quiet_context(verbose):
-        result = _repack(
-            input_file,
-            config=config,
-            resfile=resfile,
-            pre_idealize=pre_idealize,
+        result = _run_structure_command(
+            operation_name="repack",
+            operation=_repack,
+            input_file=input_file,
+            output_file=output_file,
+            operation_kwargs={
+                "config": config,
+                "resfile": resfile,
+                "pre_idealize": pre_idealize,
+            },
         )
-    result.write(output_file)
     logger.info(f"Wrote repacked structure to {output_file}")
 
 
@@ -438,14 +480,18 @@ def relax(
         f"Relaxing {input_file} -> {output_file} ({n_iter} iterations)"
     )
     with _quiet_context(verbose):
-        result = _relax(
-            input_file,
-            config=config,
-            resfile=resfile,
-            pre_idealize=pre_idealize,
-            n_iterations=n_iter,
+        result = _run_structure_command(
+            operation_name="relax",
+            operation=_relax,
+            input_file=input_file,
+            output_file=output_file,
+            operation_kwargs={
+                "config": config,
+                "resfile": resfile,
+                "pre_idealize": pre_idealize,
+                "n_iterations": n_iter,
+            },
         )
-    result.write(output_file)
 
     energy = result.metadata.get("final_energy")
     if energy is not None:
@@ -499,13 +545,17 @@ def mpnn(
 
     logger.info(f"Designing {input_file} -> {output_file}")
     with _quiet_context(verbose):
-        result = _mpnn(
-            input_file,
-            config=config,
-            resfile=resfile,
-            pre_idealize=pre_idealize,
+        result = _run_structure_command(
+            operation_name="mpnn",
+            operation=_mpnn,
+            input_file=input_file,
+            output_file=output_file,
+            operation_kwargs={
+                "config": config,
+                "resfile": resfile,
+                "pre_idealize": pre_idealize,
+            },
         )
-    result.write(output_file)
     logger.info(f"Wrote designed structure to {output_file}")
 
 
@@ -595,14 +645,18 @@ def design(
         f"Designing {input_file} -> {output_file} ({n_iter} iterations)"
     )
     with _quiet_context(verbose):
-        result = _design(
-            input_file,
-            config=config,
-            resfile=resfile,
-            pre_idealize=pre_idealize,
-            n_iterations=n_iter,
+        result = _run_structure_command(
+            operation_name="design",
+            operation=_design,
+            input_file=input_file,
+            output_file=output_file,
+            operation_kwargs={
+                "config": config,
+                "resfile": resfile,
+                "pre_idealize": pre_idealize,
+                "n_iterations": n_iter,
+            },
         )
-    result.write(output_file)
 
     energy = result.metadata.get("final_energy")
     if energy is not None:
@@ -633,8 +687,12 @@ def renumber(
     from boundry.operations import renumber as _renumber
 
     logger.info(f"Renumbering {input_file} -> {output_file}")
-    result = _renumber(input_file)
-    result.write(output_file)
+    _run_structure_command(
+        operation_name="renumber",
+        operation=_renumber,
+        input_file=input_file,
+        output_file=output_file,
+    )
     logger.info(f"Wrote renumbered structure to {output_file}")
 
 
@@ -642,6 +700,12 @@ def renumber(
 def analyze_interface(
     input_file: Path = typer.Argument(
         ..., metavar="INPUT", help="Input structure file (PDB or CIF)"
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Write interface summary JSON (.json) or to a directory",
     ),
     chains: Optional[str] = typer.Option(
         None,
@@ -736,9 +800,17 @@ def analyze_interface(
             err=True,
         )
         raise typer.Exit(code=1)
+    if position_csv is not None and not (per_position or alanine_scan):
+        typer.echo(
+            "Error: --position-csv requires --per-position or "
+            "--alanine-scan",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     from boundry.config import DesignConfig, InterfaceConfig, RelaxConfig
     from boundry.operations import analyze_interface as _analyze
+    from boundry.runner import run_interface_operation
 
     parsed_scan_chains = None
     if scan_chains:
@@ -762,7 +834,7 @@ def analyze_interface(
         alanine_scan=alanine_scan,
         scan_chains=parsed_scan_chains,
         position_relax=position_relax,
-        position_csv=position_csv,
+        position_csv=None,
         max_scan_sites=max_scan_sites,
         show_progress=per_position or alanine_scan,
         quiet=not verbose,
@@ -792,46 +864,56 @@ def analyze_interface(
         ensure_weights(verbose=verbose)
         designer = Designer(DesignConfig())
 
-    result = _analyze(
-        input_file,
+    result, outputs = run_interface_operation(
+        operation=_analyze,
+        structure=input_file,
+        output=output,
+        position_csv=position_csv,
+        include_position_csv=per_position or alanine_scan,
         config=interface_config,
         relaxer=relaxer,
         designer=designer,
     )
 
-    # Print results to stdout
-    if result.interface_info:
-        typer.echo(result.interface_info.summary)
-    if result.binding_energy:
-        if result.binding_energy.binding_energy is not None:
-            dG = result.binding_energy.binding_energy
-            typer.echo(f"dG: {dG:.2f} kcal/mol")
-        else:
-            typer.echo("dG: could not be computed")
-    if result.sasa:
-        typer.echo(
-            f"Buried SASA: {result.sasa.buried_sasa:.1f} sq. angstroms"
-        )
-    if result.shape_complementarity:
-        typer.echo(
-            f"Shape complementarity: "
-            f"{result.shape_complementarity.sc_score:.3f}"
-        )
-    if result.per_position:
-        from boundry.interface_position_energetics import (
-            format_hotspot_table,
-        )
-
-        if result.per_position.dG_wt is not None:
+    if output is None:
+        # Print results to stdout
+        if result.interface_info:
+            typer.echo(result.interface_info.summary)
+        if result.binding_energy:
+            if result.binding_energy.binding_energy is not None:
+                dG = result.binding_energy.binding_energy
+                typer.echo(f"dG: {dG:.2f} kcal/mol")
+            else:
+                typer.echo("dG: could not be computed")
+        if result.sasa:
             typer.echo(
-                f"dG_wt (per-position): "
-                f"{result.per_position.dG_wt:.2f} kcal/mol"
+                f"Buried SASA: {result.sasa.buried_sasa:.1f} sq. angstroms"
             )
-        hotspot_table = format_hotspot_table(result.per_position)
-        if hotspot_table:
-            typer.echo(hotspot_table)
-        if position_csv:
-            typer.echo(f"Per-position CSV: {position_csv}")
+        if result.shape_complementarity:
+            typer.echo(
+                f"Shape complementarity: "
+                f"{result.shape_complementarity.sc_score:.3f}"
+            )
+        if result.per_position:
+            from boundry.interface_position_energetics import (
+                format_hotspot_table,
+            )
+
+            if result.per_position.dG_wt is not None:
+                typer.echo(
+                    f"dG_wt (per-position): "
+                    f"{result.per_position.dG_wt:.2f} kcal/mol"
+                )
+            hotspot_table = format_hotspot_table(result.per_position)
+            if hotspot_table:
+                typer.echo(hotspot_table)
+            if outputs.position_csv is not None:
+                typer.echo(f"Per-position CSV: {outputs.position_csv}")
+    else:
+        if outputs.summary_json is not None:
+            typer.echo(f"Summary JSON: {outputs.summary_json}")
+        if outputs.position_csv is not None:
+            typer.echo(f"Per-position CSV: {outputs.position_csv}")
 
 
 def _resolve_workflow(name_or_path: str) -> Path:
@@ -911,7 +993,12 @@ def run(
         raise typer.Exit(code=1)
 
     overrides = ctx.args or None
-    workflow = Workflow.from_yaml(resolved, seed=seed, overrides=overrides)
+    workflow = Workflow.from_yaml(
+        resolved,
+        seed=seed,
+        overrides=overrides,
+        require_output=True,
+    )
     workflow.run()
 
 

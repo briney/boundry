@@ -74,6 +74,7 @@ boundry renumber antibody.pdb renumbered.pdb
 # Interface analysis
 boundry analyze-interface complex.pdb
 boundry analyze-interface complex.pdb --chains H:A,L:A --distance-cutoff 10.0
+boundry analyze-interface complex.pdb --output interface.json
 
 # Per-position interface energetics
 boundry analyze-interface complex.pdb --per-position --alanine-scan
@@ -242,6 +243,10 @@ from boundry import Workflow
 workflow = Workflow.from_yaml("workflow.yaml")
 result = workflow.run()
 ```
+
+By default, workflow execution requires at least one output path
+(top-level `output` or step/block `output`). For in-memory execution in
+Python, construct with `Workflow.from_yaml(..., require_output=False)`.
 
 Compound block nodes are also supported:
 

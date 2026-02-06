@@ -310,7 +310,7 @@ class TestWorkflowRun:
                 }
             )
         )
-        return Workflow.from_yaml(wf_file)
+        return Workflow.from_yaml(wf_file, require_output=False)
 
     def _make_input(self, tmp_path):
         """Write a dummy PDB file and return path."""
@@ -320,6 +320,54 @@ class TestWorkflowRun:
             "  1.00  0.00           N\nEND\n"
         )
         return pdb
+
+    @patch("boundry.workflow.Workflow._run_idealize")
+    def test_run_requires_output_by_default(
+        self, mock_idealize, tmp_path
+    ):
+        """Workflow.run() requires output paths unless opted out."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        mock_idealize.return_value = Structure(pdb_string="ATOM\nEND\n")
+
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": str(tmp_path / "input.pdb"),
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        with pytest.raises(WorkflowError, match="output is required"):
+            wf.run()
+
+    @patch("boundry.workflow.Workflow._run_idealize")
+    def test_run_can_opt_out_of_output_requirement(
+        self, mock_idealize, tmp_path
+    ):
+        """Programmatic workflows can still run fully in-memory."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        mock_idealize.return_value = Structure(
+            pdb_string="ATOM idealized\nEND\n"
+        )
+
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": str(tmp_path / "input.pdb"),
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file, require_output=False)
+        result = wf.run()
+        assert "idealized" in result.pdb_string
 
     @patch("boundry.workflow.Workflow._run_idealize")
     def test_single_step(self, mock_idealize, tmp_path):
@@ -486,7 +534,7 @@ class TestCompoundExecution:
                 }
             )
         )
-        return Workflow.from_yaml(wf_file)
+        return Workflow.from_yaml(wf_file, require_output=False)
 
     def _make_workflow_with_seed(
         self, tmp_path, steps, seed, output=None
@@ -504,7 +552,7 @@ class TestCompoundExecution:
                 }
             )
         )
-        return Workflow.from_yaml(wf_file)
+        return Workflow.from_yaml(wf_file, require_output=False)
 
     def _make_input(self, tmp_path):
         pdb = tmp_path / "input.pdb"
@@ -1106,7 +1154,7 @@ class TestDirectoryOutput:
                 }
             )
         )
-        return Workflow.from_yaml(wf_file)
+        return Workflow.from_yaml(wf_file, require_output=False)
 
     def _make_input(self, tmp_path):
         pdb = tmp_path / "input.pdb"

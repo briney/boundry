@@ -369,8 +369,13 @@ class Workflow:
         BeamBlock: "_execute_beam",
     }
 
-    def __init__(self, config: WorkflowConfig):
+    def __init__(
+        self,
+        config: WorkflowConfig,
+        require_output: bool = True,
+    ):
         self.config = config
+        self.require_output = require_output
         self.last_population: List["Structure"] = []
         self._validate()
 
@@ -380,6 +385,7 @@ class Workflow:
         path: Union[str, Path],
         seed: Optional[int] = None,
         overrides: Optional[List[str]] = None,
+        require_output: bool = True,
     ) -> "Workflow":
         """Load a workflow from a YAML file.
 
@@ -394,6 +400,10 @@ class Workflow:
             Dotlist-style overrides (e.g. ``["output=results/",
             "seed=42"]``).  Applied after YAML loading but before
             variable resolution.
+        require_output : bool, optional
+            Require at least one workflow output path (top-level or
+            step/block output) when running. Set to ``False`` for
+            in-memory workflow usage.
         """
         from omegaconf import OmegaConf, DictConfig
         from omegaconf.errors import OmegaConfBaseException
@@ -512,7 +522,7 @@ class Workflow:
             steps=steps,
             vars=user_vars,
         )
-        return cls(config)
+        return cls(config, require_output=require_output)
 
     def _validate(self) -> None:
         """Validate workflow configuration recursively."""
@@ -578,6 +588,13 @@ class Workflow:
         """Execute workflow and return the full final candidate population."""
         from boundry.operations import Structure
 
+        if self.require_output and not self._has_any_output():
+            raise WorkflowError(
+                "Workflow output is required by default. Set top-level "
+                "'output' or a step/block 'output', or construct "
+                "Workflow(..., require_output=False) for in-memory runs."
+            )
+
         input_path = Path(self.config.input)
         if not input_path.exists():
             raise WorkflowError(f"Input file not found: {input_path}")
@@ -606,6 +623,27 @@ class Workflow:
 
         self.last_population = list(current.population)
         return list(current.population)
+
+    def _has_any_output(self) -> bool:
+        if self.config.output is not None:
+            return True
+        return self._steps_have_output(self.config.steps)
+
+    @classmethod
+    def _steps_have_output(
+        cls, steps: List[WorkflowStepOrBlock]
+    ) -> bool:
+        for item in steps:
+            if isinstance(item, WorkflowStep):
+                if item.output is not None:
+                    return True
+                continue
+            if isinstance(item, (IterateBlock, BeamBlock)):
+                if item.output is not None:
+                    return True
+                if cls._steps_have_output(item.steps):
+                    return True
+        return False
 
     def _execute_item(
         self,

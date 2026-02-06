@@ -1,5 +1,7 @@
 """Tests for boundry.cli module (Typer-based CLI)."""
 
+from unittest.mock import patch
+
 import pytest
 from typer.testing import CliRunner
 
@@ -250,6 +252,52 @@ class TestAnalyzeInterface:
         result = runner.invoke(app, ["analyze-interface", "--help"])
         # Should only have INPUT, not OUTPUT
         assert "INPUT" in result.output
+
+    def test_has_output_option(self):
+        """Test that analyze-interface supports --output / -o."""
+        result = runner.invoke(app, ["analyze-interface", "--help"])
+        assert "--output" in result.output
+
+    def test_position_csv_requires_position_mode(self, tmp_path):
+        """Test that --position-csv requires per-position mode flags."""
+        input_pdb = tmp_path / "input.pdb"
+        input_pdb.write_text("ATOM      1  N   ALA A   1\nEND\n")
+
+        result = runner.invoke(
+            app,
+            [
+                "analyze-interface",
+                str(input_pdb),
+                "--position-csv",
+                str(tmp_path / "positions.csv"),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "requires --per-position or --alanine-scan" in result.output
+
+    @patch("boundry.operations.analyze_interface")
+    def test_output_json_written(self, mock_analyze, tmp_path):
+        """Test that --output writes JSON summary."""
+        from boundry.operations import InterfaceAnalysisResult
+
+        input_pdb = tmp_path / "input.pdb"
+        input_pdb.write_text("ATOM      1  N   ALA A   1\nEND\n")
+        out_json = tmp_path / "interface.json"
+        mock_analyze.return_value = InterfaceAnalysisResult()
+
+        result = runner.invoke(
+            app,
+            [
+                "analyze-interface",
+                str(input_pdb),
+                "--no-binding-energy",
+                "--output",
+                str(out_json),
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert out_json.exists()
 
 
 class TestRun:

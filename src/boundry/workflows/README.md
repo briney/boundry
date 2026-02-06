@@ -270,6 +270,9 @@ Notes:
 - Beam is first-class population flow: top-K candidates continue into later steps.
 - `Workflow.run()` returns best rank-1 candidate.
 - `Workflow.run_population()` returns final kept population.
+- By default, running a workflow requires at least one configured output
+  path (`output` at top-level or in a step/block). For in-memory runs in
+  Python, pass `require_output=False` to `Workflow.from_yaml(...)`.
 
 ## 5. Output Template Variables
 
