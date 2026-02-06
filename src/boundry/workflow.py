@@ -365,18 +365,31 @@ _OPERATION_REGISTRY: Dict[str, Optional[Union[_SimpleSpec, _PipelineSpec]]] = {
         "minimize", "RelaxConfig", {}, ("pre_idealize",), False
     ),
     "repack": _SimpleSpec(
-        "repack", "DesignConfig", {}, ("pre_idealize", "resfile"), True
+        "repack",
+        "DesignConfig",
+        {},
+        ("pre_idealize", "resfile", "design_spec"),
+        True,
     ),
     "mpnn": _SimpleSpec(
-        "mpnn", "DesignConfig", {}, ("pre_idealize", "resfile"), True
+        "mpnn",
+        "DesignConfig",
+        {},
+        ("pre_idealize", "resfile", "design_spec"),
+        True,
     ),
     "relax": _PipelineSpec(
-        "relax", ("pre_idealize", "resfile", "n_iterations")
+        "relax",
+        ("pre_idealize", "resfile", "design_spec", "n_iterations"),
     ),
     "design": _PipelineSpec(
-        "design", ("pre_idealize", "resfile", "n_iterations")
+        "design",
+        ("pre_idealize", "resfile", "design_spec", "n_iterations"),
     ),
     "renumber": _SimpleSpec("renumber", None, {}, (), False),
+    "select_positions": _SimpleSpec(
+        "select_positions", "SelectPositionsConfig", {}, (), False
+    ),
     "analyze_interface": None,  # special-cased
 }
 
@@ -1014,9 +1027,18 @@ class Workflow:
         if per_position is not None:
             from boundry.interface_position_energetics import write_position_csv
 
-            csv_path = dir_path / f"{filename}_positions.csv"
+            csv_path = dir_path / f"{filename}_per_position.csv"
             write_position_csv(per_position, csv_path)
             logger.info(f"  Wrote per-position CSV: {csv_path}")
+
+        # Alanine scan CSV (from analyze_interface)
+        alanine_scan = meta.get("alanine_scan")
+        if alanine_scan is not None:
+            from boundry.interface_position_energetics import write_position_csv as _write_csv
+
+            csv_path = dir_path / f"{filename}_alanine_scan.csv"
+            _write_csv(alanine_scan, csv_path)
+            logger.info(f"  Wrote alanine scan CSV: {csv_path}")
 
         # Metrics JSON — write workflow metrics for any operation that produces them
         wf = meta.get("_workflow", {})
@@ -1096,12 +1118,22 @@ class Workflow:
                 design=_cfg.DesignConfig(**design_params),
                 relax=_cfg.RelaxConfig(**relax_params),
             )
+
+            # Auto-link design_spec from metadata when no explicit
+            # resfile or design_spec is provided in step params.
+            _ds = extras.pop("design_spec", None)
+            if _ds is None and "resfile" not in extras:
+                _ds = getattr(
+                    structure, "metadata", {}
+                ).get("design_spec")
+
             op_fn = getattr(_ops, spec.op_name)
             return op_fn(
                 structure,
                 config=config,
                 pre_idealize=extras.get("pre_idealize", False),
                 resfile=extras.get("resfile"),
+                design_spec=_ds,
                 n_iterations=extras.get("n_iterations", 5),
             )
 
@@ -1119,6 +1151,15 @@ class Workflow:
             )
         config = config_class(**spec.config_overrides, **config_fields)
         op_fn = getattr(_ops, spec.op_name)
+
+        # Auto-link design_spec from metadata for ops that accept it
+        if "design_spec" in spec.extra_params:
+            if "design_spec" not in extras and "resfile" not in extras:
+                meta_spec = getattr(
+                    structure, "metadata", {}
+                ).get("design_spec")
+                if meta_spec is not None:
+                    extras["design_spec"] = meta_spec
 
         kwargs: Dict[str, Any] = {"config": config}
         for key in spec.extra_params:

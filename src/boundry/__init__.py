@@ -31,6 +31,7 @@ from boundry.operations import (
     repack,
     relax,
     renumber,
+    select_positions,
 )
 
 # Workflow system
@@ -45,6 +46,7 @@ from boundry.config import (
     IterateBlock,
     PipelineConfig,
     RelaxConfig,
+    SelectPositionsConfig,
     WorkflowConfig,
     WorkflowStep,
 )
@@ -67,6 +69,7 @@ __all__ = [
     "design",
     "renumber",
     "analyze_interface",
+    "select_positions",
     # Data classes
     "Structure",
     "InterfaceAnalysisResult",
@@ -78,6 +81,7 @@ __all__ = [
     "RelaxConfig",
     "IdealizeConfig",
     "InterfaceConfig",
+    "SelectPositionsConfig",
     "WorkflowConfig",
     "WorkflowStep",
     "IterateBlock",

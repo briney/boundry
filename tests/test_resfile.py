@@ -386,3 +386,83 @@ class TestResfileParser:
 
         assert isinstance(result, DesignSpec)
         assert result.default_mode == ResidueMode.NATAA
+
+
+class TestDesignSpecToResfile:
+    """Tests for DesignSpec.to_resfile() serialization."""
+
+    def test_roundtrip(self):
+        """to_resfile() output can be parsed back by ResfileParser."""
+        specs = {
+            "A10": ResidueSpec(
+                chain="A", resnum=10, mode=ResidueMode.ALLAA
+            ),
+            "A15": ResidueSpec(
+                chain="A",
+                resnum=15,
+                mode=ResidueMode.PIKAA,
+                allowed_aas={"A", "C", "F"},
+            ),
+            "B20": ResidueSpec(
+                chain="B", resnum=20, mode=ResidueMode.NATRO
+            ),
+        }
+        original = DesignSpec(
+            residue_specs=specs, default_mode=ResidueMode.NATAA
+        )
+        text = original.to_resfile()
+        parsed = ResfileParser().parse(StringIO(text))
+
+        assert parsed.default_mode == original.default_mode
+        assert set(parsed.residue_specs.keys()) == set(
+            original.residue_specs.keys()
+        )
+        for key in original.residue_specs:
+            assert (
+                parsed.residue_specs[key].mode
+                == original.residue_specs[key].mode
+            )
+
+    def test_allaa_format(self):
+        """ALLAA mode line format is correct."""
+        specs = {
+            "A10": ResidueSpec(
+                chain="A", resnum=10, mode=ResidueMode.ALLAA
+            ),
+        }
+        ds = DesignSpec(residue_specs=specs)
+        text = ds.to_resfile()
+        assert "10 A ALLAA" in text
+
+    def test_pikaa_format(self):
+        """PIKAA mode includes sorted allowed amino acids."""
+        specs = {
+            "A15": ResidueSpec(
+                chain="A",
+                resnum=15,
+                mode=ResidueMode.PIKAA,
+                allowed_aas={"W", "A", "F"},
+            ),
+        }
+        ds = DesignSpec(residue_specs=specs)
+        text = ds.to_resfile()
+        assert "15 A PIKAA AFW" in text
+
+    def test_default_mode_header(self):
+        """Default mode appears in header section."""
+        ds = DesignSpec(
+            residue_specs={}, default_mode=ResidueMode.NATRO
+        )
+        text = ds.to_resfile()
+        lines = text.strip().split("\n")
+        assert lines[0] == "NATRO"
+        assert lines[1] == "START"
+
+    def test_empty_spec(self):
+        """Empty residue_specs produces valid output."""
+        ds = DesignSpec(residue_specs={})
+        text = ds.to_resfile()
+        lines = text.strip().split("\n")
+        assert lines[0] == "NATAA"
+        assert lines[1] == "START"
+        assert len(lines) == 2

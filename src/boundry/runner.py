@@ -23,7 +23,8 @@ class InterfaceOutputs:
     """Materialized analyze-interface output paths."""
 
     summary_json: Optional[Path] = None
-    position_csv: Optional[Path] = None
+    per_position_csv: Optional[Path] = None
+    alanine_scan_csv: Optional[Path] = None
 
 
 def run_structure_operation(
@@ -49,8 +50,10 @@ def run_interface_operation(
     operation: Callable[..., "InterfaceAnalysisResult"],
     structure: "StructureInput",
     output: Optional[PathLike] = None,
-    position_csv: Optional[PathLike] = None,
-    include_position_csv: bool = False,
+    per_position_csv: Optional[PathLike] = None,
+    alanine_scan_csv: Optional[PathLike] = None,
+    include_per_position_csv: bool = False,
+    include_alanine_scan_csv: bool = False,
     **operation_kwargs: Any,
 ) -> Tuple["InterfaceAnalysisResult", InterfaceOutputs]:
     """Execute analyze-interface and optionally write JSON/CSV artifacts."""
@@ -58,20 +61,36 @@ def run_interface_operation(
     outputs = InterfaceOutputs()
 
     if output is not None:
-        summary_path, csv_path = resolve_interface_output_paths(
-            output,
-            include_position_csv=include_position_csv,
-            position_csv=position_csv,
+        summary_path, pp_csv_path, ala_csv_path = (
+            resolve_interface_output_paths(
+                output,
+                include_per_position_csv=include_per_position_csv,
+                include_alanine_scan_csv=include_alanine_scan_csv,
+                per_position_csv=per_position_csv,
+                alanine_scan_csv=alanine_scan_csv,
+            )
+        )
+        pp_written, ala_written = write_interface_csv(
+            result,
+            per_position_path=pp_csv_path,
+            alanine_scan_path=ala_csv_path,
         )
         outputs = InterfaceOutputs(
             summary_json=write_interface_json(result, summary_path),
-            position_csv=write_interface_csv(result, csv_path)
-            if csv_path is not None
-            else None,
+            per_position_csv=pp_written,
+            alanine_scan_csv=ala_written,
         )
-    elif position_csv is not None:
-        outputs = InterfaceOutputs(
-            position_csv=write_interface_csv(result, position_csv)
-        )
+    else:
+        # Handle explicit CSV paths without output directory
+        if per_position_csv is not None or alanine_scan_csv is not None:
+            pp_written, ala_written = write_interface_csv(
+                result,
+                per_position_path=per_position_csv,
+                alanine_scan_path=alanine_scan_csv,
+            )
+            outputs = InterfaceOutputs(
+                per_position_csv=pp_written,
+                alanine_scan_csv=ala_written,
+            )
 
     return result, outputs

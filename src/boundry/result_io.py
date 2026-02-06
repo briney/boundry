@@ -32,6 +32,7 @@ def interface_result_to_dict(result: "InterfaceAnalysisResult") -> dict[str, Any
         "sasa": _to_jsonable(result.sasa),
         "shape_complementarity": _to_jsonable(result.shape_complementarity),
         "per_position": _to_jsonable(result.per_position),
+        "alanine_scan": _to_jsonable(result.alanine_scan),
     }
 
 
@@ -49,51 +50,81 @@ def write_interface_json(
 
 def write_interface_csv(
     result: "InterfaceAnalysisResult",
-    output_path: PathLike,
-) -> Optional[Path]:
-    """Write per-position CSV when available and return written path."""
-    if result.per_position is None:
-        return None
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_position_csv(result.per_position, path)
-    return path
+    per_position_path: Optional[PathLike] = None,
+    alanine_scan_path: Optional[PathLike] = None,
+) -> Tuple[Optional[Path], Optional[Path]]:
+    """Write per-position and/or alanine scan CSVs.
+
+    Returns a tuple of ``(per_position_path, alanine_scan_path)``
+    where each element is the written path or ``None``.
+    """
+    pp_written: Optional[Path] = None
+    ala_written: Optional[Path] = None
+
+    if result.per_position is not None and per_position_path is not None:
+        path = Path(per_position_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_position_csv(result.per_position, path)
+        pp_written = path
+
+    if result.alanine_scan is not None and alanine_scan_path is not None:
+        path = Path(alanine_scan_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_position_csv(result.alanine_scan, path)
+        ala_written = path
+
+    return pp_written, ala_written
 
 
 def resolve_interface_output_paths(
     output_path: PathLike,
     *,
-    include_position_csv: bool,
-    position_csv: Optional[PathLike] = None,
-) -> Tuple[Path, Optional[Path]]:
-    """Resolve JSON summary path and optional position CSV path.
+    include_per_position_csv: bool = False,
+    include_alanine_scan_csv: bool = False,
+    per_position_csv: Optional[PathLike] = None,
+    alanine_scan_csv: Optional[PathLike] = None,
+) -> Tuple[Path, Optional[Path], Optional[Path]]:
+    """Resolve JSON summary path and optional CSV paths.
+
+    Returns ``(summary_json, per_position_csv, alanine_scan_csv)``.
 
     Rules:
     - Directory output (no suffix): summary is ``interface_analysis.json``
-      and default CSV is ``interface_positions.csv``.
-    - File output: suffix must be ``.json`` and default CSV is
-      ``<stem>_positions.csv`` in the same directory.
-    - Explicit ``position_csv`` overrides default CSV path.
+      and default CSVs are ``interface_per_position.csv`` and
+      ``interface_alanine_scan.csv``.
+    - File output: suffix must be ``.json`` and default CSVs are
+      ``<stem>_per_position.csv`` and ``<stem>_alanine_scan.csv`` in
+      the same directory.
+    - Explicit ``per_position_csv``/``alanine_scan_csv`` overrides
+      default CSV paths.
     """
     base = Path(output_path)
     is_directory = base.suffix == ""
 
     if is_directory:
         summary_path = base / "interface_analysis.json"
-        default_csv = base / "interface_positions.csv"
+        default_pp_csv = base / "interface_per_position.csv"
+        default_ala_csv = base / "interface_alanine_scan.csv"
     else:
         if base.suffix.lower() != ".json":
             raise ValueError(
                 "analyze-interface output must be a .json file or directory"
             )
         summary_path = base
-        default_csv = base.with_name(f"{base.stem}_positions.csv")
+        default_pp_csv = base.with_name(f"{base.stem}_per_position.csv")
+        default_ala_csv = base.with_name(f"{base.stem}_alanine_scan.csv")
 
-    csv_path = Path(position_csv) if position_csv is not None else None
-    if include_position_csv and csv_path is None:
-        csv_path = default_csv
+    pp_path = Path(per_position_csv) if per_position_csv is not None else None
+    if include_per_position_csv and pp_path is None:
+        pp_path = default_pp_csv
 
-    return summary_path, csv_path
+    ala_path = (
+        Path(alanine_scan_csv) if alanine_scan_csv is not None else None
+    )
+    if include_alanine_scan_csv and ala_path is None:
+        ala_path = default_ala_csv
+
+    return summary_path, pp_path, ala_path
 
 
 def _to_jsonable(value: Any) -> Any:

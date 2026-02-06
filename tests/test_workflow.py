@@ -1083,6 +1083,7 @@ class TestValidOperations:
             "mpnn",
             "design",
             "renumber",
+            "select_positions",
             "analyze_interface",
         }
         assert VALID_OPERATIONS == expected
@@ -1090,6 +1091,10 @@ class TestValidOperations:
     def test_renumber_in_valid_operations(self):
         """Renumber is a valid workflow operation."""
         assert "renumber" in VALID_OPERATIONS
+
+    def test_select_positions_in_valid_operations(self):
+        """select_positions is a valid workflow operation."""
+        assert "select_positions" in VALID_OPERATIONS
 
 
 # ------------------------------------------------------------------

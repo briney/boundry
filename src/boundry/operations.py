@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     )
     from boundry.designer import Designer
     from boundry.interface import InterfaceInfo
-    from boundry.interface_position_energetics import PerPositionResult
+    from boundry.interface_position_energetics import PositionResult
     from boundry.relaxer import Relaxer
     from boundry.renumber import RenumberMapping
     from boundry.surface_area import (
@@ -107,7 +107,8 @@ class InterfaceAnalysisResult:
     binding_energy: Optional[BindingEnergyResult] = None
     sasa: Optional[SurfaceAreaResult] = None
     shape_complementarity: Optional[ShapeComplementarityResult] = None
-    per_position: Optional[PerPositionResult] = None
+    per_position: Optional[PositionResult] = None
+    alanine_scan: Optional[PositionResult] = None
 
     def to_metadata(self) -> Dict[str, Any]:
         """Build a metadata dict from the analysis results."""
@@ -141,6 +142,9 @@ class InterfaceAnalysisResult:
 
         if self.per_position is not None:
             meta["per_position"] = self.per_position
+
+        if self.alanine_scan is not None:
+            meta["alanine_scan"] = self.alanine_scan
 
         return meta
 
@@ -344,6 +348,7 @@ def repack(
     structure: StructureInput,
     config: Optional[DesignConfig] = None,
     resfile: Optional[Union[str, Path]] = None,
+    design_spec: Optional["DesignSpec"] = None,
     pre_idealize: bool = False,
     idealize_config: Optional[IdealizeConfig] = None,
 ) -> Structure:
@@ -358,6 +363,9 @@ def repack(
         config: Design/packing configuration.  Uses defaults if not
             provided.
         resfile: Optional Rosetta-style resfile for residue control.
+        design_spec: Optional pre-built :class:`DesignSpec` (e.g.
+            from :func:`select_positions`).  Takes precedence over
+            *resfile* when both are provided.
         pre_idealize: Run idealization before repacking.
         idealize_config: Configuration for pre-idealization step.
 
@@ -380,14 +388,16 @@ def repack(
         )
         pdb_string = pre.pdb_string
 
-    design_spec = None
-    if resfile is not None:
-        design_spec = ResfileParser().parse(resfile)
+    _design_spec = design_spec
+    if _design_spec is None and resfile is not None:
+        _design_spec = ResfileParser().parse(resfile)
 
     pdb_path = _write_temp_pdb(pdb_string)
     try:
         designer = Designer(config)
-        repack_result = designer.repack(pdb_path, design_spec=design_spec)
+        repack_result = designer.repack(
+            pdb_path, design_spec=_design_spec
+        )
         repacked_pdb = designer.result_to_pdb_string(repack_result)
     finally:
         pdb_path.unlink(missing_ok=True)
@@ -408,6 +418,7 @@ def relax(
     structure: StructureInput,
     config: Optional[PipelineConfig] = None,
     resfile: Optional[Union[str, Path]] = None,
+    design_spec: Optional["DesignSpec"] = None,
     pre_idealize: bool = False,
     n_iterations: int = 5,
 ) -> Structure:
@@ -423,6 +434,9 @@ def relax(
         config: Pipeline configuration (bundles design and relax
             configs).  Uses defaults if not provided.
         resfile: Optional Rosetta-style resfile for residue control.
+        design_spec: Optional pre-built :class:`DesignSpec` (e.g.
+            from :func:`select_positions`).  Takes precedence over
+            *resfile* when both are provided.
         pre_idealize: Run idealization before the relax cycles.
         n_iterations: Number of repack + minimize cycles.
 
@@ -449,9 +463,9 @@ def relax(
         pre = idealize(pdb_string, config=ide_cfg)
         pdb_string = pre.pdb_string
 
-    design_spec = None
-    if resfile is not None:
-        design_spec = ResfileParser().parse(resfile)
+    _design_spec = design_spec
+    if _design_spec is None and resfile is not None:
+        _design_spec = ResfileParser().parse(resfile)
 
     designer = Designer(config.design)
     relaxer = Relaxer(config.relax)
@@ -476,7 +490,9 @@ def relax(
         # Repack
         pdb_path = _write_temp_pdb(current_pdb)
         try:
-            repack_result = designer.repack(pdb_path, design_spec=design_spec)
+            repack_result = designer.repack(
+                pdb_path, design_spec=_design_spec
+            )
             current_pdb = designer.result_to_pdb_string(repack_result)
         finally:
             pdb_path.unlink(missing_ok=True)
@@ -531,6 +547,7 @@ def mpnn(
     structure: StructureInput,
     config: Optional[DesignConfig] = None,
     resfile: Optional[Union[str, Path]] = None,
+    design_spec: Optional["DesignSpec"] = None,
     pre_idealize: bool = False,
     idealize_config: Optional[IdealizeConfig] = None,
 ) -> Structure:
@@ -547,6 +564,9 @@ def mpnn(
         resfile: Optional Rosetta-style resfile for residue control.
             When provided, only residues specified in the resfile are
             designed.
+        design_spec: Optional pre-built :class:`DesignSpec` (e.g.
+            from :func:`select_positions`).  Takes precedence over
+            *resfile* when both are provided.
         pre_idealize: Run idealization before design.
         idealize_config: Configuration for pre-idealization step.
 
@@ -570,10 +590,11 @@ def mpnn(
         )
         pdb_string = pre.pdb_string
 
-    design_spec = None
+    _design_spec = design_spec
     design_all = True
-    if resfile is not None:
-        design_spec = ResfileParser().parse(resfile)
+    if _design_spec is None and resfile is not None:
+        _design_spec = ResfileParser().parse(resfile)
+    if _design_spec is not None:
         design_all = False
 
     pdb_path = _write_temp_pdb(pdb_string)
@@ -581,7 +602,7 @@ def mpnn(
         designer = Designer(config)
         design_result = designer.design(
             pdb_path,
-            design_spec=design_spec,
+            design_spec=_design_spec,
             design_all=design_all,
         )
         designed_pdb = designer.result_to_pdb_string(design_result)
@@ -610,6 +631,7 @@ def design(
     structure: StructureInput,
     config: Optional[PipelineConfig] = None,
     resfile: Optional[Union[str, Path]] = None,
+    design_spec: Optional["DesignSpec"] = None,
     pre_idealize: bool = False,
     n_iterations: int = 5,
 ) -> Structure:
@@ -625,6 +647,9 @@ def design(
         config: Pipeline configuration (bundles design and relax
             configs).  Uses defaults if not provided.
         resfile: Optional Rosetta-style resfile for residue control.
+        design_spec: Optional pre-built :class:`DesignSpec` (e.g.
+            from :func:`select_positions`).  Takes precedence over
+            *resfile* when both are provided.
         pre_idealize: Run idealization before the design cycles.
         n_iterations: Number of design + minimize cycles.
 
@@ -652,10 +677,11 @@ def design(
         pre = idealize(pdb_string, config=ide_cfg)
         pdb_string = pre.pdb_string
 
-    design_spec = None
+    _design_spec = design_spec
     design_all = True
-    if resfile is not None:
-        design_spec = ResfileParser().parse(resfile)
+    if _design_spec is None and resfile is not None:
+        _design_spec = ResfileParser().parse(resfile)
+    if _design_spec is not None:
         design_all = False
 
     designer = Designer(config.design)
@@ -684,7 +710,7 @@ def design(
         try:
             design_result = designer.design(
                 pdb_path,
-                design_spec=design_spec,
+                design_spec=_design_spec,
                 design_all=design_all,
             )
             current_pdb = designer.result_to_pdb_string(design_result)
@@ -781,6 +807,137 @@ def renumber(structure: StructureInput) -> Structure:
             "renumber_mapping": mapping,
             "operation": "renumber",
         },
+        source_path=source_path,
+    )
+
+
+def select_positions(
+    structure: StructureInput,
+    config: Optional["SelectPositionsConfig"] = None,
+) -> Structure:
+    """Select interface positions for design based on energetic criteria.
+
+    Reads per-position or alanine scan results from the input
+    Structure's metadata, filters positions by a metric threshold,
+    and builds a :class:`~boundry.resfile.DesignSpec` controlling
+    which residues are designed.
+
+    Args:
+        structure: Input structure (file path, PDB string, or
+            Structure).  Must have ``per_position`` or
+            ``alanine_scan`` in its metadata (from a prior
+            ``analyze_interface`` step).
+        config: Selection configuration.  Uses defaults if not
+            provided.
+
+    Returns:
+        Structure with the same PDB string and a ``design_spec``
+        key added to metadata.
+
+    Raises:
+        ValueError: If the specified source is not found in
+            metadata or has no rows, or if the mode is invalid.
+    """
+    from boundry.config import SelectPositionsConfig
+    from boundry.resfile import DesignSpec, ResidueMode, ResidueSpec
+
+    if config is None:
+        config = SelectPositionsConfig()
+
+    pdb_string, source_path = _resolve_input(structure)
+
+    # Extract existing metadata
+    input_metadata: Dict[str, Any] = {}
+    if isinstance(structure, Structure):
+        input_metadata = structure.metadata
+
+    # Read the PositionResult from metadata
+    position_result = input_metadata.get(config.source)
+    if position_result is None:
+        raise ValueError(
+            f"select_positions: metadata key '{config.source}' "
+            f"not found. Run analyze_interface with "
+            f"{config.source}=True first."
+        )
+
+    # Validate modes
+    try:
+        selected_mode = ResidueMode[config.mode.upper()]
+    except KeyError:
+        raise ValueError(
+            f"Unknown mode '{config.mode}'. "
+            f"Valid: {', '.join(m.name for m in ResidueMode)}"
+        )
+    try:
+        default_mode = ResidueMode[config.default_mode.upper()]
+    except KeyError:
+        raise ValueError(
+            f"Unknown default_mode '{config.default_mode}'. "
+            f"Valid: {', '.join(m.name for m in ResidueMode)}"
+        )
+
+    # Parse allowed_aas for PIKAA
+    allowed_aa_set = None
+    if config.allowed_aas is not None:
+        allowed_aa_set = set(config.allowed_aas.upper())
+
+    # Filter rows by metric threshold
+    residue_specs: dict = {}
+    selected_count = 0
+
+    for row in position_result.rows:
+        if row.scan_skipped:
+            continue
+
+        metric_value = getattr(row, config.metric, None)
+        if metric_value is None:
+            continue
+
+        passes = (
+            config.direction == "above" and metric_value > config.threshold
+        ) or (
+            config.direction == "below" and metric_value < config.threshold
+        )
+
+        if passes:
+            key = (
+                f"{row.chain_id}{row.residue_number}"
+                f"{row.insertion_code}"
+            )
+            residue_specs[key] = ResidueSpec(
+                chain=row.chain_id,
+                resnum=row.residue_number,
+                icode=row.insertion_code,
+                mode=selected_mode,
+                allowed_aas=allowed_aa_set,
+            )
+            selected_count += 1
+
+    design_spec = DesignSpec(
+        residue_specs=residue_specs,
+        default_mode=default_mode,
+    )
+
+    logger.info(
+        f"select_positions: {selected_count} positions selected "
+        f"({config.metric} {config.direction} {config.threshold} "
+        f"from {config.source}), mode={config.mode}"
+    )
+
+    metadata: Dict[str, Any] = {
+        "operation": "select_positions",
+        "design_spec": design_spec,
+        "selected_positions": selected_count,
+        "selection_source": config.source,
+        "selection_metric": config.metric,
+        "selection_threshold": config.threshold,
+        "selection_direction": config.direction,
+        "selection_mode": config.mode,
+    }
+
+    return Structure(
+        pdb_string=pdb_string,
+        metadata=metadata,
         source_path=source_path,
     )
 
@@ -884,11 +1041,10 @@ def analyze_interface(
             f"{result.shape_complementarity.sc_score:.3f}"
         )
 
-    # Per-position energetics (alanine scan and/or dG_i)
+    # Per-position energetics (alanine scan and/or residue removal)
     if (config.per_position or config.alanine_scan) and relaxer is not None:
         from boundry.interface_position_energetics import (
             compute_position_energetics,
-            write_position_csv,
         )
 
         sasa_delta = None
@@ -896,7 +1052,7 @@ def analyze_interface(
             sasa_delta = result.sasa.interface_residue_delta_sasa
 
         logger.info("Computing per-position energetics...")
-        result.per_position = compute_position_energetics(
+        energetics = compute_position_energetics(
             pdb_string,
             interface_info.interface_residues,
             interface_info.chain_pairs,
@@ -913,8 +1069,7 @@ def analyze_interface(
             show_progress=config.show_progress,
             quiet=config.quiet,
         )
-
-        if config.position_csv is not None:
-            write_position_csv(result.per_position, config.position_csv)
+        result.per_position = energetics.per_position
+        result.alanine_scan = energetics.alanine_scan
 
     return result

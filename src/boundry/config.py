@@ -67,14 +67,26 @@ class InterfaceConfig:
     seed: Optional[int] = None  # Base seed for iterations
     sasa_probe_radius: float = 1.4  # Probe radius for SASA (A)
     # Per-position energetics
-    per_position: bool = False  # IAM-like per-residue dG_i via residue removal
-    alanine_scan: bool = False  # AlaScan per-residue ddG
+    per_position: bool = False  # Per-residue dG via residue removal
+    alanine_scan: bool = False  # Per-residue ddG via alanine mutation
     scan_chains: Optional[List[str]] = None  # Restrict scan to these chains
     position_relax: PositionRelaxMode = "none"  # Relax policy for scans
-    position_csv: Optional[Path] = None  # Write per-position CSV to this path
     max_scan_sites: Optional[int] = None  # Limit number of residues scanned
     show_progress: bool = False  # Show tqdm progress bar for per-position scans
     quiet: bool = False  # Suppress dependency logging/stderr noise
+
+
+@dataclass
+class SelectPositionsConfig:
+    """Configuration for position selection from interface analysis."""
+
+    source: str = "alanine_scan"  # "per_position" or "alanine_scan"
+    metric: str = "ddG"  # PositionRow field to threshold on
+    threshold: float = 1.0  # Threshold value
+    direction: str = "above"  # "above" (metric > threshold) or "below"
+    mode: str = "ALLAA"  # ResidueMode for selected positions
+    default_mode: str = "NATAA"  # ResidueMode for non-selected positions
+    allowed_aas: Optional[str] = None  # For PIKAA mode: e.g. "ACDEF"
 
 
 @dataclass

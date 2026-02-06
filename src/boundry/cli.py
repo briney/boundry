@@ -747,12 +747,14 @@ def analyze_interface(
     per_position: bool = typer.Option(
         False,
         "--per-position",
-        help="Compute IAM-like per-residue dG_i via residue removal",
+        help="Compute per-residue dG via residue removal "
+        "(ddG > 0 = hotspot)",
     ),
     alanine_scan: bool = typer.Option(
         False,
         "--alanine-scan",
-        help="Compute per-residue AlaScan ΔΔG (GLY/PRO/ALA skipped)",
+        help="Compute per-residue AlaScan ddG "
+        "(GLY/PRO/ALA skipped; ddG > 0 = hotspot)",
     ),
     scan_chains: Optional[str] = typer.Option(
         None,
@@ -766,10 +768,15 @@ def analyze_interface(
         help="Relax policy for per-position scans: "
         "both (bound+unbound), unbound, none",
     ),
-    position_csv: Optional[Path] = typer.Option(
+    per_position_csv: Optional[Path] = typer.Option(
         None,
-        "--position-csv",
+        "--per-position-csv",
         help="Write per-position results to CSV file",
+    ),
+    alanine_scan_csv: Optional[Path] = typer.Option(
+        None,
+        "--alanine-scan-csv",
+        help="Write alanine scan results to CSV file",
     ),
     max_scan_sites: Optional[int] = typer.Option(
         None,
@@ -787,8 +794,9 @@ def analyze_interface(
     energy (dG), and optionally buried SASA and shape complementarity.
 
     Per-position flags (--per-position, --alanine-scan) enable per-residue
-    energetics. dG = E_bound - E_unbound (negative = favorable binding),
-    and ΔΔG = dG_ala - dG_wt (positive = destabilising hotspot).
+    energetics. Both produce dG (binding energy of modified system) and
+    ddG = dG - dG_wt (positive = destabilising, i.e. a binding hotspot).
+    dG = E_bound - E_unbound (negative = favorable binding).
     """
     _setup_logging(verbose)
     _validate_input(input_file)
@@ -800,10 +808,15 @@ def analyze_interface(
             err=True,
         )
         raise typer.Exit(code=1)
-    if position_csv is not None and not (per_position or alanine_scan):
+    if per_position_csv is not None and not per_position:
         typer.echo(
-            "Error: --position-csv requires --per-position or "
-            "--alanine-scan",
+            "Error: --per-position-csv requires --per-position",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if alanine_scan_csv is not None and not alanine_scan:
+        typer.echo(
+            "Error: --alanine-scan-csv requires --alanine-scan",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -834,7 +847,6 @@ def analyze_interface(
         alanine_scan=alanine_scan,
         scan_chains=parsed_scan_chains,
         position_relax=position_relax,
-        position_csv=None,
         max_scan_sites=max_scan_sites,
         show_progress=per_position or alanine_scan,
         quiet=not verbose,
@@ -868,8 +880,10 @@ def analyze_interface(
         operation=_analyze,
         structure=input_file,
         output=output,
-        position_csv=position_csv,
-        include_position_csv=per_position or alanine_scan,
+        per_position_csv=per_position_csv,
+        alanine_scan_csv=alanine_scan_csv,
+        include_per_position_csv=per_position,
+        include_alanine_scan_csv=alanine_scan,
         config=interface_config,
         relaxer=relaxer,
         designer=designer,
@@ -896,24 +910,46 @@ def analyze_interface(
             )
         if result.per_position:
             from boundry.interface_position_energetics import (
-                format_hotspot_table,
+                format_position_table,
             )
 
             if result.per_position.dG_wt is not None:
                 typer.echo(
-                    f"dG_wt (per-position): "
+                    f"dG_wt: "
                     f"{result.per_position.dG_wt:.2f} kcal/mol"
                 )
-            hotspot_table = format_hotspot_table(result.per_position)
-            if hotspot_table:
-                typer.echo(hotspot_table)
-            if outputs.position_csv is not None:
-                typer.echo(f"Per-position CSV: {outputs.position_csv}")
+            table = format_position_table(
+                result.per_position,
+                label="per-position hotspots",
+            )
+            if table:
+                typer.echo(table)
+            if outputs.per_position_csv is not None:
+                typer.echo(
+                    f"Per-position CSV: {outputs.per_position_csv}"
+                )
+        if result.alanine_scan:
+            from boundry.interface_position_energetics import (
+                format_position_table as _fmt_table,
+            )
+
+            table = _fmt_table(
+                result.alanine_scan,
+                label="AlaScan hotspots",
+            )
+            if table:
+                typer.echo(table)
+            if outputs.alanine_scan_csv is not None:
+                typer.echo(
+                    f"Alanine scan CSV: {outputs.alanine_scan_csv}"
+                )
     else:
         if outputs.summary_json is not None:
             typer.echo(f"Summary JSON: {outputs.summary_json}")
-        if outputs.position_csv is not None:
-            typer.echo(f"Per-position CSV: {outputs.position_csv}")
+        if outputs.per_position_csv is not None:
+            typer.echo(f"Per-position CSV: {outputs.per_position_csv}")
+        if outputs.alanine_scan_csv is not None:
+            typer.echo(f"Alanine scan CSV: {outputs.alanine_scan_csv}")
 
 
 def _resolve_workflow(name_or_path: str) -> Path:

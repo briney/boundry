@@ -1229,6 +1229,184 @@ class TestAnalyzeInterface:
 
 
 # ------------------------------------------------------------------
+# design_spec parameter acceptance tests
+# ------------------------------------------------------------------
+
+
+class TestDesignSpecParam:
+    """Tests that operations accept a DesignSpec object directly."""
+
+    @staticmethod
+    def _make_design_spec():
+        """Build a minimal DesignSpec for testing."""
+        from boundry.resfile import DesignSpec, ResidueMode, ResidueSpec
+
+        spec = ResidueSpec(
+            chain="A", resnum=10, mode=ResidueMode.ALLAA
+        )
+        return DesignSpec(
+            residue_specs={"A10": spec},
+            default_mode=ResidueMode.NATAA,
+        )
+
+    @patch("boundry.designer.Designer")
+    def test_repack_accepts_design_spec(self, MockDesigner):
+        """Test that repack() works with a design_spec param."""
+        mock_designer = MockDesigner.return_value
+        mock_designer.repack.return_value = {
+            "sequence": "A",
+            "native_sequence": "A",
+            "loss": [0.1],
+        }
+        mock_designer.result_to_pdb_string.return_value = "PDB\n"
+
+        from boundry.operations import repack
+
+        ds = self._make_design_spec()
+        result = repack(SINGLE_CHAIN_PDB, design_spec=ds)
+
+        assert isinstance(result, Structure)
+        call_kwargs = mock_designer.repack.call_args[1]
+        assert call_kwargs["design_spec"] is ds
+
+    @patch("boundry.utils.format_sequence_alignment")
+    @patch("boundry.designer.Designer")
+    def test_mpnn_accepts_design_spec(
+        self, MockDesigner, mock_align
+    ):
+        """Test that mpnn() works with a design_spec param."""
+        mock_designer = MockDesigner.return_value
+        mock_designer.design.return_value = {
+            "sequence": "M",
+            "native_sequence": "A",
+            "loss": [0.1],
+        }
+        mock_designer.result_to_pdb_string.return_value = "PDB\n"
+        mock_align.return_value = ""
+
+        from boundry.operations import mpnn
+
+        ds = self._make_design_spec()
+        result = mpnn(SINGLE_CHAIN_PDB, design_spec=ds)
+
+        assert isinstance(result, Structure)
+        call_kwargs = mock_designer.design.call_args[1]
+        assert call_kwargs["design_spec"] is ds
+        assert call_kwargs["design_all"] is False
+
+    @patch("boundry.relaxer.Relaxer")
+    @patch("boundry.designer.Designer")
+    def test_relax_accepts_design_spec(
+        self, MockDesigner, MockRelaxer
+    ):
+        """Test that relax() works with a design_spec param."""
+        mock_designer = MockDesigner.return_value
+        mock_designer.repack.return_value = {
+            "sequence": "A",
+            "native_sequence": "A",
+            "loss": [0.1],
+        }
+        mock_designer.result_to_pdb_string.return_value = (
+            "REPACKED\nEND\n"
+        )
+        mock_relaxer = MockRelaxer.return_value
+        mock_relaxer.relax.return_value = (
+            "RELAXED\nEND\n",
+            {
+                "initial_energy": -50.0,
+                "final_energy": -100.0,
+                "rmsd": 0.5,
+            },
+            [],
+        )
+        mock_relaxer.get_energy_breakdown.return_value = {
+            "total_energy": -100.0,
+        }
+
+        from boundry.operations import relax
+
+        ds = self._make_design_spec()
+        result = relax(
+            SINGLE_CHAIN_PDB, design_spec=ds, n_iterations=1
+        )
+
+        assert isinstance(result, Structure)
+        call_kwargs = mock_designer.repack.call_args[1]
+        assert call_kwargs["design_spec"] is ds
+
+    @patch("boundry.utils.format_sequence_alignment")
+    @patch("boundry.relaxer.Relaxer")
+    @patch("boundry.designer.Designer")
+    def test_design_accepts_design_spec(
+        self, MockDesigner, MockRelaxer, mock_align
+    ):
+        """Test that design() works with a design_spec param."""
+        mock_designer = MockDesigner.return_value
+        mock_designer.design.return_value = {
+            "sequence": "M",
+            "native_sequence": "A",
+            "loss": [0.1],
+        }
+        mock_designer.result_to_pdb_string.return_value = (
+            "DESIGNED\nEND\n"
+        )
+        mock_align.return_value = ""
+        mock_relaxer = MockRelaxer.return_value
+        mock_relaxer.relax.return_value = (
+            "RELAXED\nEND\n",
+            {
+                "initial_energy": -50.0,
+                "final_energy": -100.0,
+                "rmsd": 0.5,
+            },
+            [],
+        )
+        mock_relaxer.get_energy_breakdown.return_value = {
+            "total_energy": -100.0,
+        }
+
+        from boundry.operations import design
+
+        ds = self._make_design_spec()
+        result = design(
+            SINGLE_CHAIN_PDB, design_spec=ds, n_iterations=1
+        )
+
+        assert isinstance(result, Structure)
+        call_kwargs = mock_designer.design.call_args[1]
+        assert call_kwargs["design_spec"] is ds
+        assert call_kwargs["design_all"] is False
+
+    @patch("boundry.designer.Designer")
+    def test_design_spec_overrides_resfile(
+        self, MockDesigner, tmp_path
+    ):
+        """Test that design_spec takes precedence over resfile."""
+        mock_designer = MockDesigner.return_value
+        mock_designer.repack.return_value = {
+            "sequence": "A",
+            "native_sequence": "A",
+            "loss": [0.1],
+        }
+        mock_designer.result_to_pdb_string.return_value = "PDB\n"
+
+        resfile = tmp_path / "test.resfile"
+        resfile.write_text("NATAA\nSTART\n20 B ALLAA\n")
+
+        from boundry.operations import repack
+
+        ds = self._make_design_spec()
+        result = repack(
+            SINGLE_CHAIN_PDB, resfile=resfile, design_spec=ds
+        )
+
+        assert isinstance(result, Structure)
+        # The design_spec should be used, not the resfile
+        call_kwargs = mock_designer.repack.call_args[1]
+        assert call_kwargs["design_spec"] is ds
+
+
+# ------------------------------------------------------------------
 # Top-level import tests
 # ------------------------------------------------------------------
 
@@ -1250,6 +1428,7 @@ class TestTopLevelImports:
             mpnn,
             repack,
             relax,
+            select_positions,
         )
         from boundry.operations import idealize
 
@@ -1260,6 +1439,7 @@ class TestTopLevelImports:
         assert callable(mpnn)
         assert callable(design)
         assert callable(analyze_interface)
+        assert callable(select_positions)
 
     def test_structure_importable(self):
         """Test that Structure is importable from boundry."""

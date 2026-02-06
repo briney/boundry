@@ -1,0 +1,47 @@
+# Beam-search optimization with adaptive position selection
+#
+# Uses interface analysis to identify energetically important positions,
+# selects positions for redesign via alanine scanning, and focuses
+# design on those positions. Converges when no positions exceed the
+# ddG threshold (i.e., all interface positions are already optimized).
+#
+# Flow per beam round:
+#   relax -> analyze_interface -> select_positions -> design
+#
+# The select_positions step stores a DesignSpec in metadata, which
+# is automatically picked up by the downstream design step. When
+# no positions pass the threshold, selected_positions drops to 0
+# and the until condition terminates the search.
+
+workflow_version: 1
+input: input.pdb
+output: optimized_{rank}.pdb
+seed: 42
+
+steps:
+  - operation: idealize
+  - beam:
+      width: 5
+      rounds: 10
+      metric: dG
+      direction: min
+      until: "{selected_positions} == 0"
+      output: beam_round_{round}_rank_{rank}.pdb
+      steps:
+        - operation: relax
+          params:
+            n_iterations: 1
+        - operation: analyze_interface
+          params:
+            calculate_binding_energy: true
+            alanine_scan: true
+        - operation: select_positions
+          params:
+            source: alanine_scan
+            metric: ddG
+            threshold: 1.0
+            direction: above
+            mode: ALLAA
+        - operation: design
+          params:
+            n_iterations: 1

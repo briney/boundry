@@ -341,6 +341,7 @@ Supported operation names:
 - `design`
 - `renumber`
 - `analyze_interface`
+- `select_positions`
 
 ## 7.1 `idealize`
 
@@ -380,6 +381,7 @@ Workflow `params`:
 
 - `pre_idealize` (bool, default `false`) [workflow-only]
 - `resfile` (string path, optional) [workflow-only]
+- `design_spec` (auto-linked from metadata if omitted; see `select_positions`) [workflow-only]
 - `model_type` (`protein_mpnn` | `ligand_mpnn` | `soluble_mpnn`, default `ligand_mpnn`)
 - `temperature` (float, default `0.1`)
 - `pack_side_chains` (bool, default `true`)
@@ -396,6 +398,7 @@ Workflow `params`:
 
 - `pre_idealize` (bool, default `false`) [workflow-only]
 - `resfile` (string path, optional) [workflow-only]
+- `design_spec` (auto-linked from metadata if omitted; see `select_positions`) [workflow-only]
 - `n_iterations` (int, default `5`) [workflow-only]
 - Any `DesignConfig` field (same as `repack` list above)
 - Any `RelaxConfig` field (same as `minimize` list above except `pre_idealize`)
@@ -412,6 +415,7 @@ Workflow `params`:
 
 - `pre_idealize` (bool, default `false`) [workflow-only]
 - `resfile` (string path, optional) [workflow-only]
+- `design_spec` (auto-linked from metadata if omitted; see `select_positions`) [workflow-only]
 - All `DesignConfig` fields (same list as `repack`)
 
 ## 7.6 `design`
@@ -422,6 +426,7 @@ Workflow `params`:
 
 - `pre_idealize` (bool, default `false`) [workflow-only]
 - `resfile` (string path, optional) [workflow-only]
+- `design_spec` (auto-linked from metadata if omitted; see `select_positions`) [workflow-only]
 - `n_iterations` (int, default `5`) [workflow-only]
 - Any `DesignConfig` field
 - Any `RelaxConfig` field
@@ -465,6 +470,58 @@ Workflow `params`:
 - `show_progress` (bool, default `false`)
 - `quiet` (bool, default `false`)
 
+## 7.9 `select_positions`
+
+Purpose: select interface positions for targeted redesign based on
+per-position energetics from a prior `analyze_interface` step.
+
+Workflow `params`:
+
+- `source` (`per_position` | `alanine_scan`, default `alanine_scan`)
+- `metric` (string, default `ddG`) — `PositionRow` field to threshold on
+- `threshold` (float, default `1.0`)
+- `direction` (`above` | `below`, default `above`)
+- `mode` (string, default `ALLAA`) — `ResidueMode` for selected positions
+- `default_mode` (string, default `NATAA`) — `ResidueMode` for non-selected positions
+- `allowed_aas` (string, optional) — amino acid letters for `PIKAA` mode (e.g. `"ACDEF"`)
+
+Behavior:
+
+- Reads a `PositionResult` from the structure's metadata (produced by
+  `analyze_interface` with `per_position: true` or `alanine_scan: true`).
+- Filters rows where the metric exceeds the threshold, builds a
+  `DesignSpec`, and stores it in metadata under `design_spec`.
+- Downstream `design`, `mpnn`, `relax`, and `repack` steps automatically
+  pick up the `design_spec` from metadata when no explicit `resfile` is
+  provided in their `params`.
+- Stores `selected_positions` (int) in metadata for convergence conditions.
+
+Example — converge when no positions remain above threshold:
+
+```yaml
+- beam:
+    until: "{selected_positions} == 0"
+    steps:
+      - operation: analyze_interface
+        params:
+          alanine_scan: true
+      - operation: select_positions
+        params:
+          source: alanine_scan
+          metric: ddG
+          threshold: 1.0
+      - operation: design
+```
+
+Notes:
+
+- `select_positions` is a workflow-only and Python API operation; there is
+  no CLI subcommand.
+- Rows where the metric value is `None` or where `scan_skipped` is `true`
+  are silently excluded from selection.
+- If zero positions are selected, a valid but empty `DesignSpec` is produced
+  (downstream design steps will use the default mode for all positions).
+
 ## 8. Variables You Can Use in Conditions
 
 Conditions read from structure metadata produced by prior operations.
@@ -481,6 +538,9 @@ Common keys:
   - `{sc_score}`
   - `{n_interface_residues}`
   - `{metrics.interface.dG}` (and related nested metrics keys)
+- From `select_positions`:
+  - `{selected_positions}` (int, number of positions selected for design)
+  - `{selection_source}`, `{selection_metric}`, `{selection_threshold}`
 
 You can also use arithmetic expressions combining variables, for example:
 
@@ -508,4 +568,5 @@ You can also use arithmetic expressions combining variables, for example:
 - `iterate_relax.yaml`: fixed iterate loop
 - `converge_design.yaml`: convergence iterate loop
 - `beam_design.yaml`: beam search with pruning
+- `beam_optimize.yaml`: beam search with adaptive position selection
 - `full_pipeline.yaml`: combined iterate + beam pipeline

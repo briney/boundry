@@ -92,7 +92,7 @@ Core operations are available as standalone functions:
 
 ```python
 from boundry import idealize, minimize, repack, relax, mpnn, design, renumber
-from boundry import analyze_interface
+from boundry import analyze_interface, select_positions
 from boundry import Structure, Workflow
 ```
 
@@ -210,6 +210,40 @@ for row in result.per_position.rows:
           f"dG_i={row.dG_i}, ΔΔG={row.delta_ddG}")
 ```
 
+### Position Selection
+
+Use `select_positions` to bridge interface analysis and design. It reads per-position energetics from metadata, filters positions by a metric threshold, and stores a `DesignSpec` in metadata that downstream `design`, `mpnn`, `relax`, and `repack` operations automatically pick up:
+
+```python
+from boundry import analyze_interface, select_positions, design
+from boundry.config import InterfaceConfig, SelectPositionsConfig
+from boundry.relaxer import Relaxer
+from boundry import RelaxConfig
+
+# Analyze interface with alanine scanning
+relaxer = Relaxer(RelaxConfig())
+config = InterfaceConfig(
+    enabled=True,
+    calculate_binding_energy=True,
+    alanine_scan=True,
+)
+result = analyze_interface("complex.pdb", config=config, relaxer=relaxer)
+struct = result.to_structure("complex.pdb")
+
+# Select positions where alanine scan ddG > 1.0 kcal/mol
+selected = select_positions(struct, config=SelectPositionsConfig(
+    source="alanine_scan",
+    metric="ddG",
+    threshold=1.0,
+    direction="above",
+    mode="ALLAA",
+))
+print(f"Selected {selected.metadata['selected_positions']} positions for redesign")
+
+# Design — automatically uses the DesignSpec from metadata
+designed = design(selected, design_spec=selected.metadata["design_spec"])
+```
+
 ## Workflows
 
 Workflows define operations and compound control-flow blocks in YAML.
@@ -268,6 +302,7 @@ documentation and examples.
 | `design`            | Iterative design + minimize              | `n_iterations`, `temperature`, `constrained` |
 | `renumber`          | Remove insertion codes                   | *(none)*                                     |
 | `analyze_interface` | Interface scoring                        | `chain_pairs`, `distance_cutoff`, `per_position`, `alanine_scan` |
+| `select_positions`  | Select positions for design              | `source`, `metric`, `threshold`, `direction`, `mode` |
 
 See the [Workflow Reference](src/boundry/workflows/README.md) for the full
 parameter reference and more workflow examples.
@@ -302,6 +337,7 @@ All configuration is done through dataclasses in `boundry.config`:
 - **`RelaxConfig`** — AMBER minimization settings (constrained, stiffness, solvent)
 - **`IdealizeConfig`** — Backbone idealization settings
 - **`InterfaceConfig`** — Interface analysis settings (cutoff, chain pairs, metrics)
+- **`SelectPositionsConfig`** — Position selection from interface analysis (source, metric, threshold)
 - **`PipelineConfig`** — Bundles design + relax configs for iterative operations
 
 ## Development

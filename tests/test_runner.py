@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from boundry.interface_position_energetics import (
-    PerPositionResult,
-    PerPositionRow,
+    PositionResult,
+    PositionRow,
 )
 from boundry.invocation import InvocationMode, OutputPolicy, OutputRequirement
 from boundry.operations import InterfaceAnalysisResult, Structure
@@ -53,64 +53,139 @@ def test_run_structure_operation_requires_output():
         )
 
 
-def test_run_interface_operation_writes_json_and_csv(tmp_path):
-    def _op(_structure):
-        return InterfaceAnalysisResult(
-            per_position=PerPositionResult(
-                rows=[
-                    PerPositionRow(
-                        chain_id="A",
-                        residue_number=1,
-                        insertion_code="",
-                        wt_resname="ALA",
-                        partner_chain="B",
-                        min_distance=4.0,
-                        num_contacts=2,
-                    )
-                ]
-            )
+def _make_interface_result(per_position=True, alanine_scan=False):
+    """Helper to build an InterfaceAnalysisResult with optional fields."""
+    pp = (
+        PositionResult(
+            rows=[
+                PositionRow(
+                    chain_id="A",
+                    residue_number=1,
+                    insertion_code="",
+                    wt_resname="ALA",
+                    partner_chain="B",
+                    min_distance=4.0,
+                    num_contacts=2,
+                )
+            ]
         )
+        if per_position
+        else None
+    )
+    ala = (
+        PositionResult(
+            rows=[
+                PositionRow(
+                    chain_id="A",
+                    residue_number=1,
+                    insertion_code="",
+                    wt_resname="ALA",
+                    partner_chain="B",
+                    min_distance=4.0,
+                    num_contacts=2,
+                )
+            ]
+        )
+        if alanine_scan
+        else None
+    )
+    return InterfaceAnalysisResult(per_position=pp, alanine_scan=ala)
+
+
+def test_run_interface_operation_writes_json_and_per_position_csv(tmp_path):
+    def _op(_structure):
+        return _make_interface_result(per_position=True)
 
     summary = tmp_path / "interface.json"
     result, outputs = run_interface_operation(
         operation=_op,
         structure="ignored",
         output=summary,
-        include_position_csv=True,
+        include_per_position_csv=True,
     )
 
     assert isinstance(result, InterfaceAnalysisResult)
     assert outputs.summary_json == summary
-    assert outputs.position_csv == tmp_path / "interface_positions.csv"
+    assert outputs.per_position_csv == tmp_path / "interface_per_position.csv"
+    assert outputs.alanine_scan_csv is None
     assert outputs.summary_json.exists()
-    assert outputs.position_csv.exists()
+    assert outputs.per_position_csv.exists()
 
 
-def test_run_interface_operation_position_csv_only(tmp_path):
+def test_run_interface_operation_writes_json_and_alanine_scan_csv(tmp_path):
     def _op(_structure):
-        return InterfaceAnalysisResult(
-            per_position=PerPositionResult(
-                rows=[
-                    PerPositionRow(
-                        chain_id="A",
-                        residue_number=1,
-                        insertion_code="",
-                        wt_resname="ALA",
-                        partner_chain="B",
-                        min_distance=4.0,
-                        num_contacts=2,
-                    )
-                ]
-            )
-        )
+        return _make_interface_result(alanine_scan=True)
 
-    csv_path = tmp_path / "positions.csv"
+    summary = tmp_path / "interface.json"
+    result, outputs = run_interface_operation(
+        operation=_op,
+        structure="ignored",
+        output=summary,
+        include_alanine_scan_csv=True,
+    )
+
+    assert isinstance(result, InterfaceAnalysisResult)
+    assert outputs.summary_json == summary
+    assert outputs.alanine_scan_csv == (
+        tmp_path / "interface_alanine_scan.csv"
+    )
+    assert outputs.per_position_csv is None
+    assert outputs.summary_json.exists()
+    assert outputs.alanine_scan_csv.exists()
+
+
+def test_run_interface_operation_writes_both_csvs(tmp_path):
+    def _op(_structure):
+        return _make_interface_result(per_position=True, alanine_scan=True)
+
+    summary = tmp_path / "interface.json"
+    result, outputs = run_interface_operation(
+        operation=_op,
+        structure="ignored",
+        output=summary,
+        include_per_position_csv=True,
+        include_alanine_scan_csv=True,
+    )
+
+    assert outputs.summary_json == summary
+    assert outputs.per_position_csv == tmp_path / "interface_per_position.csv"
+    assert outputs.alanine_scan_csv == (
+        tmp_path / "interface_alanine_scan.csv"
+    )
+    assert outputs.summary_json.exists()
+    assert outputs.per_position_csv.exists()
+    assert outputs.alanine_scan_csv.exists()
+
+
+def test_run_interface_operation_per_position_csv_only(tmp_path):
+    def _op(_structure):
+        return _make_interface_result(per_position=True)
+
+    csv_path = tmp_path / "per_position.csv"
     _, outputs = run_interface_operation(
         operation=_op,
         structure="ignored",
-        position_csv=csv_path,
+        per_position_csv=csv_path,
     )
 
     assert outputs.summary_json is None
-    assert outputs.position_csv == csv_path
+    assert outputs.per_position_csv == csv_path
+    assert outputs.alanine_scan_csv is None
+    assert csv_path.exists()
+
+
+def test_run_interface_operation_alanine_scan_csv_only(tmp_path):
+    def _op(_structure):
+        return _make_interface_result(alanine_scan=True)
+
+    csv_path = tmp_path / "alanine_scan.csv"
+    _, outputs = run_interface_operation(
+        operation=_op,
+        structure="ignored",
+        alanine_scan_csv=csv_path,
+    )
+
+    assert outputs.summary_json is None
+    assert outputs.per_position_csv is None
+    assert outputs.alanine_scan_csv == csv_path
     assert csv_path.exists()

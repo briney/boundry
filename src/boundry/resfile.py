@@ -99,6 +99,19 @@ class DesignSpec:
             if v.mode == ResidueMode.NATRO
         ]
 
+    def to_resfile(self) -> str:
+        """Serialize to Rosetta-style resfile format."""
+        lines = [self.default_mode.value, "START"]
+        for key, spec in sorted(self.residue_specs.items()):
+            parts = [str(spec.resnum), spec.chain, spec.mode.value]
+            if (
+                spec.mode in (ResidueMode.PIKAA, ResidueMode.NOTAA)
+                and spec.allowed_aas
+            ):
+                parts.append("".join(sorted(spec.allowed_aas)))
+            lines.append(" ".join(parts))
+        return "\n".join(lines) + "\n"
+
 
 class ResfileParser:
     """

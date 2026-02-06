@@ -1,7 +1,7 @@
 """Tests for boundry.interface_position_energetics module.
 
 Tests the PDB mutation/removal helpers, sign conventions, alanine
-scan math, per-position dG_i math, CSV output, and hotspot table
+scan math, per-position dG math, CSV output, and hotspot table
 formatting.  Heavy dependencies (Relaxer, Designer, OpenMM) are
 mocked.
 """
@@ -15,8 +15,9 @@ import pytest
 
 from boundry.interface import InterfaceResidue
 from boundry.interface_position_energetics import (
-    PerPositionResult,
-    PerPositionRow,
+    PositionEnergeticsResult,
+    PositionResult,
+    PositionRow,
     ResidueKey,
     _ALANINE_SCAN_SKIP,
     _select_scan_sites,
@@ -24,6 +25,7 @@ from boundry.interface_position_energetics import (
     compute_per_position_dG,
     compute_position_energetics,
     format_hotspot_table,
+    format_position_table,
     mutate_to_alanine,
     remove_residue,
     write_position_csv,
@@ -327,11 +329,11 @@ class TestSignConvention:
 
 
 class TestAlanineScanMath:
-    """Test the alanine scan ΔΔG computation with mocked energies."""
+    """Test the alanine scan ddG computation with mocked energies."""
 
     @patch("boundry.interface_position_energetics._compute_rosetta_dG")
-    def test_delta_ddG_computation(self, mock_dG):
-        """ΔΔG = dG_ala - dG_wt."""
+    def test_ddG_computation(self, mock_dG):
+        """ddG = dG_ala - dG_wt."""
         # dG_ala for the mutant
         mock_dG.return_value = -5.0
 
@@ -348,10 +350,10 @@ class TestAlanineScanMath:
         )
 
         key = ResidueKey("A", 1, "")
-        dG_ala, delta_ddG = results[key]
+        dG_ala, ddG = results[key]
         assert dG_ala == -5.0
-        # ΔΔG = -5.0 - (-10.0) = 5.0 (positive = destabilising)
-        assert delta_ddG == 5.0
+        # ddG = -5.0 - (-10.0) = 5.0 (positive = destabilising)
+        assert ddG == 5.0
 
     @patch("boundry.interface_position_energetics._compute_rosetta_dG")
     def test_skips_gly_pro_ala(self, mock_dG):
@@ -387,16 +389,16 @@ class TestAlanineScanMath:
 
 
 # ------------------------------------------------------------------
-# Per-position dG_i math (mocked)
+# Per-position dG (residue removal, mocked)
 # ------------------------------------------------------------------
 
 
-class TestPerPositionDGi:
-    """Test the residue-removal marginal dG_i computation."""
+class TestPerPositionDG:
+    """Test the residue-removal dG computation."""
 
     @patch("boundry.interface_position_energetics._compute_rosetta_dG")
-    def test_dG_i_computation(self, mock_dG):
-        """dG_i = dG_total - dG_without_i."""
+    def test_returns_dG_without_i(self, mock_dG):
+        """compute_per_position_dG returns dG_without_i directly."""
         # dG_without_i for the removed-residue complex
         mock_dG.return_value = -6.0
 
@@ -408,14 +410,13 @@ class TestPerPositionDGi:
             [ir],
             chain_pairs=[("A", "B")],
             relaxer=relaxer,
-            dG_total=-10.0,
+            dG_wt=-10.0,
             position_relax="none",
         )
 
         key = ResidueKey("A", 1, "")
-        # dG_i = -10.0 - (-6.0) = -4.0
-        # (residue contributes -4 kcal/mol to binding)
-        assert results[key] == pytest.approx(-4.0)
+        # Returns dG_without_i directly (not dG_i = dG_total - dG_without_i)
+        assert results[key] == pytest.approx(-6.0)
 
     @patch("boundry.interface_position_energetics._compute_rosetta_dG")
     def test_handles_failure(self, mock_dG):
@@ -429,7 +430,7 @@ class TestPerPositionDGi:
             [ir],
             chain_pairs=[("A", "B")],
             relaxer=relaxer,
-            dG_total=-10.0,
+            dG_wt=-10.0,
             position_relax="none",
         )
 
@@ -449,12 +450,12 @@ class TestComputePositionEnergetics:
     def test_two_sided_requirement(self, mock_dG):
         """Raises ValueError if chain groups != 2."""
         relaxer = MagicMock()
-        # 3 individual chains → 3 groups → error
+        # 3 individual chains -> 3 groups -> error
         with pytest.raises(ValueError, match="two-sided"):
             compute_position_energetics(
                 TWO_CHAIN_PDB,
                 [_make_ir()],
-                # pairs that create >2 groups (A-B, B-C → sides overlap)
+                # pairs that create >2 groups (A-B, B-C -> sides overlap)
                 chain_pairs=[("A", "B"), ("B", "C")],
                 relaxer=relaxer,
                 run_alanine_scan=True,
@@ -467,7 +468,7 @@ class TestComputePositionEnergetics:
         relaxer = MagicMock()
         ir = _make_ir(residue_name="LEU")
 
-        result = compute_position_energetics(
+        energetics = compute_position_energetics(
             TWO_CHAIN_PDB,
             [ir],
             chain_pairs=[("A", "B")],
@@ -477,13 +478,15 @@ class TestComputePositionEnergetics:
             position_relax="none",
         )
 
-        assert result.dG_wt == -10.0
-        assert len(result.rows) == 1
-        row = result.rows[0]
+        assert isinstance(energetics, PositionEnergeticsResult)
+        assert energetics.per_position is None
+        assert energetics.alanine_scan is not None
+        assert energetics.alanine_scan.dG_wt == -10.0
+        assert len(energetics.alanine_scan.rows) == 1
+        row = energetics.alanine_scan.rows[0]
         assert row.dG_wt == -10.0
-        assert row.dG_ala == -5.0
-        assert row.delta_ddG == pytest.approx(5.0)
-        assert row.dG_i is None  # per_position not requested
+        assert row.dG == -5.0
+        assert row.ddG == pytest.approx(5.0)
 
     @patch("boundry.interface_position_energetics._compute_rosetta_dG")
     def test_per_position_only(self, mock_dG):
@@ -492,7 +495,7 @@ class TestComputePositionEnergetics:
         relaxer = MagicMock()
         ir = _make_ir(residue_name="LEU")
 
-        result = compute_position_energetics(
+        energetics = compute_position_energetics(
             TWO_CHAIN_PDB,
             [ir],
             chain_pairs=[("A", "B")],
@@ -502,11 +505,13 @@ class TestComputePositionEnergetics:
             position_relax="none",
         )
 
-        assert result.dG_wt == -10.0
-        row = result.rows[0]
-        assert row.dG_i == pytest.approx(-4.0)
-        assert row.dG_ala is None
-        assert row.delta_ddG is None
+        assert energetics.alanine_scan is None
+        assert energetics.per_position is not None
+        assert energetics.per_position.dG_wt == -10.0
+        row = energetics.per_position.rows[0]
+        assert row.dG == pytest.approx(-6.0)  # dG_without_i
+        # ddG = -6.0 - (-10.0) = 4.0 (positive = hotspot)
+        assert row.ddG == pytest.approx(4.0)
 
     @patch("boundry.interface_position_energetics._compute_rosetta_dG")
     def test_skipped_residues_marked(self, mock_dG):
@@ -515,7 +520,7 @@ class TestComputePositionEnergetics:
         relaxer = MagicMock()
         ir = _make_ir(residue_name="GLY", residue_number=1)
 
-        result = compute_position_energetics(
+        energetics = compute_position_energetics(
             TWO_CHAIN_PDB,
             [ir],
             chain_pairs=[("A", "B")],
@@ -524,10 +529,10 @@ class TestComputePositionEnergetics:
             position_relax="none",
         )
 
-        row = result.rows[0]
+        row = energetics.alanine_scan.rows[0]
         assert row.scan_skipped is True
-        assert row.dG_ala is None
-        assert row.delta_ddG is None
+        assert row.dG is None
+        assert row.ddG is None
 
     @patch("boundry.interface_position_energetics._compute_rosetta_dG")
     def test_sasa_delta_attached(self, mock_dG):
@@ -536,19 +541,48 @@ class TestComputePositionEnergetics:
         relaxer = MagicMock()
         ir = _make_ir(residue_name="LEU", residue_number=1)
 
-        result = compute_position_energetics(
+        energetics = compute_position_energetics(
             TWO_CHAIN_PDB,
             [ir],
             chain_pairs=[("A", "B")],
             relaxer=relaxer,
-            run_alanine_scan=False,
+            run_alanine_scan=True,
             run_per_position=False,
             position_relax="none",
             sasa_delta={"A1": 42.5},
         )
 
-        row = result.rows[0]
+        row = energetics.alanine_scan.rows[0]
         assert row.delta_sasa == 42.5
+
+    @patch("boundry.interface_position_energetics._compute_rosetta_dG")
+    def test_both_analyses(self, mock_dG):
+        """Both per_position and alanine_scan produce results."""
+        # dG_wt, dG_ala (alanine scan), dG_without_i (per-position)
+        mock_dG.side_effect = [-10.0, -5.0, -6.0]
+        relaxer = MagicMock()
+        ir = _make_ir(residue_name="LEU")
+
+        energetics = compute_position_energetics(
+            TWO_CHAIN_PDB,
+            [ir],
+            chain_pairs=[("A", "B")],
+            relaxer=relaxer,
+            run_alanine_scan=True,
+            run_per_position=True,
+            position_relax="none",
+        )
+
+        assert energetics.per_position is not None
+        assert energetics.alanine_scan is not None
+
+        pp_row = energetics.per_position.rows[0]
+        assert pp_row.dG == pytest.approx(-6.0)
+        assert pp_row.ddG == pytest.approx(4.0)
+
+        ala_row = energetics.alanine_scan.rows[0]
+        assert ala_row.dG == pytest.approx(-5.0)
+        assert ala_row.ddG == pytest.approx(5.0)
 
 
 # ------------------------------------------------------------------
@@ -559,7 +593,7 @@ class TestComputePositionEnergetics:
 class TestWritePositionCSV:
     def test_writes_csv(self, tmp_path):
         """CSV file has header, metadata comments, and correct columns."""
-        row = PerPositionRow(
+        row = PositionRow(
             chain_id="A",
             residue_number=10,
             insertion_code="",
@@ -569,11 +603,10 @@ class TestWritePositionCSV:
             num_contacts=5,
             delta_sasa=25.0,
             dG_wt=-10.0,
-            dG_i=-4.0,
-            dG_ala=-5.0,
-            delta_ddG=5.0,
+            dG=-5.0,
+            ddG=5.0,
         )
-        result = PerPositionResult(
+        result = PositionResult(
             rows=[row],
             dG_wt=-10.0,
             distance_cutoff=8.0,
@@ -602,11 +635,12 @@ class TestWritePositionCSV:
         assert rows[0]["residue_number"] == "10"
         assert rows[0]["wt_resname"] == "LEU"
         assert float(rows[0]["dG_wt"]) == pytest.approx(-10.0)
-        assert float(rows[0]["delta_ddG"]) == pytest.approx(5.0)
+        assert float(rows[0]["dG"]) == pytest.approx(-5.0)
+        assert float(rows[0]["ddG"]) == pytest.approx(5.0)
 
     def test_none_values_empty(self, tmp_path):
         """None values are written as empty strings."""
-        row = PerPositionRow(
+        row = PositionRow(
             chain_id="A",
             residue_number=1,
             insertion_code="",
@@ -618,7 +652,7 @@ class TestWritePositionCSV:
             scan_skipped=True,
             skip_reason="Skipped: GLY",
         )
-        result = PerPositionResult(
+        result = PositionResult(
             rows=[row],
             dG_wt=-10.0,
             chain_pairs=[("A", "B")],
@@ -633,20 +667,19 @@ class TestWritePositionCSV:
         ]
         reader = csv.DictReader(io.StringIO("\n".join(data_lines)))
         rows = list(reader)
-        assert rows[0]["dG_ala"] == ""
-        assert rows[0]["delta_ddG"] == ""
-        assert rows[0]["dG_i"] == ""
+        assert rows[0]["dG"] == ""
+        assert rows[0]["ddG"] == ""
 
 
 # ------------------------------------------------------------------
-# Hotspot table formatting
+# Position table formatting
 # ------------------------------------------------------------------
 
 
-class TestFormatHotspotTable:
+class TestFormatPositionTable:
     def test_top_n(self):
         rows = [
-            PerPositionRow(
+            PositionRow(
                 chain_id="A",
                 residue_number=i,
                 insertion_code="",
@@ -655,22 +688,22 @@ class TestFormatHotspotTable:
                 min_distance=3.0,
                 num_contacts=5,
                 dG_wt=-10.0,
-                dG_ala=-10.0 + i,
-                delta_ddG=float(i),
+                dG=-10.0 + i,
+                ddG=float(i),
             )
             for i in range(1, 6)
         ]
-        result = PerPositionResult(rows=rows, dG_wt=-10.0)
+        result = PositionResult(rows=rows, dG_wt=-10.0)
 
-        table = format_hotspot_table(result, top_n=3)
+        table = format_position_table(result, top_n=3)
         assert "Top 3" in table
-        # Highest ΔΔG first
+        # Highest ddG first
         lines = table.splitlines()
         data_lines = [l for l in lines if "LEU" in l]
         assert len(data_lines) == 3
 
     def test_empty_when_no_ddg(self):
-        row = PerPositionRow(
+        row = PositionRow(
             chain_id="A",
             residue_number=1,
             insertion_code="",
@@ -681,8 +714,28 @@ class TestFormatHotspotTable:
             dG_wt=-10.0,
             scan_skipped=True,
         )
-        result = PerPositionResult(rows=[row], dG_wt=-10.0)
-        assert format_hotspot_table(result) == ""
+        result = PositionResult(rows=[row], dG_wt=-10.0)
+        assert format_position_table(result) == ""
+
+    def test_deprecated_alias(self):
+        """format_hotspot_table still works as deprecated alias."""
+        rows = [
+            PositionRow(
+                chain_id="A",
+                residue_number=1,
+                insertion_code="",
+                wt_resname="LEU",
+                partner_chain="B",
+                min_distance=3.0,
+                num_contacts=5,
+                dG_wt=-10.0,
+                dG=-5.0,
+                ddG=5.0,
+            )
+        ]
+        result = PositionResult(rows=rows, dG_wt=-10.0)
+        table = format_hotspot_table(result)
+        assert "AlaScan hotspots" in table
 
 
 # ------------------------------------------------------------------
@@ -725,13 +778,21 @@ class TestCLINewOptions:
         result = CliRunner().invoke(app, ["analyze-interface", "--help"])
         assert "--position-relax" in result.output
 
-    def test_position_csv_option(self):
+    def test_per_position_csv_option(self):
         from typer.testing import CliRunner
 
         from boundry.cli import app
 
         result = CliRunner().invoke(app, ["analyze-interface", "--help"])
-        assert "--position-csv" in result.output
+        assert "--per-position-csv" in result.output
+
+    def test_alanine_scan_csv_option(self):
+        from typer.testing import CliRunner
+
+        from boundry.cli import app
+
+        result = CliRunner().invoke(app, ["analyze-interface", "--help"])
+        assert "--alanine-scan-csv" in result.output
 
     def test_max_scan_sites_option(self):
         from typer.testing import CliRunner

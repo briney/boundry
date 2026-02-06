@@ -1,10 +1,19 @@
-"""Per-position interface energetics: IAM-like dG_i and alanine scanning.
+"""Per-position interface energetics: residue removal and alanine scanning.
 
-Provides per-residue binding energy decomposition and alanine-scanning
-ΔΔG values for protein-protein interfaces.
+Provides per-residue binding energy decomposition via two complementary
+analyses:
 
-- ``dG = E_bound - E_unbound`` (negative = favorable binding)
-- ``ΔΔG = dG_ala - dG_wt`` (positive = destabilising hotspot)
+- **Per-position** (residue removal): removes each interface residue and
+  recomputes binding energy.
+- **Alanine scan**: mutates each interface residue to alanine and
+  recomputes binding energy.
+
+Both analyses produce :class:`PositionResult` objects with identical
+column schemas:
+
+- ``dG``: full binding energy of the modified system
+- ``ddG``: change from wild-type (``dG - dG_wt``); positive = the
+  modification is destabilising, indicating a binding hotspot
 """
 
 import contextlib
@@ -13,7 +22,14 @@ import io
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Dict,
+    List,
+    NamedTuple,
+    Optional,
+    Tuple,
+)
 
 from boundry.binding_energy import (
     _get_interface_chain_groups,
@@ -56,8 +72,19 @@ class ResidueKey:
 
 
 @dataclass
-class PerPositionRow:
-    """One row of per-position results for a single interface residue."""
+class PositionRow:
+    """One row of position-level energetics for a single interface residue.
+
+    Used by both per-position (residue removal) and alanine scan
+    analyses.  The ``dG`` and ``ddG`` fields have the same meaning in
+    both contexts:
+
+    - ``dG``: full binding energy of the modified system
+      (per-position: ``dG_without_i``; alanine scan: ``dG_ala``)
+    - ``ddG``: change from wild-type (``dG - dG_wt``); positive means
+      the modification is destabilising (i.e. the residue is a
+      binding hotspot)
+    """
 
     # Identifiers / context
     chain_id: str
@@ -74,27 +101,38 @@ class PerPositionRow:
     # WT binding energy (repeated per row for convenience)
     dG_wt: Optional[float] = None
 
-    # IAM-like per-residue dG_i (--per-position)
-    dG_i: Optional[float] = None
+    # Modified-system binding energy
+    dG: Optional[float] = None
 
-    # AlaScan (--alanine-scan)
-    dG_ala: Optional[float] = None
-    delta_ddG: Optional[float] = None
+    # Change from wild-type: dG - dG_wt
+    ddG: Optional[float] = None
+
+    # Scan-skip info (relevant to alanine scan: GLY/PRO/ALA)
     scan_skipped: bool = False
     skip_reason: Optional[str] = None
 
 
 @dataclass
-class PerPositionResult:
-    """Complete per-position energetics output."""
+class PositionResult:
+    """Complete position-level energetics output.
 
-    rows: List[PerPositionRow] = field(default_factory=list)
+    Shared container for both per-position and alanine scan analyses.
+    """
+
+    rows: List[PositionRow] = field(default_factory=list)
     dG_wt: Optional[float] = None
     distance_cutoff: float = 8.0
     chain_pairs: List[Tuple[str, str]] = field(default_factory=list)
     position_relax: str = "none"
     relax_separated: bool = False
     constrained: bool = False
+
+
+class PositionEnergeticsResult(NamedTuple):
+    """Return type for :func:`compute_position_energetics`."""
+
+    per_position: Optional[PositionResult]
+    alanine_scan: Optional[PositionResult]
 
 
 # ------------------------------------------------------------------
@@ -285,7 +323,7 @@ def compute_alanine_scan(
 ) -> Dict[ResidueKey, Tuple[Optional[float], Optional[float]]]:
     """Run alanine scanning on interface residues.
 
-    Returns a dict mapping ``ResidueKey`` → ``(dG_ala, ΔΔG)`` for each
+    Returns a dict mapping ``ResidueKey`` -> ``(dG_ala, ddG)`` for each
     scanned residue.  Residues that are GLY, PRO, or already ALA are
     skipped and mapped to ``(None, None)``.
     """
@@ -340,10 +378,10 @@ def compute_alanine_scan(
                     relax_separated=relax_sep or relax_separated,
                     designer=relax_designer,
                 )
-            delta_ddG = dG_ala - dG_wt
-            results[key] = (dG_ala, delta_ddG)
+            ddG = dG_ala - dG_wt
+            results[key] = (dG_ala, ddG)
             logger.info(
-                f"    dG_ala={dG_ala:.2f}, ΔΔG={delta_ddG:.2f} kcal/mol"
+                f"    dG_ala={dG_ala:.2f}, ddG={ddG:.2f} kcal/mol"
             )
         except Exception as e:
             logger.warning(f"    AlaScan failed for {key}: {e}")
@@ -353,7 +391,7 @@ def compute_alanine_scan(
 
 
 # ------------------------------------------------------------------
-# Per-position dG_i (residue removal marginal)
+# Per-position (residue removal)
 # ------------------------------------------------------------------
 
 
@@ -362,7 +400,7 @@ def compute_per_position_dG(
     interface_residues: List[InterfaceResidue],
     chain_pairs: List[Tuple[str, str]],
     relaxer: "Relaxer",
-    dG_total: float,
+    dG_wt: float,
     designer: Optional["Designer"] = None,
     distance_cutoff: float = 8.0,
     position_relax: str = "none",
@@ -372,12 +410,12 @@ def compute_per_position_dG(
     show_progress: bool = False,
     quiet: bool = False,
 ) -> Dict[ResidueKey, Optional[float]]:
-    """Compute per-residue marginal dG_i via residue removal.
+    """Compute per-residue binding energy with residue removed.
 
-    ``dG_i = dG_total - dG_without_i``
-
-    A positive ``dG_i`` means residue *i* contributes favourably to
-    binding (removing it makes binding *worse*).
+    Returns ``dG_without_i`` for each residue — the full binding energy
+    of the complex with residue *i* removed.  The ``ddG`` is computed
+    downstream as ``dG_without_i - dG_wt`` (positive = removing the
+    residue is destabilising, i.e. the residue is a binding hotspot).
     """
     relax_sep = position_relax in ("both", "unbound")
     relax_designer = designer if relax_sep else None
@@ -394,7 +432,7 @@ def compute_per_position_dG(
         from tqdm import tqdm
 
         bar = tqdm(
-            scan_sites, desc="Per-position dG_i", unit="res"
+            scan_sites, desc="Per-position dG", unit="res"
         )
         iterable = bar
 
@@ -426,11 +464,11 @@ def compute_per_position_dG(
                     relax_separated=relax_sep or relax_separated,
                     designer=relax_designer,
                 )
-            dG_i = dG_total - dG_without_i
-            results[key] = dG_i
+            results[key] = dG_without_i
+            ddG = dG_without_i - dG_wt
             logger.info(
                 f"    dG_without_i={dG_without_i:.2f}, "
-                f"dG_i={dG_i:.2f} kcal/mol"
+                f"ddG={ddG:.2f} kcal/mol"
             )
         except Exception as e:
             logger.warning(f"    Per-position failed for {key}: {e}")
@@ -481,6 +519,34 @@ def _select_scan_sites(
 # ------------------------------------------------------------------
 
 
+def _build_position_rows(
+    scan_sites: List[InterfaceResidue],
+    dG_wt: float,
+    sasa_delta: Optional[Dict[str, float]],
+) -> List[PositionRow]:
+    """Build base PositionRow list with identifiers and SASA."""
+    rows: list[PositionRow] = []
+    for ir in scan_sites:
+        sasa_key = (
+            f"{ir.chain_id}{ir.residue_number}{ir.insertion_code}"
+        )
+        row = PositionRow(
+            chain_id=ir.chain_id,
+            residue_number=ir.residue_number,
+            insertion_code=ir.insertion_code,
+            wt_resname=ir.residue_name,
+            partner_chain=ir.partner_chain,
+            min_distance=ir.min_distance,
+            num_contacts=ir.num_contacts,
+            delta_sasa=(
+                sasa_delta.get(sasa_key) if sasa_delta else None
+            ),
+            dG_wt=dG_wt,
+        )
+        rows.append(row)
+    return rows
+
+
 def compute_position_energetics(
     pdb_string: str,
     interface_residues: List[InterfaceResidue],
@@ -497,8 +563,13 @@ def compute_position_energetics(
     sasa_delta: Optional[Dict[str, float]] = None,
     show_progress: bool = False,
     quiet: bool = False,
-) -> PerPositionResult:
+) -> PositionEnergeticsResult:
     """Run the full per-position energetics pipeline.
+
+    Returns a :class:`PositionEnergeticsResult` with separate
+    :class:`PositionResult` objects for per-position and alanine scan
+    analyses.  Each result uses identical column schemas (``dG``,
+    ``ddG``).
 
     Requires exactly two interface sides (chain groups). Raises
     ``ValueError`` if the chain pairs cannot be cleanly partitioned.
@@ -553,11 +624,11 @@ def compute_position_energetics(
             quiet=quiet,
         )
 
-    # Per-position dG_i
-    dgi_results: Dict[ResidueKey, Optional[float]] = {}
+    # Per-position dG (residue removal)
+    pp_dG_results: Dict[ResidueKey, Optional[float]] = {}
     if run_per_position:
-        logger.info("Computing per-position dG_i...")
-        dgi_results = compute_per_position_dG(
+        logger.info("Computing per-position dG...")
+        pp_dG_results = compute_per_position_dG(
             pdb_string,
             interface_residues,
             chain_pairs,
@@ -573,37 +644,40 @@ def compute_position_energetics(
             quiet=quiet,
         )
 
-    # Assemble rows
     scan_sites = _select_scan_sites(
         interface_residues, scan_chains, max_scan_sites
     )
-    rows: list[PerPositionRow] = []
-    for ir in scan_sites:
-        key = ResidueKey(ir.chain_id, ir.residue_number, ir.insertion_code)
-        sasa_key = (
-            f"{ir.chain_id}{ir.residue_number}{ir.insertion_code}"
-        )
 
-        row = PerPositionRow(
-            chain_id=ir.chain_id,
-            residue_number=ir.residue_number,
-            insertion_code=ir.insertion_code,
-            wt_resname=ir.residue_name,
-            partner_chain=ir.partner_chain,
-            min_distance=ir.min_distance,
-            num_contacts=ir.num_contacts,
-            delta_sasa=(
-                sasa_delta.get(sasa_key) if sasa_delta else None
-            ),
-            dG_wt=dG_wt,
-        )
+    result_kwargs = dict(
+        dG_wt=dG_wt,
+        distance_cutoff=distance_cutoff,
+        chain_pairs=chain_pairs,
+        position_relax=position_relax,
+        relax_separated=relax_separated,
+    )
 
-        # Per-position dG_i
-        if run_per_position and key in dgi_results:
-            row.dG_i = dgi_results[key]
+    # Build per-position result
+    pp_result: Optional[PositionResult] = None
+    if run_per_position:
+        pp_rows = _build_position_rows(scan_sites, dG_wt, sasa_delta)
+        for row, ir in zip(pp_rows, scan_sites):
+            key = ResidueKey(
+                ir.chain_id, ir.residue_number, ir.insertion_code
+            )
+            dG_without_i = pp_dG_results.get(key)
+            if dG_without_i is not None:
+                row.dG = dG_without_i
+                row.ddG = dG_without_i - dG_wt
+        pp_result = PositionResult(rows=pp_rows, **result_kwargs)
 
-        # AlaScan
-        if run_alanine_scan:
+    # Build alanine scan result
+    ala_result: Optional[PositionResult] = None
+    if run_alanine_scan:
+        ala_rows = _build_position_rows(scan_sites, dG_wt, sasa_delta)
+        for row, ir in zip(ala_rows, scan_sites):
+            key = ResidueKey(
+                ir.chain_id, ir.residue_number, ir.insertion_code
+            )
             if ir.residue_name in _ALANINE_SCAN_SKIP:
                 row.scan_skipped = True
                 row.skip_reason = (
@@ -611,19 +685,14 @@ def compute_position_energetics(
                     f"(GLY/PRO/ALA excluded from alanine scan)"
                 )
             elif key in ala_results:
-                dG_ala, delta_ddG = ala_results[key]
-                row.dG_ala = dG_ala
-                row.delta_ddG = delta_ddG
+                dG_ala, ddG = ala_results[key]
+                row.dG = dG_ala
+                row.ddG = ddG
+        ala_result = PositionResult(rows=ala_rows, **result_kwargs)
 
-        rows.append(row)
-
-    return PerPositionResult(
-        rows=rows,
-        dG_wt=dG_wt,
-        distance_cutoff=distance_cutoff,
-        chain_pairs=chain_pairs,
-        position_relax=position_relax,
-        relax_separated=relax_separated,
+    return PositionEnergeticsResult(
+        per_position=pp_result,
+        alanine_scan=ala_result,
     )
 
 
@@ -641,9 +710,8 @@ _CSV_COLUMNS = [
     "num_contacts",
     "delta_sasa",
     "dG_wt",
-    "dG_i",
-    "dG_ala",
-    "delta_ddG",
+    "dG",
+    "ddG",
     "scan_skipped",
     "skip_reason",
 ]
@@ -657,10 +725,10 @@ _METADATA_KEYS = [
 
 
 def write_position_csv(
-    result: PerPositionResult,
+    result: PositionResult,
     path: Path,
 ) -> None:
-    """Write per-position results to a CSV file.
+    """Write position-level results to a CSV file.
 
     Metadata is written as ``#``-prefixed comment lines before the
     header.
@@ -698,39 +766,56 @@ def write_position_csv(
                     d[col] = ""
             writer.writerow(d)
 
-    logger.info(f"Wrote per-position CSV to {path}")
+    logger.info(f"Wrote position CSV to {path}")
 
 
-def format_hotspot_table(
-    result: PerPositionResult,
+def format_position_table(
+    result: PositionResult,
     top_n: int = 10,
+    label: str = "hotspots",
 ) -> str:
-    """Format a short text table of top AlaScan hotspots.
+    """Format a short text table of top position results.
 
-    Sorts by ``delta_ddG`` descending (most destabilising first).
+    Sorts by ``ddG`` descending (most destabilising first).
     """
     rows_with_ddg = [
-        r for r in result.rows if r.delta_ddG is not None
+        r for r in result.rows if r.ddG is not None
     ]
-    rows_with_ddg.sort(key=lambda r: r.delta_ddG or 0.0, reverse=True)
+    rows_with_ddg.sort(key=lambda r: r.ddG or 0.0, reverse=True)
     rows_with_ddg = rows_with_ddg[:top_n]
 
     if not rows_with_ddg:
         return ""
 
     lines = [
-        f"Top {min(top_n, len(rows_with_ddg))} AlaScan hotspots "
-        f"(ΔΔG, kcal/mol):"
+        f"Top {min(top_n, len(rows_with_ddg))} {label} "
+        f"(ddG, kcal/mol):"
     ]
     lines.append(
-        f"  {'Residue':<12} {'ΔΔG':>8}  {'dG_ala':>8}  {'dG_wt':>8}"
+        f"  {'Residue':<12} {'ddG':>8}  {'dG':>8}  {'dG_wt':>8}"
     )
     lines.append("  " + "-" * 42)
     for r in rows_with_ddg:
-        label = f"{r.wt_resname} {r.chain_id}{r.residue_number}"
-        ddg = f"{r.delta_ddG:.2f}" if r.delta_ddG is not None else "N/A"
-        dga = f"{r.dG_ala:.2f}" if r.dG_ala is not None else "N/A"
+        res_label = f"{r.wt_resname} {r.chain_id}{r.residue_number}"
+        ddg = f"{r.ddG:.2f}" if r.ddG is not None else "N/A"
+        dg = f"{r.dG:.2f}" if r.dG is not None else "N/A"
         dgw = f"{r.dG_wt:.2f}" if r.dG_wt is not None else "N/A"
-        lines.append(f"  {label:<12} {ddg:>8}  {dga:>8}  {dgw:>8}")
+        lines.append(
+            f"  {res_label:<12} {ddg:>8}  {dg:>8}  {dgw:>8}"
+        )
 
     return "\n".join(lines)
+
+
+def format_hotspot_table(
+    result: PositionResult,
+    top_n: int = 10,
+) -> str:
+    """Format a short text table of top AlaScan hotspots.
+
+    .. deprecated::
+        Use :func:`format_position_table` instead.
+    """
+    return format_position_table(
+        result, top_n=top_n, label="AlaScan hotspots"
+    )

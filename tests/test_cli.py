@@ -258,8 +258,8 @@ class TestAnalyzeInterface:
         result = runner.invoke(app, ["analyze-interface", "--help"])
         assert "--output" in result.output
 
-    def test_position_csv_requires_position_mode(self, tmp_path):
-        """Test that --position-csv requires per-position mode flags."""
+    def test_per_position_csv_requires_per_position_flag(self, tmp_path):
+        """Test that --per-position-csv requires --per-position."""
         input_pdb = tmp_path / "input.pdb"
         input_pdb.write_text("ATOM      1  N   ALA A   1\nEND\n")
 
@@ -268,12 +268,29 @@ class TestAnalyzeInterface:
             [
                 "analyze-interface",
                 str(input_pdb),
-                "--position-csv",
-                str(tmp_path / "positions.csv"),
+                "--per-position-csv",
+                str(tmp_path / "pp.csv"),
             ],
         )
         assert result.exit_code != 0
-        assert "requires --per-position or --alanine-scan" in result.output
+        assert "requires --per-position" in result.output
+
+    def test_alanine_scan_csv_requires_alanine_scan_flag(self, tmp_path):
+        """Test that --alanine-scan-csv requires --alanine-scan."""
+        input_pdb = tmp_path / "input.pdb"
+        input_pdb.write_text("ATOM      1  N   ALA A   1\nEND\n")
+
+        result = runner.invoke(
+            app,
+            [
+                "analyze-interface",
+                str(input_pdb),
+                "--alanine-scan-csv",
+                str(tmp_path / "ala.csv"),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "requires --alanine-scan" in result.output
 
     @patch("boundry.operations.analyze_interface")
     def test_output_json_written(self, mock_analyze, tmp_path):
