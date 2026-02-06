@@ -5,12 +5,10 @@ from __future__ import annotations
 import copy
 import dataclasses
 import logging
-import re
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
-
-import yaml
 
 from boundry.condition import ConditionError, check_condition, parse_condition
 from boundry.config import (
@@ -58,86 +56,9 @@ def _extract_fields(params: Dict[str, Any], cls: type) -> Dict[str, Any]:
 
 _STRUCTURE_EXTENSIONS = frozenset({".pdb", ".cif", ".mmcif"})
 
-_VAR_PATTERN = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 _KNOWN_KEYS = frozenset(
     {"workflow_version", "input", "output", "seed", "steps"}
 )
-
-
-def _build_var_namespace(data: Dict[str, Any]) -> Dict[str, str]:
-    """Build a variable namespace from top-level scalar keys.
-
-    Collects all top-level keys whose values are str, int, or float
-    (excluding bools and non-scalars) and returns them as a
-    ``{name: stringified_value}`` dict.  Cross-references among
-    namespace values are resolved via iterative passes.
-    """
-    namespace: Dict[str, str] = {}
-    for key, value in data.items():
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, (str, int, float)):
-            namespace[key] = str(value)
-
-    # Resolve cross-references within the namespace (max 10 passes).
-    _MAX_PASSES = 10
-    for _ in range(_MAX_PASSES):
-        changed = False
-        for key in namespace:
-            original = namespace[key]
-            resolved = _VAR_PATTERN.sub(
-                lambda m: namespace.get(m.group(1), m.group(0)),
-                original,
-            )
-            if resolved != original:
-                namespace[key] = resolved
-                changed = True
-        if not changed:
-            break
-
-    # Detect remaining unresolved self/cross references (cycles).
-    for key, value in namespace.items():
-        remaining = _VAR_PATTERN.findall(value)
-        for ref in remaining:
-            if ref in namespace:
-                raise WorkflowError(
-                    f"Circular variable reference detected: "
-                    f"'{key}' references '${{{ref}}}' which "
-                    f"cannot be fully resolved"
-                )
-
-    return namespace
-
-
-def _resolve_vars(
-    data: Any, namespace: Dict[str, str]
-) -> Any:
-    """Recursively resolve ``${name}`` references in *data*.
-
-    Strings are regex-substituted using *namespace*.  Dicts have
-    their values (not keys) resolved.  Lists are resolved
-    element-wise.  Non-string scalars pass through unchanged.
-    """
-    if isinstance(data, str):
-        def _replacer(match: re.Match) -> str:
-            name = match.group(1)
-            if name not in namespace:
-                raise WorkflowError(
-                    f"Undefined variable '${{{name}}}' in "
-                    f"workflow. Defined variables: "
-                    f"{sorted(namespace)}"
-                )
-            return namespace[name]
-
-        return _VAR_PATTERN.sub(_replacer, data)
-
-    if isinstance(data, dict):
-        return {k: _resolve_vars(v, namespace) for k, v in data.items()}
-
-    if isinstance(data, list):
-        return [_resolve_vars(item, namespace) for item in data]
-
-    return data
 
 
 def _is_directory_output(path_template: str) -> bool:
@@ -418,6 +339,17 @@ def _parse_beam(step_data: Dict[str, Any], label: str) -> BeamBlock:
     )
 
 
+def _ensure_resolvers() -> None:
+    """Register custom OmegaConf resolvers (idempotent)."""
+    from omegaconf import OmegaConf
+
+    if not OmegaConf.has_resolver("env"):
+        OmegaConf.register_new_resolver(
+            "env",
+            lambda key, default="": os.environ.get(key, default),
+        )
+
+
 @dataclass
 class _ExecutionContext:
     population: List["Structure"]
@@ -447,6 +379,7 @@ class Workflow:
         cls,
         path: Union[str, Path],
         seed: Optional[int] = None,
+        overrides: Optional[List[str]] = None,
     ) -> "Workflow":
         """Load a workflow from a YAML file.
 
@@ -457,10 +390,56 @@ class Workflow:
         seed : int, optional
             Workflow-level seed for reproducibility. Overrides YAML
             ``seed`` when both are present.
+        overrides : list of str, optional
+            Dotlist-style overrides (e.g. ``["output=results/",
+            "seed=42"]``).  Applied after YAML loading but before
+            variable resolution.
         """
+        from omegaconf import OmegaConf, DictConfig
+        from omegaconf.errors import OmegaConfBaseException
+
+        _ensure_resolvers()
+
         path = Path(path)
-        with open(path) as f:
-            data = yaml.safe_load(f)
+        try:
+            cfg = OmegaConf.load(path)
+        except OmegaConfBaseException as exc:
+            raise WorkflowError(
+                f"Variable resolution failed: {exc}"
+            ) from exc
+
+        if not isinstance(cfg, DictConfig):
+            raise WorkflowError(
+                "Workflow YAML must be a mapping, "
+                f"got {type(cfg).__name__}"
+            )
+
+        # Apply CLI overrides before resolution
+        if overrides:
+            try:
+                override_cfg = OmegaConf.from_dotlist(overrides)
+                cfg = OmegaConf.merge(cfg, override_cfg)
+            except (OmegaConfBaseException, ValueError) as exc:
+                raise WorkflowError(
+                    f"Invalid override: {exc}"
+                ) from exc
+
+        # Resolve all ${...} interpolations → plain Python dict
+        try:
+            data = OmegaConf.to_container(cfg, resolve=True)
+        except OmegaConfBaseException as exc:
+            msg = str(exc)
+            if (
+                "circular" in msg.lower()
+                or "recursion" in msg.lower()
+                or "recursive" in msg.lower()
+            ):
+                raise WorkflowError(
+                    f"Circular variable reference detected: {exc}"
+                ) from exc
+            raise WorkflowError(
+                f"Variable resolution failed: {exc}"
+            ) from exc
 
         if not isinstance(data, dict):
             raise WorkflowError(
@@ -495,13 +474,6 @@ class Workflow:
                     f"a scalar value (string, int, or float), "
                     f"got {type(value).__name__}"
                 )
-
-        # Build namespace from all scalar top-level keys and resolve
-        # cross-references within the namespace.
-        namespace = _build_var_namespace(data)
-
-        # Resolve ${...} throughout the data dict.
-        data = _resolve_vars(data, namespace)
 
         # Separate user-defined keys before parsing known fields.
         for key in list(data):

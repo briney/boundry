@@ -15,8 +15,6 @@ from boundry.workflow import (
     VALID_OPERATIONS,
     Workflow,
     WorkflowError,
-    _build_var_namespace,
-    _resolve_vars,
 )
 
 
@@ -1682,7 +1680,7 @@ class TestVarInterpolation:
             "  - operation: idealize\n"
             "    output: ${nonexistent}/out.pdb\n"
         )
-        with pytest.raises(WorkflowError, match="Undefined variable"):
+        with pytest.raises(WorkflowError, match="resolution failed"):
             Workflow.from_yaml(wf_file)
 
     def test_non_scalar_user_var_raises(self, tmp_path):
@@ -1733,7 +1731,7 @@ class TestVarInterpolation:
             "  - operation: idealize\n"
             "    output: ${steps}/out.pdb\n"
         )
-        with pytest.raises(WorkflowError, match="Undefined variable"):
+        with pytest.raises(WorkflowError, match="resolution failed"):
             Workflow.from_yaml(wf_file)
 
     def test_bool_user_var_rejected(self, tmp_path):
@@ -1748,8 +1746,8 @@ class TestVarInterpolation:
         with pytest.raises(WorkflowError, match="scalar"):
             Workflow.from_yaml(wf_file)
 
-    def test_partial_dollar_brace_left_alone(self, tmp_path):
-        """Partial ${ without } is left as-is."""
+    def test_partial_dollar_brace_raises(self, tmp_path):
+        """Partial ${ without } raises a resolution error."""
         wf_file = tmp_path / "wf.yaml"
         wf_file.write_text(
             'input: input.pdb\n'
@@ -1757,8 +1755,8 @@ class TestVarInterpolation:
             '  - operation: idealize\n'
             '    output: "some_${_incomplete"\n'
         )
-        wf = Workflow.from_yaml(wf_file)
-        assert wf.config.steps[0].output == "some_${_incomplete"
+        with pytest.raises(WorkflowError, match="resolution failed"):
+            Workflow.from_yaml(wf_file)
 
     def test_seed_in_namespace(self, tmp_path):
         """${seed} resolves to the YAML seed value."""
@@ -1775,112 +1773,138 @@ class TestVarInterpolation:
 
 
 # ------------------------------------------------------------------
-# _resolve_vars unit tests
+# CLI overrides
 # ------------------------------------------------------------------
 
 
-class TestResolveVars:
-    """Tests for the _resolve_vars helper."""
+class TestCliOverrides:
+    """Tests for the overrides parameter in from_yaml."""
 
-    def test_string_substitution(self):
-        ns = {"output": "results"}
-        assert _resolve_vars("${output}/file.pdb", ns) == "results/file.pdb"
+    def test_override_output(self, tmp_path):
+        """Override output via dotlist."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "output: original.pdb\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+        )
+        wf = Workflow.from_yaml(
+            wf_file, overrides=["output=overridden.pdb"]
+        )
+        assert wf.config.output == "overridden.pdb"
 
-    def test_no_vars_passthrough(self):
-        ns = {"output": "results"}
-        assert _resolve_vars("plain_string", ns) == "plain_string"
+    def test_override_user_var(self, tmp_path):
+        """Override a user-defined variable."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "project: default_proj\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+            "    output: ${project}/out.pdb\n"
+        )
+        wf = Workflow.from_yaml(
+            wf_file, overrides=["project=custom_proj"]
+        )
+        assert wf.config.steps[0].output == "custom_proj/out.pdb"
 
-    def test_dict_values_resolved(self):
-        ns = {"output": "results"}
-        data = {"key": "${output}/file.pdb", "other": 42}
-        result = _resolve_vars(data, ns)
-        assert result == {"key": "results/file.pdb", "other": 42}
+    def test_override_seed(self, tmp_path):
+        """Override seed via dotlist."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "seed: 1\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+        )
+        wf = Workflow.from_yaml(wf_file, overrides=["seed=99"])
+        assert wf.config.seed == 99
 
-    def test_dict_keys_not_resolved(self):
-        ns = {"output": "results"}
-        data = {"${output}": "value"}
-        result = _resolve_vars(data, ns)
-        assert "${output}" in result
+    def test_cli_seed_wins_over_override(self, tmp_path):
+        """CLI --seed takes precedence over override."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "seed: 1\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+        )
+        wf = Workflow.from_yaml(
+            wf_file, seed=777, overrides=["seed=99"]
+        )
+        assert wf.config.seed == 777
 
-    def test_list_resolved(self):
-        ns = {"dir": "out"}
-        data = ["${dir}/a.pdb", "${dir}/b.pdb"]
-        result = _resolve_vars(data, ns)
-        assert result == ["out/a.pdb", "out/b.pdb"]
+    def test_invalid_override_raises(self, tmp_path):
+        """Bad override syntax raises WorkflowError."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+        )
+        # "=bad" creates an empty-string key that fails identifier
+        # validation; any WorkflowError is acceptable here
+        with pytest.raises(WorkflowError):
+            Workflow.from_yaml(wf_file, overrides=["=bad"])
 
-    def test_nested_structures(self):
-        ns = {"base": "root"}
-        data = {"steps": [{"output": "${base}/step1.pdb"}]}
-        result = _resolve_vars(data, ns)
-        assert result == {"steps": [{"output": "root/step1.pdb"}]}
-
-    def test_non_string_scalars_passthrough(self):
-        ns = {"x": "1"}
-        assert _resolve_vars(42, ns) == 42
-        assert _resolve_vars(3.14, ns) == 3.14
-        assert _resolve_vars(True, ns) is True
-        assert _resolve_vars(None, ns) is None
-
-    def test_undefined_raises(self):
-        ns = {"output": "results"}
-        with pytest.raises(WorkflowError, match="Undefined variable"):
-            _resolve_vars("${missing}/file.pdb", ns)
-
-    def test_multiple_refs(self):
-        ns = {"a": "foo", "b": "bar"}
-        result = _resolve_vars("${a}/${b}/file.pdb", ns)
-        assert result == "foo/bar/file.pdb"
+    def test_no_overrides_is_noop(self, tmp_path):
+        """None overrides behaves like no overrides."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "output: out.pdb\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+        )
+        wf = Workflow.from_yaml(wf_file, overrides=None)
+        assert wf.config.output == "out.pdb"
 
 
 # ------------------------------------------------------------------
-# _build_var_namespace unit tests
+# Built-in workflow lookup
 # ------------------------------------------------------------------
 
 
-class TestBuildVarNamespace:
-    """Tests for the _build_var_namespace helper."""
+class TestBuiltinWorkflowLookup:
+    """Tests for _resolve_workflow."""
 
-    def test_basic_scalars(self):
-        data = {"input": "in.pdb", "output": "out", "seed": 42}
-        ns = _build_var_namespace(data)
-        assert ns == {"input": "in.pdb", "output": "out", "seed": "42"}
+    def test_existing_file_returned(self, tmp_path):
+        """Explicit file path is returned as-is."""
+        from boundry.cli import _resolve_workflow
 
-    def test_skips_non_scalars(self):
-        data = {
-            "input": "in.pdb",
-            "steps": [{"operation": "idealize"}],
-        }
-        ns = _build_var_namespace(data)
-        assert "steps" not in ns
+        wf_file = tmp_path / "my.yaml"
+        wf_file.write_text("input: x\nsteps:\n  - operation: idealize\n")
+        result = _resolve_workflow(str(wf_file))
+        assert result == wf_file
 
-    def test_skips_bools(self):
-        data = {"input": "in.pdb", "flag": True}
-        ns = _build_var_namespace(data)
-        assert "flag" not in ns
+    def test_builtin_name_resolved(self):
+        """Built-in workflow name resolves to package directory."""
+        from boundry.cli import _resolve_workflow
 
-    def test_cross_reference_resolved(self):
-        data = {
-            "output": "results",
-            "run_dir": "${output}/run_1",
-        }
-        ns = _build_var_namespace(data)
-        assert ns["run_dir"] == "results/run_1"
+        result = _resolve_workflow("simple_relax")
+        assert result.exists()
+        assert result.name == "simple_relax.yaml"
 
-    def test_circular_raises(self):
-        data = {"a": "${b}", "b": "${a}"}
-        with pytest.raises(WorkflowError, match="Circular"):
-            _build_var_namespace(data)
+    def test_unknown_name_raises(self):
+        """Unknown name raises BadParameter."""
+        import typer
 
-    def test_float_coerced(self):
-        data = {"temp": 0.5}
-        ns = _build_var_namespace(data)
-        assert ns["temp"] == "0.5"
+        from boundry.cli import _resolve_workflow
 
-    def test_transitive_cross_reference(self):
-        data = {
-            "base": "root",
-            "mid": "${base}/mid",
-            "leaf": "${mid}/leaf",
-        }
-        ns = _build_var_namespace(data)
-        assert ns["leaf"] == "root/mid/leaf"
+        with pytest.raises(typer.BadParameter, match="not found"):
+            _resolve_workflow("nonexistent_workflow_xyz")
+
+    def test_user_dir_checked(self, tmp_path, monkeypatch):
+        """User ~/.boundry/workflows/ is checked."""
+        from pathlib import Path as _Path
+
+        from boundry.cli import _resolve_workflow
+
+        user_wf_dir = tmp_path / ".boundry" / "workflows"
+        user_wf_dir.mkdir(parents=True)
+        wf_file = user_wf_dir / "custom.yaml"
+        wf_file.write_text("input: x\nsteps:\n  - operation: idealize\n")
+        monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+        result = _resolve_workflow("custom")
+        assert result == wf_file

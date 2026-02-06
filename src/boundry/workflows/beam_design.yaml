@@ -1,0 +1,29 @@
+# Beam-search workflow
+#
+# Each beam round expands candidates with design/relax/analyze, scores
+# by dG, and keeps top width candidates. Final output includes rank.
+
+workflow_version: 1
+input: input.pdb
+output: beam_final_{rank}.pdb
+
+steps:
+  - operation: idealize
+  - beam:
+      width: 3
+      rounds: 10
+      expand: 5
+      metric: dG
+      direction: min
+      until: "{dG} < -15.0"
+      output: beam_round_{round}_rank_{rank}.pdb
+      steps:
+        - operation: design
+          params:
+            n_iterations: 1
+        - operation: relax
+          params:
+            n_iterations: 1
+        - operation: analyze_interface
+          params:
+            calculate_binding_energy: true

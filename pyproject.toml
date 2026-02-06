@@ -34,6 +34,7 @@ dependencies = [
     "tqdm",
     "typer>=0.9.0",
     "pyyaml>=6.0",
+    "omegaconf>=2.3",
 ]
 
 [project.urls]
@@ -71,6 +72,9 @@ boundry = "boundry.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/boundry"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/boundry/workflows" = "boundry/workflows"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

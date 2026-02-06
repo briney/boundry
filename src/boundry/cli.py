@@ -834,10 +834,46 @@ def analyze_interface(
             typer.echo(f"Per-position CSV: {position_csv}")
 
 
-@app.command()
+def _resolve_workflow(name_or_path: str) -> Path:
+    """Resolve a workflow file path or built-in name."""
+    path = Path(name_or_path)
+    if path.exists():
+        return path
+
+    # Search user workflows directory
+    user_dir = Path.home() / ".boundry" / "workflows"
+    for ext in (".yaml", ".yml"):
+        candidate = user_dir / f"{name_or_path}{ext}"
+        if candidate.exists():
+            return candidate
+
+    # Search package built-in workflows
+    builtin_dir = Path(__file__).parent / "workflows"
+    for ext in (".yaml", ".yml"):
+        candidate = builtin_dir / f"{name_or_path}{ext}"
+        if candidate.exists():
+            return candidate
+
+    raise typer.BadParameter(
+        f"Workflow '{name_or_path}' not found. Checked:\n"
+        f"  - {path}\n"
+        f"  - {user_dir}/\n"
+        f"  - {builtin_dir}/"
+    )
+
+
+@app.command(
+    context_settings={
+        "allow_extra_args": True,
+        "allow_interspersed_args": False,
+    }
+)
 def run(
-    workflow_file: Path = typer.Argument(
-        ..., metavar="WORKFLOW", help="YAML workflow file"
+    ctx: typer.Context,
+    workflow_file: str = typer.Argument(
+        ...,
+        metavar="WORKFLOW",
+        help="YAML workflow file or built-in name",
     ),
     seed: Optional[int] = typer.Option(
         None,
@@ -845,16 +881,23 @@ def run(
         help="Random seed for reproducibility (overrides YAML seed)",
     ),
     verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Enable detailed logging from all components"
+        False,
+        "--verbose",
+        "-v",
+        help="Enable detailed logging from all components",
     ),
 ):
-    """Execute a YAML workflow."""
+    """Execute a YAML workflow.
+
+    Extra arguments are applied as config overrides (key=value syntax).
+    Example: boundry run workflow.yaml seed=42 output=results/
+    """
     _setup_logging(verbose)
 
-    if not workflow_file.exists():
-        typer.echo(
-            f"Error: Workflow file not found: {workflow_file}", err=True
-        )
+    try:
+        resolved = _resolve_workflow(workflow_file)
+    except typer.BadParameter as exc:
+        typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1)
 
     try:
@@ -867,7 +910,8 @@ def run(
         )
         raise typer.Exit(code=1)
 
-    workflow = Workflow.from_yaml(workflow_file, seed=seed)
+    overrides = ctx.args or None
+    workflow = Workflow.from_yaml(resolved, seed=seed, overrides=overrides)
     workflow.run()
 
 
