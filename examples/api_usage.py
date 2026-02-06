@@ -130,6 +130,6 @@ struct.write("processed.pdb")
 # 8. Workflow from YAML
 # ---------------------------------------------------------------
 
-workflow = Workflow.from_yaml("examples/workflows/simple_relax.yaml")
+workflow = Workflow.from_yaml("src/boundry/workflows/simple_relax.yaml")
 result = workflow.run()
 print(f"Workflow complete. Final structure has {len(result.pdb_string)} chars")

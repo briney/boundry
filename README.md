@@ -248,10 +248,8 @@ Compound block nodes are also supported:
 - `iterate`: repeat nested steps for `n` cycles or until `until` condition.
 - `beam`: population search with `width`, `rounds`, `metric`, and pruning.
 
-See `examples/workflows/iterate_relax.yaml`,
-`examples/workflows/converge_design.yaml`,
-`examples/workflows/beam_design.yaml`, and
-`examples/workflows/full_pipeline.yaml` for complete examples.
+See the [Workflow Reference](src/boundry/workflows/README.md) for complete
+documentation and examples.
 
 ### Supported Operations
 
@@ -266,7 +264,8 @@ See `examples/workflows/iterate_relax.yaml`,
 | `renumber`          | Remove insertion codes                   | *(none)*                                     |
 | `analyze_interface` | Interface scoring                        | `chain_pairs`, `distance_cutoff`, `per_position`, `alanine_scan` |
 
-See `examples/workflows/` for more workflow examples.
+See the [Workflow Reference](src/boundry/workflows/README.md) for the full
+parameter reference and more workflow examples.
 
 ## Resfiles
 

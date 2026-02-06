@@ -4,7 +4,7 @@
 # analyzes the protein-protein interface of the result.
 #
 # Usage:
-#   boundry run examples/workflows/design_and_analyze.yaml
+#   boundry run design_and_analyze.yaml
 
 input: complex.pdb
 output: designed.pdb

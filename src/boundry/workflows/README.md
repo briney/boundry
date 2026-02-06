@@ -1,10 +1,12 @@
 # Boundry Workflow Reference
 
-This directory contains example YAML workflows for `boundry run`.
+This directory contains bundled YAML workflows for `boundry run`.
 
-This README documents:
+This document covers:
 
 - The general workflow schema.
+- Variable interpolation (`${key}`) and user-defined variables.
+- CLI overrides (`key=value`).
 - All supported step/block types.
 - Every workflow operation and its workflow `params`.
 - Condition syntax and valid variable references.
@@ -17,16 +19,19 @@ All workflows use this top-level shape:
 ```yaml
 workflow_version: 1          # optional, defaults to 1
 input: input.pdb             # required
-output: final.pdb            # optional
+output: results/             # optional
 seed: 42                     # optional, workflow-level seed
+resfile_path: design.resfile # user-defined variable (see §2)
 steps:                       # required, non-empty
-  - operation: idealize
+  - operation: design
+    params:
+      resfile: ${resfile_path}
+    output: ${output}/designed.pdb
 ```
 
-Top-level keys are strict:
-
-- Allowed: `workflow_version`, `input`, `output`, `seed`, `steps`
-- Unknown keys raise an error.
+Reserved top-level keys: `workflow_version`, `input`, `output`, `seed`,
+`steps`. Any other top-level key is treated as a user-defined variable
+(see §2).
 
 ### Deterministic Seeds
 
@@ -44,7 +49,139 @@ precedence over the workflow-derived seed. Omit the workflow `seed`
 
 The `--seed` CLI flag overrides the YAML `seed` when both are present.
 
-## 2. Step Node Types
+## 2. Variable Interpolation
+
+Workflow YAML files support `${key}` variable interpolation (powered by
+OmegaConf). Variables are resolved at load time, before any steps are
+parsed or executed.
+
+### 2.1 Built-in References
+
+All reserved top-level keys with scalar values can be referenced:
+
+- `${input}` — the input file path
+- `${output}` — the output path
+- `${seed}` — the workflow seed
+
+```yaml
+input: structures/my_protein.pdb
+output: results
+seed: 42
+steps:
+  - operation: idealize
+    output: ${output}/idealized.pdb    # -> results/idealized.pdb
+  - operation: relax
+    output: ${output}/seed_${seed}.pdb # -> results/seed_42.pdb
+```
+
+### 2.2 User-Defined Variables
+
+Any top-level key that is not a reserved key (`workflow_version`, `input`,
+`output`, `seed`, `steps`) is treated as a user-defined variable. These
+are resolved identically to built-in references.
+
+```yaml
+input: input.pdb
+project: my_project
+resfile_path: design.resfile
+steps:
+  - operation: design
+    params:
+      resfile: ${resfile_path}         # -> design.resfile
+    output: ${project}/designed.pdb    # -> my_project/designed.pdb
+```
+
+Rules for user-defined variables:
+
+- **Names** must be valid Python identifiers (letters, digits, underscores;
+  cannot start with a digit). Hyphens are not allowed (`my-var` is
+  invalid; use `my_var`).
+- **Values** must be scalars (string, int, or float). Lists, dicts, and
+  booleans are rejected.
+- Numeric values are coerced to strings for interpolation, so `run_id: 42`
+  makes `${run_id}` resolve to `"42"`.
+
+### 2.3 Cross-References
+
+Variables can reference other variables:
+
+```yaml
+input: input.pdb
+output: results
+run_dir: ${output}/run_1
+steps:
+  - operation: idealize
+    output: ${run_dir}/idealized.pdb   # -> results/run_1/idealized.pdb
+```
+
+Circular references (e.g. `a: ${b}`, `b: ${a}`) are detected and raise
+an error.
+
+### 2.4 Environment Variables
+
+The `${env:VAR}` and `${env:VAR,default}` resolver reads from
+environment variables:
+
+```yaml
+input: ${env:INPUT_PDB,input.pdb}
+output: ${env:OUTPUT_DIR,results}/
+steps:
+  - operation: idealize
+```
+
+If the environment variable is unset and no default is provided, an
+empty string is used.
+
+### 2.5 Coexistence with Runtime Tokens
+
+Variable interpolation (`${...}`, resolved at load time) and output
+runtime tokens (`{cycle}`, `{round}`, `{rank}`, resolved at execution
+time) use different syntax and do not conflict:
+
+```yaml
+output: results
+steps:
+  - iterate:
+      n: 5
+      output: ${output}/cycle_{cycle}/  # ${output} resolves at load time;
+      steps:                             # {cycle} resolves at runtime
+        - operation: relax
+```
+
+After loading, the iterate block's output becomes `results/cycle_{cycle}/`.
+
+### 2.6 Errors
+
+- Referencing an undefined variable (`${nonexistent}`) raises an error.
+- Malformed syntax (`${_incomplete`) raises an error.
+- `${steps}` is not referenceable (it is a non-scalar reserved key).
+
+## 3. CLI Overrides
+
+Extra arguments passed to `boundry run` are applied as config overrides
+using `key=value` syntax. Overrides are merged into the YAML before
+variable resolution, so they can change variable values that propagate
+through `${...}` references.
+
+```bash
+boundry run workflow.yaml output=custom_results/ project=my_proj seed=99
+```
+
+- Any top-level key (reserved or user-defined) can be overridden.
+- The `--seed` CLI flag takes precedence over a `seed=N` override.
+
+Overrides can also be passed programmatically:
+
+```python
+from boundry import Workflow
+
+wf = Workflow.from_yaml(
+    "workflow.yaml",
+    overrides=["output=results/", "project=custom_proj"],
+)
+```
+
+## 4. Step Node Types
 
 Each item in `steps:` must contain exactly one of:
 
@@ -52,7 +189,7 @@ Each item in `steps:` must contain exactly one of:
 - `iterate` (fixed or convergence loop)
 - `beam` (population beam search)
 
-### 2.1 Operation Step
+### 4.1 Operation Step
 
 ```yaml
 - operation: relax
@@ -68,7 +205,7 @@ Allowed keys:
 - `params` (optional mapping; `null` is treated as `{}`)
 - `output` (optional string path template)
 
-### 2.2 Iterate Block
+### 4.2 Iterate Block
 
 ```yaml
 - iterate:
@@ -101,7 +238,7 @@ Notes:
 - If `until` uses `delta(...)`, cycle 1 is treated as "not yet converged" (bootstrap).
 - Seed injection is controlled by the workflow-level `seed` (see §1).
 
-### 2.3 Beam Block
+### 4.3 Beam Block
 
 ```yaml
 - beam:
@@ -134,11 +271,11 @@ Notes:
 - `Workflow.run()` returns best rank-1 candidate.
 - `Workflow.run_population()` returns final kept population.
 
-## 3. Output Template Variables
+## 5. Output Template Variables
 
 Any `output` field uses Python `str.format(...)` templating.
 
-### 3.1 Available Variables by Context
+### 5.1 Available Variables by Context
 
 - Top-level `output` and operation-step `output`:
   - `{rank}` (always available; defaults to `1` for single structure)
@@ -149,18 +286,18 @@ Any `output` field uses Python `str.format(...)` templating.
   - `{round}` (1-based beam round index)
   - `{rank}` (1-based candidate rank)
 
-### 3.2 Multi-candidate Naming
+### 5.2 Multi-candidate Naming
 
 If more than one structure is written and no `{rank}` placeholder is present,
 Boundry auto-appends `_rankN` before the extension:
 
 - `out.pdb` -> `out_rank1.pdb`, `out_rank2.pdb`, ...
 
-## 4. Condition Expressions (`until`)
+## 6. Condition Expressions (`until`)
 
 `iterate.until` and `beam.until` use a safe parser (no `eval`).
 
-### 4.1 Syntax
+### 6.1 Syntax
 
 ```text
 condition := expr COMPARE expr
@@ -172,14 +309,14 @@ VARIABLE  := {dotted.path}
 FUNCTION  := abs | delta
 ```
 
-### 4.2 Examples
+### 6.2 Examples
 
 - `"{dG} < -10.0"`
 - `"abs({final_energy}) < 1000"`
 - `"delta({final_energy}) < 0.5"`
 - `"{metrics.interface.dG} < -12.0"`
 
-### 4.3 Variable Rules
+### 6.3 Variable Rules
 
 - Variables are wrapped in `{...}`.
 - Dotted paths are allowed (`{a.b.c}`).
@@ -189,7 +326,7 @@ FUNCTION  := abs | delta
   - `abs(current(x) - previous(x))`
   - Outside loop/round contexts without previous metadata, this raises an error.
 
-## 5. Operations and `params` Reference
+## 7. Operations and `params` Reference
 
 Supported operation names:
 
@@ -202,7 +339,7 @@ Supported operation names:
 - `renumber`
 - `analyze_interface`
 
-## 5.1 `idealize`
+## 7.1 `idealize`
 
 Purpose: backbone geometry idealization.
 
@@ -217,7 +354,7 @@ Notes:
 
 - `enabled` is internally forced to `true` in workflows.
 
-## 5.2 `minimize`
+## 7.2 `minimize`
 
 Purpose: AMBER minimization.
 
@@ -232,7 +369,7 @@ Workflow `params`:
 - `split_chains_at_gaps` (bool, default `true`)
 - `implicit_solvent` (bool, default `true`)
 
-## 5.3 `repack`
+## 7.3 `repack`
 
 Purpose: side-chain repacking (LigandMPNN repack mode).
 
@@ -248,7 +385,7 @@ Workflow `params`:
 - `sc_num_denoising_steps` (int, default `3`)
 - `sc_num_samples` (int, default `16`)
 
-## 5.4 `relax`
+## 7.4 `relax`
 
 Purpose: iterative repack + minimize cycles.
 
@@ -264,7 +401,7 @@ Behavior note:
 
 - Unknown keys are ignored with a warning (they do not fail parsing).
 
-## 5.5 `mpnn`
+## 7.5 `mpnn`
 
 Purpose: sequence design (single-pass MPNN).
 
@@ -274,7 +411,7 @@ Workflow `params`:
 - `resfile` (string path, optional) [workflow-only]
 - All `DesignConfig` fields (same list as `repack`)
 
-## 5.6 `design`
+## 7.6 `design`
 
 Purpose: iterative design + minimize cycles.
 
@@ -290,7 +427,7 @@ Behavior note:
 
 - Unknown keys are ignored with a warning.
 
-## 5.7 `renumber`
+## 7.7 `renumber`
 
 Purpose: remove insertion codes / renumber residues.
 
@@ -298,7 +435,7 @@ Workflow `params`:
 
 - None required.
 
-## 5.8 `analyze_interface`
+## 7.8 `analyze_interface`
 
 Purpose: interface metrics and optional energetics analyses.
 
@@ -325,7 +462,7 @@ Workflow `params`:
 - `show_progress` (bool, default `false`)
 - `quiet` (bool, default `false`)
 
-## 6. Variables You Can Use in Conditions
+## 8. Variables You Can Use in Conditions
 
 Conditions read from structure metadata produced by prior operations.
 
@@ -347,16 +484,20 @@ You can also use arithmetic expressions combining variables, for example:
 - `"{dG} < -12 and ..."` is not supported (`and`/`or` are not in grammar).
 - Use numeric comparison only, e.g. `"{dG} + 0.1 * {buried_sasa} < 50"`.
 
-## 7. Strictness and Validation Summary
+## 9. Strictness and Validation Summary
 
-- Workflow-level and block-level unknown keys raise errors.
+- Unknown top-level keys are treated as user-defined variables (see §2).
+  They must be valid Python identifiers with scalar values.
+- Block-level unknown keys raise errors.
 - Node must be exactly one of `operation`, `iterate`, `beam`.
 - `steps` lists must be non-empty.
 - Numeric block controls (`n`, `max_n`, `width`, `rounds`, `expand`) must be `>= 1`.
 - `beam.direction` must be `min` or `max`.
 - Invalid `until` syntax fails at parse time.
+- Undefined `${...}` references, circular references, and malformed
+  interpolation syntax all fail at load time.
 
-## 8. Example Files in This Directory
+## 10. Bundled Workflow Files
 
 - `simple_relax.yaml`: basic linear workflow
 - `design_and_analyze.yaml`: linear design + interface analysis

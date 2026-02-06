@@ -4,7 +4,7 @@
 # repacking (LigandMPNN) + energy minimization (OpenMM AMBER).
 #
 # Usage:
-#   boundry run examples/workflows/simple_relax.yaml
+#   boundry run simple_relax.yaml
 
 input: input.pdb
 output: relaxed.pdb

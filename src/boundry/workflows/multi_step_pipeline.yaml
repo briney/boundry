@@ -6,7 +6,7 @@
 # saved at each stage for inspection.
 #
 # Usage:
-#   boundry run examples/workflows/multi_step_pipeline.yaml
+#   boundry run multi_step_pipeline.yaml
 
 input: input.pdb
 output: final.pdb
