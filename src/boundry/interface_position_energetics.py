@@ -20,7 +20,8 @@ import contextlib
 import csv
 import io
 import logging
-from dataclasses import dataclass, field
+import os
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -547,6 +548,227 @@ def _build_position_rows(
     return rows
 
 
+def _run_scans_sequential(
+    *,
+    pdb_string: str,
+    interface_residues: List[InterfaceResidue],
+    chain_pairs: List[Tuple[str, str]],
+    relaxer: "Relaxer",
+    designer: Optional["Designer"],
+    dG_wt: float,
+    distance_cutoff: float,
+    position_relax: str,
+    relax_separated: bool,
+    scan_chains: Optional[List[str]],
+    max_scan_sites: Optional[int],
+    run_per_position: bool,
+    run_alanine_scan: bool,
+    show_progress: bool,
+    quiet: bool,
+) -> Tuple[
+    Dict[ResidueKey, Tuple[Optional[float], Optional[float]]],
+    Dict[ResidueKey, Optional[float]],
+]:
+    """Run alanine scan and/or per-position dG sequentially."""
+    ala_results: Dict[
+        ResidueKey, Tuple[Optional[float], Optional[float]]
+    ] = {}
+    if run_alanine_scan:
+        logger.info("Running alanine scan...")
+        ala_results = compute_alanine_scan(
+            pdb_string,
+            interface_residues,
+            chain_pairs,
+            relaxer,
+            dG_wt,
+            designer=designer,
+            distance_cutoff=distance_cutoff,
+            position_relax=position_relax,
+            relax_separated=relax_separated,
+            scan_chains=scan_chains,
+            max_scan_sites=max_scan_sites,
+            show_progress=show_progress,
+            quiet=quiet,
+        )
+
+    pp_dG_results: Dict[ResidueKey, Optional[float]] = {}
+    if run_per_position:
+        logger.info("Computing per-position dG...")
+        pp_dG_results = compute_per_position_dG(
+            pdb_string,
+            interface_residues,
+            chain_pairs,
+            relaxer,
+            dG_wt,
+            designer=designer,
+            distance_cutoff=distance_cutoff,
+            position_relax=position_relax,
+            relax_separated=relax_separated,
+            scan_chains=scan_chains,
+            max_scan_sites=max_scan_sites,
+            show_progress=show_progress,
+            quiet=quiet,
+        )
+
+    return ala_results, pp_dG_results
+
+
+def _run_scans_parallel(
+    *,
+    pdb_string: str,
+    interface_residues: List[InterfaceResidue],
+    chain_pairs: List[Tuple[str, str]],
+    relaxer: "Relaxer",
+    designer: Optional["Designer"],
+    dG_wt: float,
+    distance_cutoff: float,
+    position_relax: str,
+    relax_separated: bool,
+    scan_chains: Optional[List[str]],
+    max_scan_sites: Optional[int],
+    run_per_position: bool,
+    run_alanine_scan: bool,
+    show_progress: bool,
+    quiet: bool,
+    workers: int,
+) -> Tuple[
+    Dict[ResidueKey, Tuple[Optional[float], Optional[float]]],
+    Dict[ResidueKey, Optional[float]],
+]:
+    """Run alanine scan and/or per-position dG in parallel."""
+    from concurrent.futures import as_completed
+
+    from boundry._parallel import (
+        ScanTask,
+        _execute_scan_worker,
+        _init_scan_worker,
+    )
+
+    scan_sites = _select_scan_sites(
+        interface_residues, scan_chains, max_scan_sites
+    )
+
+    # Build tasks
+    tasks: List[ScanTask] = []
+    # Track which alanine-scan residues are skipped locally
+    ala_skipped: Dict[
+        ResidueKey, Tuple[Optional[float], Optional[float]]
+    ] = {}
+
+    for ir in scan_sites:
+        if run_alanine_scan:
+            if ir.residue_name in _ALANINE_SCAN_SKIP:
+                key = ResidueKey(
+                    ir.chain_id, ir.residue_number, ir.insertion_code
+                )
+                ala_skipped[key] = (None, None)
+            else:
+                tasks.append(
+                    ScanTask(
+                        scan_type="alanine_scan",
+                        pdb_string=pdb_string,
+                        chain_id=ir.chain_id,
+                        residue_number=ir.residue_number,
+                        insertion_code=ir.insertion_code,
+                        residue_name=ir.residue_name,
+                        chain_pairs=chain_pairs,
+                        distance_cutoff=distance_cutoff,
+                        relax_separated=relax_separated,
+                        position_relax=position_relax,
+                        dG_wt=dG_wt,
+                        quiet=quiet,
+                    )
+                )
+        if run_per_position:
+            tasks.append(
+                ScanTask(
+                    scan_type="per_position",
+                    pdb_string=pdb_string,
+                    chain_id=ir.chain_id,
+                    residue_number=ir.residue_number,
+                    insertion_code=ir.insertion_code,
+                    residue_name=ir.residue_name,
+                    chain_pairs=chain_pairs,
+                    distance_cutoff=distance_cutoff,
+                    relax_separated=relax_separated,
+                    position_relax=position_relax,
+                    dG_wt=dG_wt,
+                    quiet=quiet,
+                )
+            )
+
+    if not tasks:
+        return dict(ala_skipped), {}
+
+    # Serialize configs for the pool initializer
+    relax_config_dict = asdict(relaxer.config)
+    design_config_dict = (
+        asdict(designer.config) if designer is not None else None
+    )
+
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("spawn")
+
+    logger.info(
+        f"Dispatching {len(tasks)} scan tasks across "
+        f"{workers} workers..."
+    )
+
+    ala_results: Dict[
+        ResidueKey, Tuple[Optional[float], Optional[float]]
+    ] = dict(ala_skipped)
+    pp_dG_results: Dict[ResidueKey, Optional[float]] = {}
+
+    bar = None
+    if show_progress:
+        from tqdm import tqdm
+
+        bar = tqdm(total=len(tasks), desc="Scanning", unit="res")
+
+    from concurrent.futures import ProcessPoolExecutor
+
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=ctx,
+        initializer=_init_scan_worker,
+        initargs=(relax_config_dict, design_config_dict),
+    ) as pool:
+        futures = {
+            pool.submit(_execute_scan_worker, task): task
+            for task in tasks
+        }
+
+        for future in as_completed(futures):
+            result = future.result()
+            key = ResidueKey(
+                result.chain_id,
+                result.residue_number,
+                result.insertion_code,
+            )
+
+            if result.error is not None:
+                logger.warning(
+                    f"  Scan failed for {key}: {result.error}"
+                )
+                if result.scan_type == "alanine_scan":
+                    ala_results[key] = (None, None)
+                else:
+                    pp_dG_results[key] = None
+            elif result.scan_type == "alanine_scan":
+                ala_results[key] = (result.dG, result.ddG)
+            else:
+                pp_dG_results[key] = result.dG
+
+            if bar is not None:
+                bar.update(1)
+
+    if bar is not None:
+        bar.close()
+
+    return ala_results, pp_dG_results
+
+
 def compute_position_energetics(
     pdb_string: str,
     interface_residues: List[InterfaceResidue],
@@ -563,6 +785,7 @@ def compute_position_energetics(
     sasa_delta: Optional[Dict[str, float]] = None,
     show_progress: bool = False,
     quiet: bool = False,
+    workers: int = 1,
 ) -> PositionEnergeticsResult:
     """Run the full per-position energetics pipeline.
 
@@ -602,44 +825,51 @@ def compute_position_energetics(
         )
     logger.info(f"  dG_wt = {dG_wt:.2f} kcal/mol")
 
-    # Alanine scan
-    ala_results: Dict[
-        ResidueKey, Tuple[Optional[float], Optional[float]]
-    ] = {}
-    if run_alanine_scan:
-        logger.info("Running alanine scan...")
-        ala_results = compute_alanine_scan(
-            pdb_string,
-            interface_residues,
-            chain_pairs,
-            relaxer,
-            dG_wt,
+    # Determine effective workers (nested guard)
+    effective_workers = workers
+    if workers > 1 and os.environ.get("BOUNDRY_IN_WORKER_PROCESS"):
+        logger.warning(
+            "Nested parallelism detected (inside worker process); "
+            "forcing sequential scan (workers=1)"
+        )
+        effective_workers = 1
+
+    # Parallel path: dispatch both scan types in a single pool
+    if effective_workers > 1 and (run_alanine_scan or run_per_position):
+        ala_results, pp_dG_results = _run_scans_parallel(
+            pdb_string=pdb_string,
+            interface_residues=interface_residues,
+            chain_pairs=chain_pairs,
+            relaxer=relaxer,
             designer=designer,
+            dG_wt=dG_wt,
             distance_cutoff=distance_cutoff,
             position_relax=position_relax,
             relax_separated=relax_separated,
             scan_chains=scan_chains,
             max_scan_sites=max_scan_sites,
+            run_per_position=run_per_position,
+            run_alanine_scan=run_alanine_scan,
             show_progress=show_progress,
             quiet=quiet,
+            workers=effective_workers,
         )
-
-    # Per-position dG (residue removal)
-    pp_dG_results: Dict[ResidueKey, Optional[float]] = {}
-    if run_per_position:
-        logger.info("Computing per-position dG...")
-        pp_dG_results = compute_per_position_dG(
-            pdb_string,
-            interface_residues,
-            chain_pairs,
-            relaxer,
-            dG_wt,
+    else:
+        # Sequential path (unchanged)
+        ala_results, pp_dG_results = _run_scans_sequential(
+            pdb_string=pdb_string,
+            interface_residues=interface_residues,
+            chain_pairs=chain_pairs,
+            relaxer=relaxer,
             designer=designer,
+            dG_wt=dG_wt,
             distance_cutoff=distance_cutoff,
             position_relax=position_relax,
             relax_separated=relax_separated,
             scan_chains=scan_chains,
             max_scan_sites=max_scan_sites,
+            run_per_position=run_per_position,
+            run_alanine_scan=run_alanine_scan,
             show_progress=show_progress,
             quiet=quiet,
         )

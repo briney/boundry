@@ -784,6 +784,13 @@ def analyze_interface(
         help="Limit number of residues scanned "
         "(useful for large interfaces)",
     ),
+    workers: int = typer.Option(
+        1,
+        "--workers",
+        "-j",
+        help="Parallel workers for per-position / alanine scans "
+        "(1 = sequential)",
+    ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Enable detailed logging from all components"
     ),
@@ -850,6 +857,7 @@ def analyze_interface(
         max_scan_sites=max_scan_sites,
         show_progress=per_position or alanine_scan,
         quiet=not verbose,
+        workers=workers,
     )
 
     relaxer = None

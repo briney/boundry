@@ -810,3 +810,139 @@ class TestCLINewOptions:
 
         result = CliRunner().invoke(app, ["analyze-interface", "--help"])
         assert "negative" in result.output.lower()
+
+    def test_workers_option(self):
+        """--workers / -j option appears in help."""
+        from typer.testing import CliRunner
+
+        from boundry.cli import app
+
+        result = CliRunner().invoke(app, ["analyze-interface", "--help"])
+        assert "--workers" in result.output
+
+
+# ------------------------------------------------------------------
+# Parallel dispatch tests
+# ------------------------------------------------------------------
+
+
+class TestParallelDispatch:
+    """Test parallel scan dispatch produces same results as sequential."""
+
+    @patch("boundry.interface_position_energetics._compute_rosetta_dG")
+    def test_workers_1_uses_sequential(self, mock_dG):
+        """workers=1 should use the sequential path (no pool)."""
+        mock_dG.side_effect = [-10.0, -5.0]  # dG_wt, dG_ala
+        relaxer = MagicMock()
+        ir = _make_ir(residue_name="LEU")
+
+        energetics = compute_position_energetics(
+            TWO_CHAIN_PDB,
+            [ir],
+            chain_pairs=[("A", "B")],
+            relaxer=relaxer,
+            run_alanine_scan=True,
+            position_relax="none",
+            workers=1,
+        )
+
+        assert energetics.alanine_scan is not None
+        row = energetics.alanine_scan.rows[0]
+        assert row.dG == -5.0
+        assert row.ddG == pytest.approx(5.0)
+
+    @patch(
+        "boundry.interface_position_energetics."
+        "_run_scans_parallel"
+    )
+    @patch("boundry.interface_position_energetics._compute_rosetta_dG")
+    def test_workers_gt1_calls_parallel(
+        self, mock_dG, mock_parallel
+    ):
+        """workers > 1 should call _run_scans_parallel."""
+        mock_dG.return_value = -10.0  # dG_wt
+        mock_parallel.return_value = (
+            {ResidueKey("A", 1, ""): (-5.0, 5.0)},
+            {},
+        )
+        relaxer = MagicMock()
+        ir = _make_ir(residue_name="LEU")
+
+        energetics = compute_position_energetics(
+            TWO_CHAIN_PDB,
+            [ir],
+            chain_pairs=[("A", "B")],
+            relaxer=relaxer,
+            run_alanine_scan=True,
+            position_relax="none",
+            workers=4,
+        )
+
+        mock_parallel.assert_called_once()
+        assert energetics.alanine_scan is not None
+
+    @patch.dict(
+        "os.environ", {"BOUNDRY_IN_WORKER_PROCESS": "1"}
+    )
+    @patch("boundry.interface_position_energetics._compute_rosetta_dG")
+    def test_nested_guard_forces_sequential(self, mock_dG):
+        """workers > 1 inside a worker process falls back to sequential."""
+        mock_dG.side_effect = [-10.0, -5.0]  # dG_wt, dG_ala
+        relaxer = MagicMock()
+        ir = _make_ir(residue_name="LEU")
+
+        energetics = compute_position_energetics(
+            TWO_CHAIN_PDB,
+            [ir],
+            chain_pairs=[("A", "B")],
+            relaxer=relaxer,
+            run_alanine_scan=True,
+            position_relax="none",
+            workers=4,  # should be forced to 1
+        )
+
+        # Should still produce correct results via sequential path
+        assert energetics.alanine_scan is not None
+        row = energetics.alanine_scan.rows[0]
+        assert row.dG == -5.0
+        assert row.ddG == pytest.approx(5.0)
+
+
+class TestScanTaskResult:
+    """Test ScanTask and ScanResult dataclasses."""
+
+    def test_scan_task_frozen(self):
+        from boundry._parallel import ScanTask
+
+        task = ScanTask(
+            scan_type="alanine_scan",
+            pdb_string="PDB",
+            chain_id="A",
+            residue_number=1,
+            insertion_code="",
+            residue_name="LEU",
+            chain_pairs=[("A", "B")],
+            distance_cutoff=8.0,
+            relax_separated=False,
+            position_relax="none",
+            dG_wt=-10.0,
+            quiet=False,
+        )
+        with pytest.raises(AttributeError):
+            task.scan_type = "per_position"
+
+    def test_scan_result_fields(self):
+        from boundry._parallel import ScanResult
+
+        result = ScanResult(
+            scan_type="alanine_scan",
+            chain_id="A",
+            residue_number=1,
+            insertion_code="",
+            residue_name="LEU",
+            dG=-5.0,
+            ddG=5.0,
+        )
+        assert result.dG == -5.0
+        assert result.ddG == 5.0
+        assert result.error is None

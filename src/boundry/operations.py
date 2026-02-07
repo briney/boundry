@@ -1068,6 +1068,7 @@ def analyze_interface(
             sasa_delta=sasa_delta,
             show_progress=config.show_progress,
             quiet=config.quiet,
+            workers=config.workers,
         )
         result.per_position = energetics.per_position
         result.alanine_scan = energetics.alanine_scan

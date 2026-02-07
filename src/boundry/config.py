@@ -74,6 +74,7 @@ class InterfaceConfig:
     max_scan_sites: Optional[int] = None  # Limit number of residues scanned
     show_progress: bool = False  # Show tqdm progress bar for per-position scans
     quiet: bool = False  # Suppress dependency logging/stderr noise
+    workers: int = 1  # Parallel workers for per-position scans (1 = sequential)
 
 
 @dataclass

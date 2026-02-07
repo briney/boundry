@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -96,6 +97,7 @@ def _execute_branch_worker(task: BranchTask) -> BranchResult:
     It imports all dependencies inside the function body to work
     correctly with the ``spawn`` start method.
     """
+    os.environ["BOUNDRY_IN_WORKER_PROCESS"] = "1"
     try:
         from boundry.operations import Structure
         from boundry.workflow import Workflow, _compose_seed
@@ -166,6 +168,7 @@ def _execute_step_worker(task: StepTask) -> StepResult:
     This is the top-level function submitted to the process pool for
     step-level parallelism (multi-member populations).
     """
+    os.environ["BOUNDRY_IN_WORKER_PROCESS"] = "1"
     try:
         from boundry.operations import Structure
         from boundry.workflow import Workflow
@@ -188,6 +191,135 @@ def _execute_step_worker(task: StepTask) -> StepResult:
 
     except Exception as exc:
         return StepResult(error=f"{type(exc).__name__}: {exc}")
+
+
+# ------------------------------------------------------------------
+# Scan parallelism (per-position / alanine scan)
+# ------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ScanTask:
+    """Serializable inputs for one per-position scan computation."""
+
+    scan_type: str  # "alanine_scan" or "per_position"
+    pdb_string: str
+    chain_id: str
+    residue_number: int
+    insertion_code: str
+    residue_name: str
+    chain_pairs: List[Tuple[str, str]]
+    distance_cutoff: float
+    relax_separated: bool
+    position_relax: str
+    dG_wt: float
+    quiet: bool
+
+
+@dataclass
+class ScanResult:
+    """Serializable outputs from one per-position scan computation."""
+
+    scan_type: str
+    chain_id: str
+    residue_number: int
+    insertion_code: str
+    residue_name: str
+    dG: Optional[float] = None
+    ddG: Optional[float] = None
+    error: Optional[str] = None
+
+
+# Module-level globals for worker-process reuse
+_scan_relaxer = None
+_scan_designer = None
+
+
+def _init_scan_worker(
+    relax_config_dict: Dict[str, Any],
+    design_config_dict: Optional[Dict[str, Any]],
+) -> None:
+    """Initializer for scan worker processes.
+
+    Creates ``Relaxer`` (and optionally ``Designer``) once per worker,
+    stored in module globals for reuse across tasks.
+    """
+    global _scan_relaxer, _scan_designer  # noqa: PLW0603
+    os.environ["BOUNDRY_IN_WORKER_PROCESS"] = "1"
+
+    from boundry.config import DesignConfig, RelaxConfig
+    from boundry.relaxer import Relaxer
+
+    _scan_relaxer = Relaxer(RelaxConfig(**relax_config_dict))
+
+    if design_config_dict is not None:
+        from boundry.designer import Designer
+
+        _scan_designer = Designer(DesignConfig(**design_config_dict))
+
+
+def _execute_scan_worker(task: ScanTask) -> ScanResult:
+    """Execute a single scan task in a worker process."""
+    try:
+        import contextlib
+
+        from boundry.interface_position_energetics import (
+            _compute_rosetta_dG,
+            mutate_to_alanine,
+            remove_residue,
+        )
+        from boundry.utils import suppress_stderr as _suppress_stderr
+
+        if task.scan_type == "alanine_scan":
+            modified_pdb = mutate_to_alanine(
+                task.pdb_string,
+                task.chain_id,
+                task.residue_number,
+                task.insertion_code,
+            )
+        else:
+            modified_pdb = remove_residue(
+                task.pdb_string,
+                task.chain_id,
+                task.residue_number,
+                task.insertion_code,
+            )
+
+        relax_sep = task.position_relax in ("both", "unbound")
+        relax_designer = _scan_designer if relax_sep else None
+
+        ctx = _suppress_stderr() if task.quiet else contextlib.nullcontext()
+        with ctx:
+            dG = _compute_rosetta_dG(
+                modified_pdb,
+                _scan_relaxer,
+                chain_pairs=task.chain_pairs,
+                distance_cutoff=task.distance_cutoff,
+                relax_separated=relax_sep or task.relax_separated,
+                designer=relax_designer,
+            )
+
+        ddG = dG - task.dG_wt
+
+        return ScanResult(
+            scan_type=task.scan_type,
+            chain_id=task.chain_id,
+            residue_number=task.residue_number,
+            insertion_code=task.insertion_code,
+            residue_name=task.residue_name,
+            dG=dG,
+            ddG=ddG,
+        )
+
+    except Exception as exc:
+        return ScanResult(
+            scan_type=task.scan_type,
+            chain_id=task.chain_id,
+            residue_number=task.residue_number,
+            insertion_code=task.insertion_code,
+            residue_name=task.residue_name,
+            error=f"{type(exc).__name__}: {exc}",
+        )
 
 
 # ------------------------------------------------------------------
