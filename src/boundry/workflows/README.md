@@ -109,7 +109,7 @@ steps:
 ### 2.2 User-Defined Variables
 
 Any top-level key that is not a reserved key (`workflow_version`, `input`,
-`output`, `seed`, `steps`) is treated as a user-defined variable. These
+`output`, `seed`, `workers`, `steps`) is treated as a user-defined variable. These
 are resolved identically to built-in references.
 
 ```yaml
@@ -497,7 +497,9 @@ Workflow `params`:
 - `sasa_probe_radius` (float, default `1.4`)
 - `per_position` (bool, default `false`)
 - `alanine_scan` (bool, default `false`)
-- `scan_chains` (list of chain IDs, optional)
+- `scan_chains`:
+  - `"H,L"` string, or
+  - list form like `["H", "L"]`
 - `position_relax` (`both` | `unbound` | `none`, default `none`)
 - `position_csv` (path, optional)
 - `max_scan_sites` (int, optional)

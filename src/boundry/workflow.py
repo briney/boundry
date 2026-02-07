@@ -1980,6 +1980,17 @@ class Workflow:
         if chain_pairs is not None:
             params["chain_pairs"] = chain_pairs
 
+        # Support scan_chains as "H,L" or ["H", "L"]
+        scan_chains = params.pop("scan_chains", None)
+        if isinstance(scan_chains, str):
+            scan_chains = [
+                c.strip()
+                for c in scan_chains.split(",")
+                if c.strip()
+            ]
+        if scan_chains is not None:
+            params["scan_chains"] = scan_chains
+
         interface_params = _extract_fields(
             params, InterfaceConfig
         )

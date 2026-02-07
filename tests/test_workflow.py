@@ -1048,6 +1048,50 @@ class TestRunAnalyzeInterface:
         assert config.chain_pairs == [("H", "A")]
 
     @patch("boundry.operations.analyze_interface")
+    def test_string_scan_chains(self, mock_op):
+        from boundry.operations import (
+            InterfaceAnalysisResult,
+            Structure,
+        )
+
+        struct = Structure(pdb_string="ATOM\nEND\n")
+        mock_op.return_value = InterfaceAnalysisResult()
+
+        Workflow._run_analyze_interface(
+            struct,
+            {
+                "scan_chains": "H,L",
+                "calculate_binding_energy": False,
+            },
+        )
+
+        _, kwargs = mock_op.call_args
+        config = kwargs["config"]
+        assert config.scan_chains == ["H", "L"]
+
+    @patch("boundry.operations.analyze_interface")
+    def test_list_scan_chains(self, mock_op):
+        from boundry.operations import (
+            InterfaceAnalysisResult,
+            Structure,
+        )
+
+        struct = Structure(pdb_string="ATOM\nEND\n")
+        mock_op.return_value = InterfaceAnalysisResult()
+
+        Workflow._run_analyze_interface(
+            struct,
+            {
+                "scan_chains": ["H", "L"],
+                "calculate_binding_energy": False,
+            },
+        )
+
+        _, kwargs = mock_op.call_args
+        config = kwargs["config"]
+        assert config.scan_chains == ["H", "L"]
+
+    @patch("boundry.operations.analyze_interface")
     def test_returns_original_structure(self, mock_op):
         from boundry.operations import (
             InterfaceAnalysisResult,
