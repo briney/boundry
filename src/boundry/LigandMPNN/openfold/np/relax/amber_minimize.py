@@ -32,15 +32,15 @@ from openfold.np import (
 from openfold.np.relax import cleanup, utils
 
 try:
-    from simtk import openmm, unit
-    from simtk.openmm import app as openmm_app
-    from simtk.openmm.app.internal.pdbstructure import PdbStructure
-except ImportError:
-    # OpenMM 8.0+ moved to openmm namespace
+    # OpenMM 8.0+ uses the openmm namespace directly
     import openmm
     from openmm import app as openmm_app
     from openmm import unit
     from openmm.app.internal.pdbstructure import PdbStructure
+except ImportError:
+    from simtk import openmm, unit
+    from simtk.openmm import app as openmm_app
+    from simtk.openmm.app.internal.pdbstructure import PdbStructure
 
 ENERGY = unit.kilocalories_per_mole
 LENGTH = unit.angstroms

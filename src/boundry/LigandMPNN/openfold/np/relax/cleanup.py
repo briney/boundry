@@ -24,12 +24,12 @@ import io
 import pdbfixer
 
 try:
-    from simtk.openmm import app
-    from simtk.openmm.app import element
-except ImportError:
-    # OpenMM 8.0+ moved to openmm namespace
+    # OpenMM 8.0+ uses the openmm namespace directly
     from openmm import app
     from openmm.app import element
+except ImportError:
+    from simtk.openmm import app
+    from simtk.openmm.app import element
 
 
 def fix_pdb(pdbfile, alterations_info):

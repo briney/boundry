@@ -12,6 +12,8 @@ from boundry._parallel import (
     StepTask,
     _execute_branch_worker,
     _execute_step_worker,
+    _init_scan_worker,
+    _suppress_worker_warnings,
     get_pool,
 )
 
@@ -242,3 +244,71 @@ class TestGetPool:
             assert ctx.get_start_method() == "spawn"
         finally:
             pool.shutdown(wait=False)
+
+
+# ------------------------------------------------------------------
+# Worker warning suppression
+# ------------------------------------------------------------------
+
+
+class TestSuppressWorkerWarnings:
+    """Tests for _suppress_worker_warnings."""
+
+    def test_sets_warning_filters(self):
+        import warnings
+
+        original_filters = warnings.filters[:]
+        try:
+            _suppress_worker_warnings()
+            # Should have added at least 2 filters
+            assert len(warnings.filters) >= len(original_filters) + 2
+        finally:
+            warnings.filters[:] = original_filters
+
+    @patch("boundry._parallel._suppress_worker_warnings")
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_branch_worker_calls_suppress(self, mock_op, mock_suppress):
+        from boundry.operations import Structure
+
+        mock_op.return_value = Structure(
+            pdb_string="ATOM\nEND\n", metadata={}
+        )
+        task = BranchTask(
+            candidate_pdb_string="ATOM\nEND\n",
+            candidate_metadata={},
+            candidate_source_path=None,
+            steps=[("minimize", {})],
+            branch_seed=None,
+        )
+        _execute_branch_worker(task)
+        mock_suppress.assert_called_once()
+
+    @patch("boundry._parallel._suppress_worker_warnings")
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_step_worker_calls_suppress(self, mock_op, mock_suppress):
+        from boundry.operations import Structure
+
+        mock_op.return_value = Structure(
+            pdb_string="ATOM\nEND\n", metadata={}
+        )
+        task = StepTask(
+            pdb_string="ATOM\nEND\n",
+            metadata={},
+            source_path=None,
+            operation="minimize",
+            params={},
+        )
+        _execute_step_worker(task)
+        mock_suppress.assert_called_once()
+
+    @patch("boundry._parallel._suppress_worker_warnings")
+    @patch("boundry.relaxer.Relaxer")
+    @patch("boundry.config.RelaxConfig")
+    def test_init_scan_worker_calls_suppress(
+        self, mock_config, mock_relaxer, mock_suppress
+    ):
+        _init_scan_worker(
+            relax_config_dict={},
+            design_config_dict=None,
+        )
+        mock_suppress.assert_called_once()

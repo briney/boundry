@@ -86,6 +86,32 @@ class StepResult:
 
 
 # ------------------------------------------------------------------
+# Worker warning suppression
+# ------------------------------------------------------------------
+
+
+def _suppress_worker_warnings() -> None:
+    """Suppress noisy dependency warnings in spawned worker processes.
+
+    Worker processes start fresh without the warning filters configured
+    by ``cli._setup_logging``.  This applies the same filters so that
+    dependency warnings (simtk deprecation, torch tensor indexing, etc.)
+    are silenced in workers too.
+    """
+    import warnings
+
+    warnings.filterwarnings(
+        "ignore",
+        module=r"(openmm|pdbfixer|Bio|freesasa|torch|absl|openfold|simtk)",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*simtk.*",
+        category=DeprecationWarning,
+    )
+
+
+# ------------------------------------------------------------------
 # Worker functions (top-level, pickle-safe targets)
 # ------------------------------------------------------------------
 
@@ -98,6 +124,7 @@ def _execute_branch_worker(task: BranchTask) -> BranchResult:
     correctly with the ``spawn`` start method.
     """
     os.environ["BOUNDRY_IN_WORKER_PROCESS"] = "1"
+    _suppress_worker_warnings()
     try:
         from boundry.operations import Structure
         from boundry.workflow import Workflow, _compose_seed
@@ -169,6 +196,7 @@ def _execute_step_worker(task: StepTask) -> StepResult:
     step-level parallelism (multi-member populations).
     """
     os.environ["BOUNDRY_IN_WORKER_PROCESS"] = "1"
+    _suppress_worker_warnings()
     try:
         from boundry.operations import Structure
         from boundry.workflow import Workflow
@@ -246,6 +274,7 @@ def _init_scan_worker(
     """
     global _scan_relaxer, _scan_designer  # noqa: PLW0603
     os.environ["BOUNDRY_IN_WORKER_PROCESS"] = "1"
+    _suppress_worker_warnings()
 
     from boundry.config import DesignConfig, RelaxConfig
     from boundry.relaxer import Relaxer
