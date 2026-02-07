@@ -7,11 +7,9 @@
 #   boundry run simple_relax.yaml
 
 input: input.pdb
-output: relaxed.pdb
 
 steps:
   - operation: idealize
-    output: idealized.pdb
 
   - operation: relax
     params:

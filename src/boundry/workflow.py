@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -41,31 +42,286 @@ def _extract_fields(params: Dict[str, Any], cls: type) -> Dict[str, Any]:
     return {k: params.pop(k) for k in list(params) if k in fields}
 
 
-_STRUCTURE_EXTENSIONS = frozenset({".pdb", ".cif", ".mmcif"})
-
 _KNOWN_KEYS = frozenset(
-    {"workflow_version", "input", "output", "seed", "steps"}
+    {"workflow_version", "input", "project_path", "seed", "steps"}
 )
 
 
-def _is_directory_output(path_template: str) -> bool:
-    """A path is a directory if it ends with '/' or has no recognized file extension."""
-    if path_template.endswith("/"):
-        return True
-    stripped = path_template.replace("{", "").replace("}", "")
-    return Path(stripped).suffix.lower() not in _STRUCTURE_EXTENSIONS
+# ------------------------------------------------------------------
+# Output path context
+# ------------------------------------------------------------------
 
 
-_DEFAULT_STEM: Dict[str, str] = {
-    "idealize": "idealized",
-    "minimize": "minimized",
-    "repack": "repacked",
-    "relax": "relaxed",
-    "mpnn": "designed_mpnn",
-    "design": "designed",
-    "renumber": "renumbered",
-    "analyze_interface": "interface_analysis",
+@dataclass(frozen=True)
+class OutputPathContext:
+    """Tracks the current position in the workflow output directory tree.
+
+    Immutable — each method returns a new child context with an
+    additional path segment appended.
+    """
+
+    base_path: Path
+    segments: tuple[str, ...] = ()
+
+    def child(self, segment: str) -> "OutputPathContext":
+        """Create a child context with an additional path segment."""
+        return OutputPathContext(
+            base_path=self.base_path,
+            segments=self.segments + (segment,),
+        )
+
+    def step_dir(self, index: int, name: str) -> "OutputPathContext":
+        """Create a child context for a workflow step or block."""
+        return self.child(f"{index}.{name}")
+
+    def cycle_dir(self, cycle: int) -> "OutputPathContext":
+        """Create a child context for an iterate cycle (1-indexed)."""
+        return self.child(f"cycle_{cycle}")
+
+    def round_dir(self, round_num: int) -> "OutputPathContext":
+        """Create a child context for a beam round (1-indexed)."""
+        return self.child(f"round_{round_num}")
+
+    def rank_dir(self, rank: int) -> "OutputPathContext":
+        """Create a child context for a selected beam candidate."""
+        return self.child(f"rank_{rank}")
+
+    def others_rank_dir(self, rank: int) -> "OutputPathContext":
+        """Create a child context for a non-selected beam candidate."""
+        return self.child("others").child(f"rank_{rank}")
+
+    def resolve(self) -> Path:
+        """Resolve to a full filesystem path."""
+        return self.base_path.joinpath(*self.segments)
+
+
+# ------------------------------------------------------------------
+# Operation output spec — what each operation natively writes
+# ------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _OperationOutputSpec:
+    """Specification for what an operation writes to disk."""
+
+    writes_pdb: bool
+    pdb_stem: str  # e.g. "idealized", "relaxed" (unused if writes_pdb=False)
+    native_writers: tuple[str, ...]  # keys into _NATIVE_WRITERS
+
+
+_OPERATION_OUTPUT_SPECS: Dict[str, _OperationOutputSpec] = {
+    "idealize": _OperationOutputSpec(
+        True, "idealized", ("metrics",)
+    ),
+    "minimize": _OperationOutputSpec(
+        True, "minimized", ("metrics",)
+    ),
+    "repack": _OperationOutputSpec(
+        True, "repacked", ("metrics",)
+    ),
+    "mpnn": _OperationOutputSpec(
+        True, "designed_mpnn", ("metrics",)
+    ),
+    "relax": _OperationOutputSpec(
+        True, "relaxed", ("metrics", "energy")
+    ),
+    "design": _OperationOutputSpec(
+        True, "designed", ("metrics", "energy")
+    ),
+    "renumber": _OperationOutputSpec(
+        True, "renumbered", ("metrics",)
+    ),
+    "select_positions": _OperationOutputSpec(
+        False, "", ("metrics", "selected_positions")
+    ),
+    "analyze_interface": _OperationOutputSpec(
+        False,
+        "",
+        ("metrics", "interface", "per_position_csv", "alanine_scan_csv"),
+    ),
 }
+
+
+# Which top-level metadata keys are native to each operation.
+# Only these are included in that operation's metrics.json.
+_NATIVE_METRIC_KEYS: Dict[str, tuple[str, ...]] = {
+    "idealize": ("chain_gaps",),
+    "minimize": ("initial_energy", "final_energy", "rmsd"),
+    "repack": ("ligandmpnn_loss",),
+    "mpnn": ("ligandmpnn_loss",),
+    "relax": ("final_energy",),
+    "design": ("final_energy", "ligandmpnn_loss"),
+    "renumber": (),
+    "select_positions": (
+        "selected_positions",
+        "selection_source",
+        "selection_metric",
+        "selection_threshold",
+        "selection_direction",
+        "selection_mode",
+    ),
+    "analyze_interface": (
+        "dG",
+        "complex_energy",
+        "buried_sasa",
+        "sc_score",
+        "n_interface_residues",
+    ),
+}
+
+
+# ------------------------------------------------------------------
+# Native auxiliary file writers
+# ------------------------------------------------------------------
+
+
+def _write_native_metrics(
+    result_metadata: Dict[str, Any],
+    dir_path: Path,
+    operation: str,
+) -> None:
+    """Write operation-specific metrics to metrics.json."""
+    native_keys = _NATIVE_METRIC_KEYS.get(operation, ())
+    metrics = {}
+    for key in native_keys:
+        if key in result_metadata:
+            value = result_metadata[key]
+            if isinstance(value, (int, float)) and not isinstance(
+                value, bool
+            ):
+                metrics[key] = value
+            elif isinstance(value, str):
+                metrics[key] = value
+    if metrics:
+        json_path = dir_path / "metrics.json"
+        with open(json_path, "w") as f:
+            json.dump(metrics, f, indent=2, default=str)
+        logger.info(f"  Wrote metrics: {json_path}")
+
+
+def _write_energy_json(
+    result_metadata: Dict[str, Any],
+    dir_path: Path,
+    operation: str,
+) -> None:
+    """Write energy breakdown from relax/design operations."""
+    energy = result_metadata.get("energy_breakdown")
+    if energy:
+        json_path = dir_path / "energy.json"
+        with open(json_path, "w") as f:
+            json.dump(energy, f, indent=2, default=str)
+        logger.info(f"  Wrote energy breakdown: {json_path}")
+
+
+def _write_selected_positions_json(
+    result_metadata: Dict[str, Any],
+    dir_path: Path,
+    operation: str,
+) -> None:
+    """Write selected positions from select_positions operation."""
+    design_spec = result_metadata.get("design_spec")
+    if design_spec is None:
+        return
+    data: Dict[str, Any] = {
+        "selected_count": result_metadata.get(
+            "selected_positions", 0
+        ),
+        "selection_criteria": {
+            "source": result_metadata.get("selection_source"),
+            "metric": result_metadata.get("selection_metric"),
+            "threshold": result_metadata.get("selection_threshold"),
+            "direction": result_metadata.get("selection_direction"),
+            "mode": result_metadata.get("selection_mode"),
+        },
+        "positions": [
+            {
+                "chain": spec.chain,
+                "resnum": spec.resnum,
+                "icode": spec.icode,
+            }
+            for spec in design_spec.residue_specs.values()
+        ],
+    }
+    json_path = dir_path / "selected_positions.json"
+    with open(json_path, "w") as f:
+        json.dump(data, f, indent=2, default=str)
+    logger.info(f"  Wrote selected positions: {json_path}")
+
+
+def _write_interface_json(
+    result_metadata: Dict[str, Any],
+    dir_path: Path,
+    operation: str,
+) -> None:
+    """Write interface analysis summary metrics."""
+    keys = (
+        "dG",
+        "complex_energy",
+        "buried_sasa",
+        "sc_score",
+        "n_interface_residues",
+    )
+    data = {}
+    for key in keys:
+        if key in result_metadata:
+            data[key] = result_metadata[key]
+    if data:
+        json_path = dir_path / "interface.json"
+        with open(json_path, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        logger.info(f"  Wrote interface metrics: {json_path}")
+
+
+def _write_per_position_csv(
+    result_metadata: Dict[str, Any],
+    dir_path: Path,
+    operation: str,
+) -> None:
+    """Write per-position energetics CSV."""
+    per_position = result_metadata.get("per_position")
+    if per_position is not None:
+        from boundry.interface_position_energetics import (
+            write_position_csv,
+        )
+
+        csv_path = dir_path / "per_position.csv"
+        write_position_csv(per_position, csv_path)
+        logger.info(f"  Wrote per-position CSV: {csv_path}")
+
+
+def _write_alanine_scan_csv(
+    result_metadata: Dict[str, Any],
+    dir_path: Path,
+    operation: str,
+) -> None:
+    """Write alanine scan CSV."""
+    alanine_scan = result_metadata.get("alanine_scan")
+    if alanine_scan is not None:
+        from boundry.interface_position_energetics import (
+            write_position_csv,
+        )
+
+        csv_path = dir_path / "alanine_scan.csv"
+        write_position_csv(alanine_scan, csv_path)
+        logger.info(f"  Wrote alanine scan CSV: {csv_path}")
+
+
+# Writer function signature: (result_metadata, dir_path, operation) -> None
+_NativeWriter = Callable[[Dict[str, Any], Path, str], None]
+
+_NATIVE_WRITERS: Dict[str, _NativeWriter] = {
+    "metrics": _write_native_metrics,
+    "energy": _write_energy_json,
+    "selected_positions": _write_selected_positions_json,
+    "interface": _write_interface_json,
+    "per_position_csv": _write_per_position_csv,
+    "alanine_scan_csv": _write_alanine_scan_csv,
+}
+
+
+# ------------------------------------------------------------------
+# YAML parsing
+# ------------------------------------------------------------------
 
 
 ParserFn = Callable[[Dict[str, Any], str], WorkflowStepOrBlock]
@@ -157,10 +413,12 @@ def _parse_optional_str(
 
 
 @_register_parser("operation")
-def _parse_operation(step_data: Dict[str, Any], label: str) -> WorkflowStep:
+def _parse_operation(
+    step_data: Dict[str, Any], label: str
+) -> WorkflowStep:
     _validate_unknown_keys(
         step_data,
-        {"operation", "params", "output"},
+        {"operation", "params"},
         label,
     )
 
@@ -178,16 +436,13 @@ def _parse_operation(step_data: Dict[str, Any], label: str) -> WorkflowStep:
             f"got {type(params).__name__}"
         )
 
-    output = _parse_optional_str(
-        step_data.get("output"),
-        label,
-        "output",
-    )
-    return WorkflowStep(operation=operation, params=params, output=output)
+    return WorkflowStep(operation=operation, params=params)
 
 
 @_register_parser("iterate")
-def _parse_iterate(step_data: Dict[str, Any], label: str) -> IterateBlock:
+def _parse_iterate(
+    step_data: Dict[str, Any], label: str
+) -> IterateBlock:
     _validate_unknown_keys(step_data, {"iterate"}, label)
     block_data = step_data["iterate"]
     if not isinstance(block_data, dict):
@@ -198,7 +453,7 @@ def _parse_iterate(step_data: Dict[str, Any], label: str) -> IterateBlock:
 
     _validate_unknown_keys(
         block_data,
-        {"steps", "n", "max_n", "until", "output"},
+        {"steps", "n", "max_n", "until"},
         f"{label}.iterate",
     )
 
@@ -222,30 +477,28 @@ def _parse_iterate(step_data: Dict[str, Any], label: str) -> IterateBlock:
         f"{label}.iterate",
         "until",
     )
-    output = _parse_optional_str(
-        block_data.get("output"),
-        f"{label}.iterate",
-        "output",
-    )
 
     if until is None and n < 1:
         raise WorkflowError(f"{label}.iterate: n must be >= 1")
     if until is not None:
         parse_condition(until)
         if max_n < 1:
-            raise WorkflowError(f"{label}.iterate: max_n must be >= 1")
+            raise WorkflowError(
+                f"{label}.iterate: max_n must be >= 1"
+            )
 
     return IterateBlock(
         steps=steps,
         n=n,
         max_n=max_n,
         until=until,
-        output=output,
     )
 
 
 @_register_parser("beam")
-def _parse_beam(step_data: Dict[str, Any], label: str) -> BeamBlock:
+def _parse_beam(
+    step_data: Dict[str, Any], label: str
+) -> BeamBlock:
     _validate_unknown_keys(step_data, {"beam"}, label)
     block_data = step_data["beam"]
     if not isinstance(block_data, dict):
@@ -264,7 +517,6 @@ def _parse_beam(step_data: Dict[str, Any], label: str) -> BeamBlock:
             "direction",
             "until",
             "expand",
-            "output",
         },
         f"{label}.beam",
     )
@@ -294,7 +546,9 @@ def _parse_beam(step_data: Dict[str, Any], label: str) -> BeamBlock:
         "metric",
     )
     if metric is None:
-        raise WorkflowError(f"{label}.beam: metric must not be null")
+        raise WorkflowError(
+            f"{label}.beam: metric must not be null"
+        )
     direction = block_data.get("direction", "min")
     if direction not in {"min", "max"}:
         raise WorkflowError(
@@ -308,11 +562,6 @@ def _parse_beam(step_data: Dict[str, Any], label: str) -> BeamBlock:
     )
     if until is not None:
         parse_condition(until)
-    output = _parse_optional_str(
-        block_data.get("output"),
-        f"{label}.beam",
-        "output",
-    )
 
     return BeamBlock(
         steps=steps,
@@ -322,7 +571,6 @@ def _parse_beam(step_data: Dict[str, Any], label: str) -> BeamBlock:
         direction=direction,
         until=until,
         expand=expand,
-        output=output,
     )
 
 
@@ -335,6 +583,11 @@ def _ensure_resolvers() -> None:
             "env",
             lambda key, default="": os.environ.get(key, default),
         )
+
+
+# ------------------------------------------------------------------
+# Operation dispatch registry
+# ------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -357,7 +610,9 @@ class _PipelineSpec:
     needs_weights: bool = True
 
 
-_OPERATION_REGISTRY: Dict[str, Optional[Union[_SimpleSpec, _PipelineSpec]]] = {
+_OPERATION_REGISTRY: Dict[
+    str, Optional[Union[_SimpleSpec, _PipelineSpec]]
+] = {
     "idealize": _SimpleSpec(
         "idealize", "IdealizeConfig", {"enabled": True}, (), False
     ),
@@ -396,10 +651,32 @@ _OPERATION_REGISTRY: Dict[str, Optional[Union[_SimpleSpec, _PipelineSpec]]] = {
 VALID_OPERATIONS = frozenset(_OPERATION_REGISTRY)
 
 
+# ------------------------------------------------------------------
+# Execution context and snapshot for beam deferred-write
+# ------------------------------------------------------------------
+
+
 @dataclass
 class _ExecutionContext:
     population: List["Structure"]
     last_operation: Optional[str] = None
+    output_context: Optional[OutputPathContext] = None
+
+
+@dataclass
+class _StepSnapshot:
+    """Captures a single step's result for deferred writing (beam)."""
+
+    operation: str
+    step_index: int
+    result_metadata: Dict[str, Any]  # pre-merge metadata from this step
+    pdb_string: str
+    structure: "Structure"  # the merged structure after this step
+
+
+# ------------------------------------------------------------------
+# Workflow class
+# ------------------------------------------------------------------
 
 
 class Workflow:
@@ -408,10 +685,8 @@ class Workflow:
     def __init__(
         self,
         config: WorkflowConfig,
-        require_output: bool = True,
     ):
         self.config = config
-        self.require_output = require_output
         self.last_population: List["Structure"] = []
         self._validate()
 
@@ -421,7 +696,6 @@ class Workflow:
         path: Union[str, Path],
         seed: Optional[int] = None,
         overrides: Optional[List[str]] = None,
-        require_output: bool = True,
     ) -> "Workflow":
         """Load a workflow from a YAML file.
 
@@ -433,15 +707,11 @@ class Workflow:
             Workflow-level seed for reproducibility. Overrides YAML
             ``seed`` when both are present.
         overrides : list of str, optional
-            Dotlist-style overrides (e.g. ``["output=results/",
+            Dotlist-style overrides (e.g. ``["project_path=results/",
             "seed=42"]``).  Applied after YAML loading but before
             variable resolution.
-        require_output : bool, optional
-            Require at least one workflow output path (top-level or
-            step/block output) when running. Set to ``False`` for
-            in-memory workflow usage.
         """
-        from omegaconf import OmegaConf, DictConfig
+        from omegaconf import DictConfig, OmegaConf
         from omegaconf.errors import OmegaConfBaseException
 
         _ensure_resolvers()
@@ -494,9 +764,30 @@ class Workflow:
             )
 
         if "input" not in data:
-            raise WorkflowError("Workflow must specify 'input' field")
+            raise WorkflowError(
+                "Workflow must specify 'input' field"
+            )
         if "steps" not in data:
-            raise WorkflowError("Workflow must specify 'steps' field")
+            raise WorkflowError(
+                "Workflow must specify 'steps' field"
+            )
+
+        # Deprecation warning for old 'output' key
+        if "output" in data:
+            import warnings
+
+            warnings.warn(
+                "The top-level 'output' key is deprecated. "
+                "Use 'project_path' instead. Per-step output "
+                "paths are no longer supported.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            # Treat as project_path if project_path not already set
+            if "project_path" not in data:
+                data["project_path"] = data.pop("output")
+            else:
+                data.pop("output")
 
         # Validate user-defined keys (non-known keys must be valid
         # identifiers with scalar values).
@@ -528,14 +819,18 @@ class Workflow:
 
         input_path = data["input"]
         if not isinstance(input_path, str):
-            raise WorkflowError("Workflow 'input' must be a string")
+            raise WorkflowError(
+                "Workflow 'input' must be a string"
+            )
 
-        output_path = _parse_optional_str(
-            data.get("output"), "Workflow", "output"
+        project_path = _parse_optional_str(
+            data.get("project_path"), "Workflow", "project_path"
         )
         version = data.get("workflow_version", 1)
         if isinstance(version, bool) or not isinstance(version, int):
-            raise WorkflowError("workflow_version must be an integer")
+            raise WorkflowError(
+                "workflow_version must be an integer"
+            )
 
         # Parse seed: CLI argument overrides YAML value
         yaml_seed = data.get("seed")
@@ -552,23 +847,26 @@ class Workflow:
         steps = _parse_steps(data["steps"])
         config = WorkflowConfig(
             input=input_path,
-            output=output_path,
+            project_path=project_path,
             seed=effective_seed,
             workflow_version=version,
             steps=steps,
             vars=user_vars,
         )
-        return cls(config, require_output=require_output)
+        return cls(config)
 
     def _validate(self) -> None:
         """Validate workflow configuration recursively."""
         if self.config.workflow_version != 1:
             raise WorkflowError(
-                f"Unsupported workflow_version={self.config.workflow_version}. "
+                f"Unsupported workflow_version="
+                f"{self.config.workflow_version}. "
                 "Only version 1 is supported."
             )
         if not self.config.steps:
-            raise WorkflowError("Workflow must contain at least one step")
+            raise WorkflowError(
+                "Workflow must contain at least one step"
+            )
         self._validate_steps(self.config.steps, prefix="")
 
     def _validate_steps(
@@ -588,22 +886,38 @@ class Workflow:
                     f"'{type(item).__name__}'"
                 )
 
-    def _validate_step(self, step: WorkflowStep, label: str) -> None:
+    def _validate_step(
+        self, step: WorkflowStep, label: str
+    ) -> None:
         if step.operation not in VALID_OPERATIONS:
             raise WorkflowError(
                 f"{label}: unknown operation '{step.operation}'. "
                 f"Valid: {', '.join(sorted(VALID_OPERATIONS))}"
             )
 
-    def _validate_iterate(self, block: IterateBlock, label: str) -> None:
+    def _validate_iterate(
+        self, block: IterateBlock, label: str
+    ) -> None:
         if block.until is None and block.n < 1:
-            raise WorkflowError(f"{label}: iterate n must be >= 1")
+            raise WorkflowError(
+                f"{label}: iterate n must be >= 1"
+            )
         if block.until is not None and block.max_n < 1:
-            raise WorkflowError(f"{label}: iterate max_n must be >= 1")
-        self._validate_steps(block.steps, prefix=f"{label}.iterate.")
+            raise WorkflowError(
+                f"{label}: iterate max_n must be >= 1"
+            )
+        self._validate_steps(
+            block.steps, prefix=f"{label}.iterate."
+        )
 
-    def _validate_beam(self, block: BeamBlock, label: str) -> None:
-        if block.width < 1 or block.rounds < 1 or block.expand < 1:
+    def _validate_beam(
+        self, block: BeamBlock, label: str
+    ) -> None:
+        if (
+            block.width < 1
+            or block.rounds < 1
+            or block.expand < 1
+        ):
             raise WorkflowError(
                 f"{label}: beam width/rounds/expand must be >= 1"
             )
@@ -611,7 +925,13 @@ class Workflow:
             raise WorkflowError(
                 f"{label}: beam direction must be 'min' or 'max'"
             )
-        self._validate_steps(block.steps, prefix=f"{label}.beam.")
+        self._validate_steps(
+            block.steps, prefix=f"{label}.beam."
+        )
+
+    # ------------------------------------------------------------------
+    # Execution
+    # ------------------------------------------------------------------
 
     def run(self) -> "Structure":
         """Execute workflow and return the best final structure."""
@@ -619,75 +939,63 @@ class Workflow:
         return population[0]
 
     def run_population(self) -> List["Structure"]:
-        """Execute workflow and return the full final candidate population."""
+        """Execute workflow and return the full final candidate
+        population."""
         from boundry.operations import Structure
-
-        if self.require_output and not self._has_any_output():
-            raise WorkflowError(
-                "Workflow output is required by default. Set top-level "
-                "'output' or a step/block 'output', or construct "
-                "Workflow(..., require_output=False) for in-memory runs."
-            )
 
         input_path = Path(self.config.input)
         if not input_path.exists():
-            raise WorkflowError(f"Input file not found: {input_path}")
+            raise WorkflowError(
+                f"Input file not found: {input_path}"
+            )
 
-        current = _ExecutionContext(population=[Structure.from_file(input_path)])
+        # Resolve project_path (defaults to current working directory)
+        project_path = Path(self.config.project_path or ".")
+        project_path.mkdir(parents=True, exist_ok=True)
+        output_ctx = OutputPathContext(base_path=project_path)
+
+        current = _ExecutionContext(
+            population=[Structure.from_file(input_path)],
+            output_context=output_ctx,
+        )
         logger.info(f"Loaded input: {input_path}")
+        logger.info(f"Project path: {project_path.resolve()}")
 
         total = len(self.config.steps)
-        for i, item in enumerate(self.config.steps, 1):
-            logger.info(f"Step {i}/{total}: {self._describe_item(item)}")
-            current = self._execute_item(item, current, seed_base=self.config.seed)
-            if isinstance(item, WorkflowStep) and item.output is not None:
-                self._write_population(
-                    current.population, item.output, operation=item.operation
-                )
-
-        if self.config.output is not None:
-            self._write_population(
-                current.population,
-                self.config.output,
-                operation=current.last_operation,
+        for i, item in enumerate(self.config.steps):
+            logger.info(
+                f"Step {i + 1}/{total}: "
+                f"{self._describe_item(item)}"
+            )
+            current = self._execute_item(
+                item,
+                current,
+                seed_base=self.config.seed,
+                step_index=i,
             )
 
         self.last_population = list(current.population)
         return list(current.population)
-
-    def _has_any_output(self) -> bool:
-        if self.config.output is not None:
-            return True
-        return self._steps_have_output(self.config.steps)
-
-    @classmethod
-    def _steps_have_output(
-        cls, steps: List[WorkflowStepOrBlock]
-    ) -> bool:
-        for item in steps:
-            if isinstance(item, WorkflowStep):
-                if item.output is not None:
-                    return True
-                continue
-            if isinstance(item, (IterateBlock, BeamBlock)):
-                if item.output is not None:
-                    return True
-                if cls._steps_have_output(item.steps):
-                    return True
-        return False
 
     def _execute_item(
         self,
         item: WorkflowStepOrBlock,
         context: _ExecutionContext,
         seed_base: Optional[int],
+        step_index: int = 0,
     ) -> _ExecutionContext:
         if isinstance(item, WorkflowStep):
-            return self._execute_step(item, context, seed_base)
+            return self._execute_step(
+                item, context, seed_base, step_index
+            )
         if isinstance(item, IterateBlock):
-            return self._execute_iterate(item, context, seed_base)
+            return self._execute_iterate(
+                item, context, seed_base, step_index
+            )
         if isinstance(item, BeamBlock):
-            return self._execute_beam(item, context, seed_base)
+            return self._execute_beam(
+                item, context, seed_base, step_index
+            )
         raise WorkflowError(
             f"Unsupported node type '{type(item).__name__}'"
         )
@@ -697,11 +1005,339 @@ class Workflow:
         step: WorkflowStep,
         context: _ExecutionContext,
         seed_base: Optional[int],
+        step_index: int,
     ) -> _ExecutionContext:
         from boundry.operations import Structure
 
         if step.operation not in _OPERATION_REGISTRY:
-            raise WorkflowError(f"Unknown operation '{step.operation}'")
+            raise WorkflowError(
+                f"Unknown operation '{step.operation}'"
+            )
+
+        # Build output context for this step
+        step_ctx = (
+            context.output_context.step_dir(
+                step_index, step.operation
+            )
+            if context.output_context is not None
+            else None
+        )
+
+        updated: List[Structure] = []
+        for idx, structure in enumerate(context.population):
+            params = self._with_seed(
+                step.operation,
+                dict(step.params),
+                seed_base,
+                idx,
+            )
+            result = self._run_operation(
+                step.operation, structure, params
+            )
+
+            # Write step output using pre-merge metadata
+            if step_ctx is not None:
+                if len(context.population) > 1:
+                    write_ctx = step_ctx.rank_dir(idx + 1)
+                else:
+                    write_ctx = step_ctx
+                self._write_step_output(
+                    result, write_ctx, step.operation
+                )
+
+            merged = merge_metadata(
+                structure.metadata,
+                result.metadata,
+                operation=step.operation,
+            )
+            updated.append(
+                Structure(
+                    pdb_string=result.pdb_string,
+                    metadata=merged,
+                    source_path=(
+                        result.source_path or structure.source_path
+                    ),
+                )
+            )
+        return _ExecutionContext(
+            population=updated,
+            last_operation=step.operation,
+            output_context=context.output_context,
+        )
+
+    def _execute_iterate(
+        self,
+        block: IterateBlock,
+        context: _ExecutionContext,
+        seed_base: Optional[int],
+        step_index: int,
+    ) -> _ExecutionContext:
+        # Build iterate block output directory context
+        block_ctx = (
+            context.output_context.step_dir(step_index, "iterate")
+            if context.output_context is not None
+            else None
+        )
+
+        current = context
+        previous_metadata: Optional[Dict[str, Any]] = None
+        max_iters = (
+            block.max_n if block.until is not None else block.n
+        )
+        converged = False
+
+        for cycle in range(1, max_iters + 1):
+            # Create cycle context
+            cycle_ctx = (
+                block_ctx.cycle_dir(cycle)
+                if block_ctx is not None
+                else None
+            )
+
+            cycle_seed = _compose_seed(seed_base, cycle)
+            inner_seed = (
+                cycle_seed if seed_base is not None else None
+            )
+
+            # Update context for inner steps to use the cycle path
+            current = _ExecutionContext(
+                population=current.population,
+                last_operation=current.last_operation,
+                output_context=cycle_ctx,
+            )
+
+            for inner_idx, inner in enumerate(block.steps):
+                current = self._execute_item(
+                    inner,
+                    current,
+                    inner_seed,
+                    step_index=inner_idx,
+                )
+
+            if block.until is not None:
+                converged, previous_metadata = (
+                    self._check_convergence(
+                        block.until,
+                        current.population[0].metadata,
+                        previous_metadata,
+                        cycle,
+                        "Iterate",
+                    )
+                )
+                if converged:
+                    logger.info(
+                        f"Iterate block converged at cycle {cycle}"
+                    )
+                    break
+
+        if block.until is not None and not converged:
+            logger.warning(
+                f"Iterate block reached max_n={block.max_n} "
+                "without meeting convergence condition"
+            )
+
+        # Restore parent output context
+        return _ExecutionContext(
+            population=current.population,
+            last_operation=current.last_operation,
+            output_context=context.output_context,
+        )
+
+    def _execute_beam(
+        self,
+        block: BeamBlock,
+        context: _ExecutionContext,
+        seed_base: Optional[int],
+        step_index: int,
+    ) -> _ExecutionContext:
+        # Build beam block output directory context
+        block_ctx = (
+            context.output_context.step_dir(step_index, "beam")
+            if context.output_context is not None
+            else None
+        )
+
+        population = list(context.population)
+        previous_best_metadata: Optional[Dict[str, Any]] = None
+
+        for round_num in range(1, block.rounds + 1):
+            if not population:
+                raise WorkflowError("Beam population is empty")
+
+            round_ctx = (
+                block_ctx.round_dir(round_num)
+                if block_ctx is not None
+                else None
+            )
+
+            expand_per = max(
+                block.expand,
+                _ceil_div(block.width, len(population)),
+            )
+
+            # Phase 1: Execute all branches without writing,
+            # collecting snapshots
+            expanded: List[
+                tuple["Structure", List[_StepSnapshot]]
+            ] = []
+
+            for cand_idx, candidate in enumerate(population, 1):
+                for exp_idx in range(expand_per):
+                    branch_seed = _compose_seed(
+                        seed_base,
+                        (round_num * 10000)
+                        + (cand_idx * 100)
+                        + exp_idx,
+                    )
+                    snapshots: List[_StepSnapshot] = []
+                    branch = _ExecutionContext(
+                        population=[_clone_structure(candidate)],
+                        output_context=None,  # suppress writing
+                    )
+                    for inner_idx, inner in enumerate(
+                        block.steps
+                    ):
+                        branch = self._execute_item_with_snapshots(
+                            inner,
+                            branch,
+                            branch_seed,
+                            step_index=inner_idx,
+                            snapshots=snapshots,
+                        )
+                    for struct in branch.population:
+                        expanded.append((struct, snapshots))
+
+            # Score candidates
+            scored: List[
+                tuple[
+                    float,
+                    "Structure",
+                    List[_StepSnapshot],
+                ]
+            ] = []
+            for candidate, snaps in expanded:
+                metric_value = extract_numeric_metric(
+                    candidate.metadata,
+                    block.metric,
+                )
+                if metric_value is None:
+                    logger.warning(
+                        f"Dropping beam candidate missing metric "
+                        f"'{block.metric}'"
+                    )
+                    continue
+                scored.append((metric_value, candidate, snaps))
+
+            if not scored:
+                raise WorkflowError(
+                    "Beam search could not score any candidates. "
+                    f"Missing metric '{block.metric}'."
+                )
+
+            scored.sort(
+                key=lambda item: item[0],
+                reverse=(block.direction == "max"),
+            )
+
+            best_metric = scored[0][0]
+            logger.info(
+                f"Beam round {round_num}/{block.rounds}: "
+                f"best {block.metric}={best_metric:.4f}"
+            )
+
+            # Phase 2: Write outputs to ranked directories
+            if round_ctx is not None:
+                for rank, (_, cand, snaps) in enumerate(
+                    scored, 1
+                ):
+                    is_selected = rank <= block.width
+                    if is_selected:
+                        rank_ctx = round_ctx.rank_dir(rank)
+                    else:
+                        rank_ctx = round_ctx.others_rank_dir(rank)
+
+                    for snap in snaps:
+                        snap_ctx = rank_ctx.step_dir(
+                            snap.step_index, snap.operation
+                        )
+                        self._write_step_output(
+                            snap.structure,
+                            snap_ctx,
+                            snap.operation,
+                            result_metadata=snap.result_metadata,
+                        )
+
+            population = [
+                cand for _, cand, _ in scored[: block.width]
+            ]
+
+            if block.until is not None:
+                done, previous_best_metadata = (
+                    self._check_convergence(
+                        block.until,
+                        population[0].metadata,
+                        previous_best_metadata,
+                        round_num,
+                        "Beam",
+                    )
+                )
+                if done:
+                    logger.info(
+                        f"Beam block converged at round "
+                        f"{round_num}"
+                    )
+                    break
+
+        # Restore parent output context
+        return _ExecutionContext(
+            population=population,
+            output_context=context.output_context,
+        )
+
+    def _execute_item_with_snapshots(
+        self,
+        item: WorkflowStepOrBlock,
+        context: _ExecutionContext,
+        seed_base: Optional[int],
+        step_index: int,
+        snapshots: List[_StepSnapshot],
+    ) -> _ExecutionContext:
+        """Execute an item and capture step snapshots for deferred
+        writing (used by beam blocks)."""
+        if isinstance(item, WorkflowStep):
+            return self._execute_step_with_snapshot(
+                item, context, seed_base, step_index, snapshots
+            )
+        # For nested iterate/beam blocks inside beam steps,
+        # execute normally without snapshots (the block-level
+        # output directories are handled by the block itself).
+        if isinstance(item, IterateBlock):
+            return self._execute_iterate(
+                item, context, seed_base, step_index
+            )
+        if isinstance(item, BeamBlock):
+            return self._execute_beam(
+                item, context, seed_base, step_index
+            )
+        raise WorkflowError(
+            f"Unsupported node type '{type(item).__name__}'"
+        )
+
+    def _execute_step_with_snapshot(
+        self,
+        step: WorkflowStep,
+        context: _ExecutionContext,
+        seed_base: Optional[int],
+        step_index: int,
+        snapshots: List[_StepSnapshot],
+    ) -> _ExecutionContext:
+        """Execute a step and record a snapshot for deferred writing."""
+        from boundry.operations import Structure
+
+        if step.operation not in _OPERATION_REGISTRY:
+            raise WorkflowError(
+                f"Unknown operation '{step.operation}'"
+            )
 
         updated: List[Structure] = []
         for idx, structure in enumerate(context.population):
@@ -719,159 +1355,94 @@ class Workflow:
                 result.metadata,
                 operation=step.operation,
             )
-            updated.append(
-                Structure(
+            merged_struct = Structure(
+                pdb_string=result.pdb_string,
+                metadata=merged,
+                source_path=(
+                    result.source_path or structure.source_path
+                ),
+            )
+            updated.append(merged_struct)
+
+            # Record snapshot with pre-merge metadata
+            snapshots.append(
+                _StepSnapshot(
+                    operation=step.operation,
+                    step_index=step_index,
+                    result_metadata=dict(result.metadata),
                     pdb_string=result.pdb_string,
-                    metadata=merged,
-                    source_path=result.source_path or structure.source_path,
+                    structure=merged_struct,
                 )
             )
+
         return _ExecutionContext(
             population=updated,
             last_operation=step.operation,
+            output_context=context.output_context,
         )
 
-    def _execute_iterate(
-        self,
-        block: IterateBlock,
-        context: _ExecutionContext,
-        seed_base: Optional[int],
-    ) -> _ExecutionContext:
-        current = context
-        previous_metadata: Optional[Dict[str, Any]] = None
-        max_iters = block.max_n if block.until is not None else block.n
-        converged = False
+    # ------------------------------------------------------------------
+    # Output writing
+    # ------------------------------------------------------------------
 
-        for cycle in range(1, max_iters + 1):
-            cycle_seed = _compose_seed(seed_base, cycle)
-            inner_seed = cycle_seed if seed_base is not None else None
-            for inner in block.steps:
-                current = self._execute_item(
-                    inner,
-                    current,
-                    inner_seed,
-                )
+    @staticmethod
+    def _write_step_output(
+        structure: "Structure",
+        output_ctx: OutputPathContext,
+        operation: str,
+        result_metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Write operation-native artifacts to the step directory.
 
-            if block.output is not None:
-                self._write_population(
-                    current.population,
-                    block.output,
-                    operation=current.last_operation,
-                    cycle=cycle,
-                )
+        Parameters
+        ----------
+        structure : Structure
+            The structure (with merged metadata) after the operation.
+        output_ctx : OutputPathContext
+            The output directory context for this step.
+        operation : str
+            The operation name.
+        result_metadata : dict, optional
+            The pre-merge metadata from this operation only. If not
+            provided, falls back to ``structure.metadata`` (which
+            may contain accumulated data from prior steps).
+        """
+        spec = _OPERATION_OUTPUT_SPECS.get(operation)
+        if spec is None:
+            return
 
-            if block.until is not None:
-                converged, previous_metadata = self._check_convergence(
-                    block.until,
-                    current.population[0].metadata,
-                    previous_metadata,
-                    cycle,
-                    "Iterate",
-                )
-                if converged:
-                    logger.info(
-                        f"Iterate block converged at cycle {cycle}"
-                    )
-                    break
+        dir_path = output_ctx.resolve()
+        dir_path.mkdir(parents=True, exist_ok=True)
 
-        if block.until is not None and not converged:
-            logger.warning(
-                f"Iterate block reached max_n={block.max_n} "
-                "without meeting convergence condition"
-            )
+        # Use result_metadata for native writers to avoid leaking
+        # accumulated metadata. Fall back to structure.metadata if
+        # result_metadata is not provided.
+        meta = (
+            result_metadata
+            if result_metadata is not None
+            else structure.metadata
+        )
 
-        return current
+        # Write PDB if this operation modifies the structure
+        if spec.writes_pdb:
+            pdb_path = dir_path / f"{spec.pdb_stem}.pdb"
+            structure.write(pdb_path)
+            logger.info(f"  Wrote output: {pdb_path}")
 
-    def _execute_beam(
-        self,
-        block: BeamBlock,
-        context: _ExecutionContext,
-        seed_base: Optional[int],
-    ) -> _ExecutionContext:
-        population = list(context.population)
-        previous_best_metadata: Optional[Dict[str, Any]] = None
-
-        for round_num in range(1, block.rounds + 1):
-            if not population:
-                raise WorkflowError("Beam population is empty")
-
-            expand_per = max(
-                block.expand,
-                _ceil_div(block.width, len(population)),
-            )
-            expanded: List["Structure"] = []
-
-            for cand_idx, candidate in enumerate(population, 1):
-                for exp_idx in range(expand_per):
-                    branch_seed = _compose_seed(
-                        seed_base,
-                        (round_num * 10000) + (cand_idx * 100) + exp_idx,
-                    )
-                    branch = _ExecutionContext(
-                        population=[_clone_structure(candidate)]
-                    )
-                    for inner in block.steps:
-                        branch = self._execute_item(
-                            inner,
-                            branch,
-                            branch_seed,
-                        )
-                    expanded.extend(branch.population)
-
-            scored: List[tuple[float, "Structure"]] = []
-            for candidate in expanded:
-                metric_value = extract_numeric_metric(
-                    candidate.metadata,
-                    block.metric,
-                )
-                if metric_value is None:
+        # Write auxiliary files
+        for writer_key in spec.native_writers:
+            writer = _NATIVE_WRITERS.get(writer_key)
+            if writer is not None:
+                try:
+                    writer(meta, dir_path, operation)
+                except Exception as exc:
                     logger.warning(
-                        f"Dropping beam candidate missing metric "
-                        f"'{block.metric}'"
+                        f"Failed to write {writer_key}: {exc}"
                     )
-                    continue
-                scored.append((metric_value, candidate))
 
-            if not scored:
-                raise WorkflowError(
-                    "Beam search could not score any candidates. "
-                    f"Missing metric '{block.metric}'."
-                )
-
-            scored.sort(
-                key=lambda item: item[0],
-                reverse=(block.direction == "max"),
-            )
-            population = [cand for _, cand in scored[: block.width]]
-            best_metric = scored[0][0]
-            logger.info(
-                f"Beam round {round_num}/{block.rounds}: "
-                f"best {block.metric}={best_metric:.4f}"
-            )
-
-            if block.output is not None:
-                self._write_population(
-                    population,
-                    block.output,
-                    operation=branch.last_operation,
-                    round=round_num,
-                )
-
-            if block.until is not None:
-                done, previous_best_metadata = self._check_convergence(
-                    block.until,
-                    population[0].metadata,
-                    previous_best_metadata,
-                    round_num,
-                    "Beam",
-                )
-                if done:
-                    logger.info(
-                        f"Beam block converged at round {round_num}"
-                    )
-                    break
-
-        return _ExecutionContext(population=population)
+    # ------------------------------------------------------------------
+    # Convergence and helpers
+    # ------------------------------------------------------------------
 
     def _check_convergence(
         self,
@@ -944,141 +1515,11 @@ class Workflow:
             return f"iterate (n={item.n})"
         if isinstance(item, BeamBlock):
             return (
-                f"beam (width={item.width}, rounds={item.rounds}, "
+                f"beam (width={item.width}, "
+                f"rounds={item.rounds}, "
                 f"metric={item.metric})"
             )
         return type(item).__name__
-
-    def _write_population(
-        self,
-        population: List["Structure"],
-        path_template: str,
-        operation: Optional[str] = None,
-        **tokens: int,
-    ) -> None:
-        if not population:
-            return
-        if _is_directory_output(path_template):
-            return self._write_population_to_dir(
-                population, path_template, operation, **tokens
-            )
-
-        if len(population) == 1:
-            path = self._render_path(path_template, rank=1, **tokens)
-            population[0].write(path)
-            logger.info(f"  Wrote output: {path}")
-            return
-
-        has_rank_placeholder = "{rank" in path_template
-        for rank, structure in enumerate(population, 1):
-            if has_rank_placeholder:
-                path = self._render_path(
-                    path_template,
-                    rank=rank,
-                    **tokens,
-                )
-            else:
-                base = self._render_path(path_template, **tokens)
-                path = _add_rank_suffix(base, rank)
-            structure.write(path)
-            logger.info(f"  Wrote output rank {rank}: {path}")
-
-    def _write_population_to_dir(
-        self,
-        population: List["Structure"],
-        dir_template: str,
-        operation: Optional[str],
-        **tokens: int,
-    ) -> None:
-        dir_path = Path(self._render_path(dir_template, **tokens))
-        dir_path.mkdir(parents=True, exist_ok=True)
-
-        stem = _DEFAULT_STEM.get(operation, "output") if operation else "output"
-
-        # Build token suffix: "cycle_3", "round_2", etc.
-        token_parts = [f"{k}_{v}" for k, v in sorted(tokens.items())]
-        suffix = "_".join(token_parts)
-
-        for rank, structure in enumerate(population, 1):
-            parts = [stem]
-            if suffix:
-                parts.append(suffix)
-            if len(population) > 1:
-                parts.append(f"rank_{rank}")
-            filename = "_".join(parts)
-
-            # Write structure PDB
-            pdb_path = dir_path / f"{filename}.pdb"
-            structure.write(pdb_path)
-            logger.info(f"  Wrote output: {pdb_path}")
-
-            # Write auxiliary files based on metadata
-            self._write_auxiliary_files(structure, dir_path, filename, operation)
-
-    @staticmethod
-    def _write_auxiliary_files(structure, dir_path, filename, operation):
-        """Auto-write all available auxiliary outputs to the directory."""
-        import json
-
-        meta = structure.metadata
-
-        # Per-position CSV (from analyze_interface)
-        per_position = meta.get("per_position")
-        if per_position is not None:
-            from boundry.interface_position_energetics import write_position_csv
-
-            csv_path = dir_path / f"{filename}_per_position.csv"
-            write_position_csv(per_position, csv_path)
-            logger.info(f"  Wrote per-position CSV: {csv_path}")
-
-        # Alanine scan CSV (from analyze_interface)
-        alanine_scan = meta.get("alanine_scan")
-        if alanine_scan is not None:
-            from boundry.interface_position_energetics import write_position_csv as _write_csv
-
-            csv_path = dir_path / f"{filename}_alanine_scan.csv"
-            _write_csv(alanine_scan, csv_path)
-            logger.info(f"  Wrote alanine scan CSV: {csv_path}")
-
-        # Metrics JSON — write workflow metrics for any operation that produces them
-        wf = meta.get("_workflow", {})
-        metrics = wf.get("metrics")
-        if metrics:
-            json_path = dir_path / f"{filename}_metrics.json"
-            with open(json_path, "w") as f:
-                json.dump(metrics, f, indent=2, default=str)
-            logger.info(f"  Wrote metrics: {json_path}")
-
-        # Energy breakdown (from relax, design, minimize)
-        energy = meta.get("energy_breakdown")
-        if energy:
-            json_path = dir_path / f"{filename}_energy.json"
-            with open(json_path, "w") as f:
-                json.dump(energy, f, indent=2, default=str)
-            logger.info(f"  Wrote energy breakdown: {json_path}")
-
-        # Interface-specific metrics
-        interface_metrics = meta.get("metrics", {}).get("interface")
-        if interface_metrics:
-            json_path = dir_path / f"{filename}_interface.json"
-            with open(json_path, "w") as f:
-                json.dump(interface_metrics, f, indent=2, default=str)
-            logger.info(f"  Wrote interface metrics: {json_path}")
-
-    @staticmethod
-    def _render_path(path_template: str, **tokens: int) -> str:
-        try:
-            return path_template.format(**tokens)
-        except KeyError as exc:
-            missing = exc.args[0]
-            raise WorkflowError(
-                f"Output path template '{path_template}' is missing "
-                f"format token '{missing}'"
-            ) from exc
-        except ValueError as exc:
-            raise WorkflowError(
-                f"Invalid output template '{path_template}': {exc}"
-            ) from exc
 
     # ------------------------------------------------------------------
     # Operation runners
@@ -1086,7 +1527,8 @@ class Workflow:
 
     @staticmethod
     def _run_operation(name, structure, params):
-        """Unified operation dispatch driven by _OPERATION_REGISTRY."""
+        """Unified operation dispatch driven by
+        _OPERATION_REGISTRY."""
         import boundry.config as _cfg
         import boundry.operations as _ops
 
@@ -1094,7 +1536,9 @@ class Workflow:
 
         # analyze_interface is special-cased
         if spec is None:
-            return Workflow._run_analyze_interface(structure, params)
+            return Workflow._run_analyze_interface(
+                structure, params
+            )
 
         if spec.needs_weights:
             from boundry.weights import ensure_weights
@@ -1108,8 +1552,12 @@ class Workflow:
                 extras[key] = params.pop(key)
 
         if isinstance(spec, _PipelineSpec):
-            design_params = _extract_fields(params, _cfg.DesignConfig)
-            relax_params = _extract_fields(params, _cfg.RelaxConfig)
+            design_params = _extract_fields(
+                params, _cfg.DesignConfig
+            )
+            relax_params = _extract_fields(
+                params, _cfg.RelaxConfig
+            )
             if params:
                 logger.warning(
                     f"Unknown {name} params ignored: {params}"
@@ -1149,12 +1597,17 @@ class Workflow:
             logger.warning(
                 f"Unknown {name} params ignored: {params}"
             )
-        config = config_class(**spec.config_overrides, **config_fields)
+        config = config_class(
+            **spec.config_overrides, **config_fields
+        )
         op_fn = getattr(_ops, spec.op_name)
 
         # Auto-link design_spec from metadata for ops that accept it
         if "design_spec" in spec.extra_params:
-            if "design_spec" not in extras and "resfile" not in extras:
+            if (
+                "design_spec" not in extras
+                and "resfile" not in extras
+            ):
                 meta_spec = getattr(
                     structure, "metadata", {}
                 ).get("design_spec")
@@ -1172,7 +1625,11 @@ class Workflow:
 
     @staticmethod
     def _run_analyze_interface(structure, params):
-        from boundry.config import DesignConfig, InterfaceConfig, RelaxConfig
+        from boundry.config import (
+            DesignConfig,
+            InterfaceConfig,
+            RelaxConfig,
+        )
         from boundry.operations import Structure, analyze_interface
 
         constrained = params.pop("constrained", False)
@@ -1192,10 +1649,17 @@ class Workflow:
         if chain_pairs is not None:
             params["chain_pairs"] = chain_pairs
 
-        interface_params = _extract_fields(params, InterfaceConfig)
+        interface_params = _extract_fields(
+            params, InterfaceConfig
+        )
         if params:
-            logger.warning(f"Unknown analyze_interface params ignored: {params}")
-        config = InterfaceConfig(enabled=True, **interface_params)
+            logger.warning(
+                f"Unknown analyze_interface params ignored: "
+                f"{params}"
+            )
+        config = InterfaceConfig(
+            enabled=True, **interface_params
+        )
 
         relaxer = None
         designer = None
@@ -1203,7 +1667,9 @@ class Workflow:
         if config.calculate_binding_energy:
             from boundry.relaxer import Relaxer
 
-            relaxer = Relaxer(RelaxConfig(constrained=constrained))
+            relaxer = Relaxer(
+                RelaxConfig(constrained=constrained)
+            )
 
         needs_designer = config.relax_separated or (
             (config.per_position or config.alanine_scan)
@@ -1244,7 +1710,9 @@ class Workflow:
         )
 
 
-def _compose_seed(seed_base: Optional[int], local_seed: int) -> int:
+def _compose_seed(
+    seed_base: Optional[int], local_seed: int
+) -> int:
     if seed_base is None:
         return local_seed
     return (seed_base * 100000) + local_seed
@@ -1252,13 +1720,6 @@ def _compose_seed(seed_base: Optional[int], local_seed: int) -> int:
 
 def _ceil_div(a: int, b: int) -> int:
     return -(-a // b)
-
-
-def _add_rank_suffix(path: str, rank: int) -> str:
-    p = Path(path)
-    if p.suffix:
-        return str(p.with_name(f"{p.stem}_rank{rank}{p.suffix}"))
-    return f"{path}_rank{rank}"
 
 
 def _clone_structure(structure: "Structure") -> "Structure":

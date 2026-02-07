@@ -126,7 +126,6 @@ class WorkflowStep:
 
     operation: str  # Operation name (e.g. 'idealize', 'minimize')
     params: Dict[str, Any] = field(default_factory=dict)
-    output: Optional[str] = None  # Optional intermediate output path
 
 
 @dataclass
@@ -137,7 +136,6 @@ class IterateBlock:
     n: int = 1
     max_n: int = 100
     until: Optional[str] = None
-    output: Optional[str] = None
 
 
 @dataclass
@@ -151,7 +149,6 @@ class BeamBlock:
     direction: Literal["min", "max"] = "min"
     until: Optional[str] = None
     expand: int = 1
-    output: Optional[str] = None
 
 
 WorkflowStepOrBlock = Union[WorkflowStep, IterateBlock, BeamBlock]
@@ -165,7 +162,7 @@ class WorkflowConfig:
     """
 
     input: str  # Input PDB/CIF path
-    output: Optional[str] = None  # Final output path
+    project_path: Optional[str] = None  # Base output directory (default: cwd)
     seed: Optional[int] = None  # Workflow-level seed for reproducibility
     workflow_version: int = 1
     steps: List[WorkflowStepOrBlock] = field(default_factory=list)

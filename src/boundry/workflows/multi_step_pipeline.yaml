@@ -2,33 +2,28 @@
 #
 # A comprehensive pipeline that idealizes the structure, performs
 # constrained minimization, designs sequences with LigandMPNN, and
-# finishes with unconstrained relaxation. Intermediate outputs are
-# saved at each stage for inspection.
+# finishes with unconstrained relaxation.
 #
 # Usage:
 #   boundry run multi_step_pipeline.yaml
 
 input: input.pdb
-output: final.pdb
 
 steps:
   # Step 1: Fix backbone geometry
   - operation: idealize
-    output: step1_idealized.pdb
 
   # Step 2: Constrained minimization to relieve clashes
   - operation: minimize
     params:
       constrained: true
       stiffness: 10.0
-    output: step2_minimized.pdb
 
   # Step 3: Sequence design (all positions)
   - operation: mpnn
     params:
       temperature: 0.1
       model_type: ligand_mpnn
-    output: step3_designed.pdb
 
   # Step 4: Unconstrained relaxation of the designed structure
   - operation: relax

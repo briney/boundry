@@ -203,7 +203,6 @@ class TestWorkflowStep:
         step = WorkflowStep(operation="idealize")
         assert step.operation == "idealize"
         assert step.params == {}
-        assert step.output is None
 
     def test_step_with_params(self):
         """Test creating a step with parameters."""
@@ -214,14 +213,10 @@ class TestWorkflowStep:
         assert step.operation == "minimize"
         assert step.params == {"constrained": False, "max_iterations": 1000}
 
-    def test_step_with_output(self):
-        """Test creating a step with intermediate output path."""
-        step = WorkflowStep(
-            operation="idealize",
-            params={"fix_cis_omega": True},
-            output="idealized.pdb",
-        )
-        assert step.output == "idealized.pdb"
+    def test_step_no_output_field(self):
+        """Test that WorkflowStep no longer has an output field."""
+        step = WorkflowStep(operation="idealize")
+        assert not hasattr(step, "output")
 
 
 class TestWorkflowConfig:
@@ -231,7 +226,7 @@ class TestWorkflowConfig:
         """Test creating a workflow config with only input."""
         config = WorkflowConfig(input="input.pdb")
         assert config.input == "input.pdb"
-        assert config.output is None
+        assert config.project_path is None
         assert config.seed is None
         assert config.workflow_version == 1
         assert config.steps == []
@@ -242,7 +237,6 @@ class TestWorkflowConfig:
             WorkflowStep(
                 operation="idealize",
                 params={"fix_cis_omega": True},
-                output="idealized.pdb",
             ),
             WorkflowStep(
                 operation="minimize",
@@ -251,11 +245,11 @@ class TestWorkflowConfig:
         ]
         config = WorkflowConfig(
             input="input.pdb",
-            output="final.pdb",
+            project_path="results",
             steps=steps,
         )
         assert config.input == "input.pdb"
-        assert config.output == "final.pdb"
+        assert config.project_path == "results"
         assert len(config.steps) == 2
         assert config.steps[0].operation == "idealize"
         assert config.steps[1].operation == "minimize"
@@ -276,7 +270,7 @@ class TestIterateBlock:
         assert block.n == 1
         assert block.max_n == 100
         assert block.until is None
-        assert block.output is None
+        assert not hasattr(block, "output")
 
 
 class TestBeamBlock:
@@ -290,4 +284,4 @@ class TestBeamBlock:
         assert block.direction == "min"
         assert block.until is None
         assert block.expand == 1
-        assert block.output is None
+        assert not hasattr(block, "output")

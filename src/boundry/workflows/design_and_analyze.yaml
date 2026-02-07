@@ -7,7 +7,6 @@
 #   boundry run design_and_analyze.yaml
 
 input: complex.pdb
-output: designed.pdb
 
 steps:
   - operation: design

@@ -15,7 +15,6 @@
 
 workflow_version: 1
 input: input.pdb
-output: optimized_{rank}.pdb
 seed: 42
 
 steps:
@@ -26,7 +25,6 @@ steps:
       metric: dG
       direction: min
       until: "{selected_positions} == 0"
-      output: beam_round_{round}_rank_{rank}.pdb
       steps:
         - operation: relax
           params:

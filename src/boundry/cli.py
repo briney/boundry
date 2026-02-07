@@ -1008,7 +1008,7 @@ def run(
     """Execute a YAML workflow.
 
     Extra arguments are applied as config overrides (key=value syntax).
-    Example: boundry run workflow.yaml seed=42 output=results/
+    Example: boundry run workflow.yaml seed=42 project_path=results/
     """
     _setup_logging(verbose)
 
@@ -1033,7 +1033,6 @@ def run(
         resolved,
         seed=seed,
         overrides=overrides,
-        require_output=True,
     )
     workflow.run()
 

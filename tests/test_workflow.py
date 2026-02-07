@@ -1,5 +1,6 @@
 """Tests for boundry.workflow module."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,8 +14,11 @@ from boundry.config import (
 )
 from boundry.workflow import (
     VALID_OPERATIONS,
+    OutputPathContext,
     Workflow,
     WorkflowError,
+    _NATIVE_METRIC_KEYS,
+    _OPERATION_OUTPUT_SPECS,
 )
 
 
@@ -39,24 +43,23 @@ class TestFromYaml:
         )
         wf = Workflow.from_yaml(wf_file)
         assert wf.config.input == "input.pdb"
-        assert wf.config.output is None
+        assert wf.config.project_path is None
         assert len(wf.config.steps) == 1
         assert wf.config.steps[0].operation == "idealize"
         assert wf.config.steps[0].params == {}
 
     def test_full_workflow(self, tmp_path):
-        """Test loading a workflow with output and params."""
+        """Test loading a workflow with project_path and params."""
         wf_file = tmp_path / "wf.yaml"
         wf_file.write_text(
             yaml.dump(
                 {
                     "input": "input.pdb",
-                    "output": "final.pdb",
+                    "project_path": "results",
                     "steps": [
                         {
                             "operation": "idealize",
                             "params": {"fix_cis_omega": True},
-                            "output": "idealized.pdb",
                         },
                         {
                             "operation": "minimize",
@@ -71,19 +74,17 @@ class TestFromYaml:
         )
         wf = Workflow.from_yaml(wf_file)
         assert wf.config.input == "input.pdb"
-        assert wf.config.output == "final.pdb"
+        assert wf.config.project_path == "results"
         assert len(wf.config.steps) == 2
 
         step1 = wf.config.steps[0]
         assert step1.operation == "idealize"
         assert step1.params == {"fix_cis_omega": True}
-        assert step1.output == "idealized.pdb"
 
         step2 = wf.config.steps[1]
         assert step2.operation == "minimize"
         assert step2.params["constrained"] is False
         assert step2.params["max_iterations"] == 1000
-        assert step2.output is None
 
     def test_null_params_treated_as_empty(self, tmp_path):
         """Test that null params in YAML become an empty dict."""
@@ -106,6 +107,40 @@ class TestFromYaml:
         )
         wf = Workflow.from_yaml(wf_file)
         assert len(wf.config.steps) == len(VALID_OPERATIONS)
+
+    def test_deprecated_output_key_treated_as_project_path(
+        self, tmp_path
+    ):
+        """Old 'output' key is treated as project_path with warning."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "output: results\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+        )
+        with pytest.warns(DeprecationWarning, match="output.*deprecated"):
+            wf = Workflow.from_yaml(wf_file)
+        assert wf.config.project_path == "results"
+
+    def test_step_output_key_rejected(self, tmp_path):
+        """Per-step output key is no longer allowed."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [
+                        {
+                            "operation": "idealize",
+                            "output": "idealized.pdb",
+                        }
+                    ],
+                }
+            )
+        )
+        with pytest.raises(WorkflowError, match="unknown fields"):
+            Workflow.from_yaml(wf_file)
 
 
 # ------------------------------------------------------------------
@@ -200,7 +235,7 @@ class TestDirectConstruction:
         """Test creating a Workflow from a WorkflowConfig directly."""
         config = WorkflowConfig(
             input="input.pdb",
-            output="output.pdb",
+            project_path="results",
             steps=[
                 WorkflowStep(operation="idealize"),
                 WorkflowStep(
@@ -261,7 +296,9 @@ class TestBlockParsing:
                                 "rounds": 3,
                                 "metric": "dG",
                                 "direction": "min",
-                                "steps": [{"operation": "analyze_interface"}],
+                                "steps": [
+                                    {"operation": "analyze_interface"}
+                                ],
                             }
                         }
                     ],
@@ -287,6 +324,54 @@ class TestBlockParsing:
         with pytest.raises(WorkflowError, match="expected one of"):
             Workflow.from_yaml(wf_file)
 
+    def test_iterate_output_key_rejected(self, tmp_path):
+        """Per-block output key is no longer allowed."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [
+                        {
+                            "iterate": {
+                                "n": 3,
+                                "output": "results/",
+                                "steps": [{"operation": "relax"}],
+                            }
+                        }
+                    ],
+                }
+            )
+        )
+        with pytest.raises(WorkflowError, match="unknown fields"):
+            Workflow.from_yaml(wf_file)
+
+    def test_beam_output_key_rejected(self, tmp_path):
+        """Per-block output key is no longer allowed."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [
+                        {
+                            "beam": {
+                                "width": 2,
+                                "rounds": 1,
+                                "metric": "dG",
+                                "output": "results/",
+                                "steps": [
+                                    {"operation": "analyze_interface"}
+                                ],
+                            }
+                        }
+                    ],
+                }
+            )
+        )
+        with pytest.raises(WorkflowError, match="unknown fields"):
+            Workflow.from_yaml(wf_file)
+
 
 # ------------------------------------------------------------------
 # Workflow execution
@@ -296,21 +381,17 @@ class TestBlockParsing:
 class TestWorkflowRun:
     """Tests for Workflow.run() with mocked operations."""
 
-    def _make_workflow(self, tmp_path, steps, output=None):
+    def _make_workflow(self, tmp_path, steps, project_path=None):
         """Helper to create a workflow YAML and return Workflow."""
         wf_file = tmp_path / "wf.yaml"
-        wf_file.write_text(
-            yaml.dump(
-                {
-                    "input": str(tmp_path / "input.pdb"),
-                    "output": (
-                        str(tmp_path / output) if output else None
-                    ),
-                    "steps": steps,
-                }
-            )
-        )
-        return Workflow.from_yaml(wf_file, require_output=False)
+        data = {
+            "input": str(tmp_path / "input.pdb"),
+            "steps": steps,
+        }
+        if project_path is not None:
+            data["project_path"] = str(tmp_path / project_path)
+        wf_file.write_text(yaml.dump(data))
+        return Workflow.from_yaml(wf_file)
 
     def _make_input(self, tmp_path):
         """Write a dummy PDB file and return path."""
@@ -320,54 +401,6 @@ class TestWorkflowRun:
             "  1.00  0.00           N\nEND\n"
         )
         return pdb
-
-    @patch("boundry.workflow.Workflow._run_operation")
-    def test_run_requires_output_by_default(
-        self, mock_op, tmp_path
-    ):
-        """Workflow.run() requires output paths unless opted out."""
-        from boundry.operations import Structure
-
-        self._make_input(tmp_path)
-        mock_op.return_value = Structure(pdb_string="ATOM\nEND\n")
-
-        wf_file = tmp_path / "wf.yaml"
-        wf_file.write_text(
-            yaml.dump(
-                {
-                    "input": str(tmp_path / "input.pdb"),
-                    "steps": [{"operation": "idealize"}],
-                }
-            )
-        )
-        wf = Workflow.from_yaml(wf_file)
-        with pytest.raises(WorkflowError, match="output is required"):
-            wf.run()
-
-    @patch("boundry.workflow.Workflow._run_operation")
-    def test_run_can_opt_out_of_output_requirement(
-        self, mock_op, tmp_path
-    ):
-        """Programmatic workflows can still run fully in-memory."""
-        from boundry.operations import Structure
-
-        self._make_input(tmp_path)
-        mock_op.return_value = Structure(
-            pdb_string="ATOM idealized\nEND\n"
-        )
-
-        wf_file = tmp_path / "wf.yaml"
-        wf_file.write_text(
-            yaml.dump(
-                {
-                    "input": str(tmp_path / "input.pdb"),
-                    "steps": [{"operation": "idealize"}],
-                }
-            )
-        )
-        wf = Workflow.from_yaml(wf_file, require_output=False)
-        result = wf.run()
-        assert "idealized" in result.pdb_string
 
     @patch("boundry.workflow.Workflow._run_operation")
     def test_single_step(self, mock_op, tmp_path):
@@ -419,15 +452,21 @@ class TestWorkflowRun:
 
         # Step 2 should receive output of step 1
         min_call = [
-            c for c in mock_op.call_args_list
+            c
+            for c in mock_op.call_args_list
             if c[0][0] == "minimize"
         ][0]
-        assert min_call[0][1].pdb_string == struct_after_ideal.pdb_string
+        assert (
+            min_call[0][1].pdb_string
+            == struct_after_ideal.pdb_string
+        )
         assert result.pdb_string == struct_after_min.pdb_string
 
     @patch("boundry.workflow.Workflow._run_operation")
-    def test_final_output_written(self, mock_op, tmp_path):
-        """Test that final output is written to disk."""
+    def test_output_written_to_project_path(
+        self, mock_op, tmp_path
+    ):
+        """Test that step output is written to project_path."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
@@ -439,54 +478,41 @@ class TestWorkflowRun:
             )
         )
 
-        output_path = tmp_path / "final.pdb"
         wf = self._make_workflow(
             tmp_path,
             [{"operation": "idealize"}],
-            output="final.pdb",
+            project_path="results",
         )
         wf.run()
 
-        assert output_path.exists()
-        assert "ATOM" in output_path.read_text()
+        # Check that 0.idealize/ directory was created
+        output_dir = tmp_path / "results" / "0.idealize"
+        assert output_dir.exists()
+        pdb_files = list(output_dir.glob("*.pdb"))
+        assert len(pdb_files) == 1
+        assert pdb_files[0].name == "idealized.pdb"
 
     @patch("boundry.workflow.Workflow._run_operation")
-    def test_intermediate_output_written(self, mock_op, tmp_path):
-        """Test that intermediate output is written."""
+    def test_default_project_path_is_cwd(
+        self, mock_op, tmp_path, monkeypatch
+    ):
+        """Workflow without project_path writes to cwd."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
-        intermediate_path = tmp_path / "idealized.pdb"
-
-        intermediate_struct = Structure(
-            pdb_string=(
-                "ATOM      1  N   ALA A   1       "
-                "1.000   1.000   1.000  1.00  0.00"
-                "           N\nEND\n"
-            )
+        monkeypatch.chdir(tmp_path)
+        mock_op.return_value = Structure(
+            pdb_string="ATOM\nEND\n"
         )
 
-        def _dispatch(name, structure, params):
-            if name == "idealize":
-                return intermediate_struct
-            return Structure(pdb_string="ATOM minimized\nEND\n")
-
-        mock_op.side_effect = _dispatch
-
         wf = self._make_workflow(
-            tmp_path,
-            [
-                {
-                    "operation": "idealize",
-                    "output": str(intermediate_path),
-                },
-                {"operation": "minimize"},
-            ],
+            tmp_path, [{"operation": "idealize"}]
         )
         wf.run()
 
-        assert intermediate_path.exists()
-        assert "ATOM" in intermediate_path.read_text()
+        # Should have created 0.idealize/ in cwd
+        output_dir = tmp_path / "0.idealize"
+        assert output_dir.exists()
 
     def test_nonexistent_input_raises(self, tmp_path):
         """Test that a missing input file raises WorkflowError."""
@@ -526,38 +552,30 @@ class TestWorkflowRun:
 class TestCompoundExecution:
     """Tests for iterate/beam workflow execution."""
 
-    def _make_workflow(self, tmp_path, steps, output=None):
+    def _make_workflow(self, tmp_path, steps, project_path=None):
         wf_file = tmp_path / "wf.yaml"
-        wf_file.write_text(
-            yaml.dump(
-                {
-                    "input": str(tmp_path / "input.pdb"),
-                    "output": (
-                        str(tmp_path / output) if output else None
-                    ),
-                    "steps": steps,
-                }
-            )
-        )
-        return Workflow.from_yaml(wf_file, require_output=False)
+        data = {
+            "input": str(tmp_path / "input.pdb"),
+            "steps": steps,
+        }
+        if project_path is not None:
+            data["project_path"] = str(tmp_path / project_path)
+        wf_file.write_text(yaml.dump(data))
+        return Workflow.from_yaml(wf_file)
 
     def _make_workflow_with_seed(
-        self, tmp_path, steps, seed, output=None
+        self, tmp_path, steps, seed, project_path=None
     ):
         wf_file = tmp_path / "wf.yaml"
-        wf_file.write_text(
-            yaml.dump(
-                {
-                    "input": str(tmp_path / "input.pdb"),
-                    "output": (
-                        str(tmp_path / output) if output else None
-                    ),
-                    "seed": seed,
-                    "steps": steps,
-                }
-            )
-        )
-        return Workflow.from_yaml(wf_file, require_output=False)
+        data = {
+            "input": str(tmp_path / "input.pdb"),
+            "seed": seed,
+            "steps": steps,
+        }
+        if project_path is not None:
+            data["project_path"] = str(tmp_path / project_path)
+        wf_file.write_text(yaml.dump(data))
+        return Workflow.from_yaml(wf_file)
 
     def _make_input(self, tmp_path):
         pdb = tmp_path / "input.pdb"
@@ -568,7 +586,9 @@ class TestCompoundExecution:
         return pdb
 
     @patch("boundry.workflow.Workflow._run_operation")
-    def test_iterate_fixed_count_runs_n_times(self, mock_op, tmp_path):
+    def test_iterate_fixed_count_runs_n_times(
+        self, mock_op, tmp_path
+    ):
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
@@ -623,7 +643,9 @@ class TestCompoundExecution:
                     "iterate": {
                         "until": "{dG} < -3.0",
                         "max_n": 10,
-                        "steps": [{"operation": "analyze_interface"}],
+                        "steps": [
+                            {"operation": "analyze_interface"}
+                        ],
                     }
                 }
             ],
@@ -635,8 +657,8 @@ class TestCompoundExecution:
     def test_iterate_seed_injected_with_workflow_seed(
         self, mock_op, tmp_path
     ):
-        from boundry.workflow import _compose_seed
         from boundry.operations import Structure
+        from boundry.workflow import _compose_seed
 
         self._make_input(tmp_path)
         seen_seeds = []
@@ -798,7 +820,9 @@ class TestCompoundExecution:
                         "expand": 4,
                         "metric": "dG",
                         "direction": "min",
-                        "steps": [{"operation": "analyze_interface"}],
+                        "steps": [
+                            {"operation": "analyze_interface"}
+                        ],
                     }
                 },
                 {"operation": "minimize"},
@@ -807,7 +831,8 @@ class TestCompoundExecution:
         population = wf.run_population()
         assert len(population) == 2
         minimize_calls = [
-            c for c in mock_op.call_args_list
+            c
+            for c in mock_op.call_args_list
             if c[0][0] == "minimize"
         ]
         assert len(minimize_calls) == 2
@@ -834,7 +859,9 @@ class TestCompoundExecution:
                 }
             ],
         )
-        with pytest.raises(WorkflowError, match="Missing metric|missing metric"):
+        with pytest.raises(
+            WorkflowError, match="Missing metric|missing metric"
+        ):
             wf.run()
 
 
@@ -874,7 +901,9 @@ class TestRunMinimize:
         mock_op.return_value = struct
 
         Workflow._run_operation(
-            "minimize", struct, {"constrained": True, "max_iterations": 500}
+            "minimize",
+            struct,
+            {"constrained": True, "max_iterations": 500},
         )
 
         _, kwargs = mock_op.call_args
@@ -889,7 +918,9 @@ class TestRunMinimize:
         struct = Structure(pdb_string="ATOM\nEND\n")
         mock_op.return_value = struct
 
-        Workflow._run_operation("minimize", struct, {"pre_idealize": True})
+        Workflow._run_operation(
+            "minimize", struct, {"pre_idealize": True}
+        )
 
         _, kwargs = mock_op.call_args
         assert kwargs["pre_idealize"] is True
@@ -1098,76 +1129,127 @@ class TestValidOperations:
 
 
 # ------------------------------------------------------------------
-# Directory output detection
+# OutputPathContext
 # ------------------------------------------------------------------
 
 
-class TestIsDirectoryOutput:
-    """Tests for _is_directory_output helper."""
+class TestOutputPathContext:
+    """Tests for OutputPathContext."""
 
-    def test_trailing_slash(self):
-        from boundry.workflow import _is_directory_output
+    def test_resolve_base_path(self, tmp_path):
+        ctx = OutputPathContext(base_path=tmp_path)
+        assert ctx.resolve() == tmp_path
 
-        assert _is_directory_output("results/") is True
+    def test_child(self, tmp_path):
+        ctx = OutputPathContext(base_path=tmp_path)
+        child = ctx.child("subdir")
+        assert child.resolve() == tmp_path / "subdir"
 
-    def test_pdb_extension(self):
-        from boundry.workflow import _is_directory_output
+    def test_step_dir(self, tmp_path):
+        ctx = OutputPathContext(base_path=tmp_path)
+        step = ctx.step_dir(0, "idealize")
+        assert step.resolve() == tmp_path / "0.idealize"
 
-        assert _is_directory_output("output.pdb") is False
+    def test_step_dir_index(self, tmp_path):
+        ctx = OutputPathContext(base_path=tmp_path)
+        step = ctx.step_dir(2, "relax")
+        assert step.resolve() == tmp_path / "2.relax"
 
-    def test_cif_extension(self):
-        from boundry.workflow import _is_directory_output
+    def test_cycle_dir(self, tmp_path):
+        ctx = OutputPathContext(base_path=tmp_path)
+        cycle = ctx.cycle_dir(1)
+        assert cycle.resolve() == tmp_path / "cycle_1"
 
-        assert _is_directory_output("output.cif") is False
+    def test_round_dir(self, tmp_path):
+        ctx = OutputPathContext(base_path=tmp_path)
+        rnd = ctx.round_dir(3)
+        assert rnd.resolve() == tmp_path / "round_3"
 
-    def test_mmcif_extension(self):
-        from boundry.workflow import _is_directory_output
+    def test_rank_dir(self, tmp_path):
+        ctx = OutputPathContext(base_path=tmp_path)
+        rank = ctx.rank_dir(1)
+        assert rank.resolve() == tmp_path / "rank_1"
 
-        assert _is_directory_output("output.mmcif") is False
+    def test_others_rank_dir(self, tmp_path):
+        ctx = OutputPathContext(base_path=tmp_path)
+        others = ctx.others_rank_dir(3)
+        assert others.resolve() == tmp_path / "others" / "rank_3"
 
-    def test_no_extension(self):
-        from boundry.workflow import _is_directory_output
-
-        assert _is_directory_output("results") is True
-
-    def test_template_with_pdb(self):
-        from boundry.workflow import _is_directory_output
-
-        assert _is_directory_output("output_{cycle}.pdb") is False
-
-    def test_template_dir_with_slash(self):
-        from boundry.workflow import _is_directory_output
-
-        assert _is_directory_output("results/cycle_{cycle}/") is True
-
-    def test_non_structure_extension(self):
-        from boundry.workflow import _is_directory_output
-
-        assert _is_directory_output("output.json") is True
-
-
-# ------------------------------------------------------------------
-# Directory output writing
-# ------------------------------------------------------------------
-
-
-class TestDirectoryOutput:
-    """Tests for directory output writing."""
-
-    def _make_workflow(self, tmp_path, steps, output=None):
-        wf_file = tmp_path / "wf.yaml"
-        wf_file.write_text(
-            yaml.dump(
-                {
-                    "input": str(tmp_path / "input.pdb"),
-                    "output": (
-                        str(tmp_path / output) if output else None
-                    ),
-                    "steps": steps,
-                }
-            )
+    def test_chained_context(self, tmp_path):
+        """Test full chained context for iterate block."""
+        ctx = OutputPathContext(base_path=tmp_path)
+        result = (
+            ctx.step_dir(1, "iterate")
+            .cycle_dir(2)
+            .step_dir(0, "relax")
         )
-        return Workflow.from_yaml(wf_file, require_output=False)
+        expected = (
+            tmp_path / "1.iterate" / "cycle_2" / "0.relax"
+        )
+        assert result.resolve() == expected
+
+    def test_beam_chained_context(self, tmp_path):
+        """Test full chained context for beam block."""
+        ctx = OutputPathContext(base_path=tmp_path)
+        result = (
+            ctx.step_dir(0, "beam")
+            .round_dir(1)
+            .rank_dir(2)
+            .step_dir(0, "design")
+        )
+        expected = (
+            tmp_path
+            / "0.beam"
+            / "round_1"
+            / "rank_2"
+            / "0.design"
+        )
+        assert result.resolve() == expected
+
+    def test_beam_others_chained_context(self, tmp_path):
+        """Test full chained context for non-selected beam candidate."""
+        ctx = OutputPathContext(base_path=tmp_path)
+        result = (
+            ctx.step_dir(0, "beam")
+            .round_dir(1)
+            .others_rank_dir(5)
+            .step_dir(0, "design")
+        )
+        expected = (
+            tmp_path
+            / "0.beam"
+            / "round_1"
+            / "others"
+            / "rank_5"
+            / "0.design"
+        )
+        assert result.resolve() == expected
+
+    def test_frozen(self, tmp_path):
+        """OutputPathContext is immutable."""
+        ctx = OutputPathContext(base_path=tmp_path)
+        with pytest.raises(AttributeError):
+            ctx.base_path = tmp_path / "new"
+
+
+# ------------------------------------------------------------------
+# Automatic directory structure
+# ------------------------------------------------------------------
+
+
+class TestAutomaticDirectoryStructure:
+    """Tests for automatic directory output writing."""
+
+    def _make_workflow(self, tmp_path, steps, project_path=None):
+        wf_file = tmp_path / "wf.yaml"
+        data = {
+            "input": str(tmp_path / "input.pdb"),
+            "steps": steps,
+        }
+        if project_path is not None:
+            data["project_path"] = str(tmp_path / project_path)
+        wf_file.write_text(yaml.dump(data))
+        return Workflow.from_yaml(wf_file)
 
     def _make_input(self, tmp_path):
         pdb = tmp_path / "input.pdb"
@@ -1178,61 +1260,67 @@ class TestDirectoryOutput:
         return pdb
 
     @patch("boundry.workflow.Workflow._run_operation")
-    def test_directory_output_creates_pdb(self, mock_op, tmp_path):
-        """Test that directory output creates a PDB file."""
+    def test_single_step_creates_step_dir(
+        self, mock_op, tmp_path
+    ):
+        """Single step creates 0.{operation}/ directory."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
         mock_op.return_value = Structure(
-            pdb_string=(
-                "ATOM      1  N   ALA A   1       "
-                "1.000   1.000   1.000  1.00  0.00"
-                "           N\nEND\n"
+            pdb_string="ATOM\nEND\n"
+        )
+
+        wf = self._make_workflow(
+            tmp_path,
+            [{"operation": "idealize"}],
+            project_path="results",
+        )
+        wf.run()
+
+        step_dir = tmp_path / "results" / "0.idealize"
+        assert step_dir.exists()
+        assert (step_dir / "idealized.pdb").exists()
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_multi_step_creates_indexed_dirs(
+        self, mock_op, tmp_path
+    ):
+        """Multiple steps create 0-indexed directories."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+
+        def _dispatch(name, structure, params):
+            return Structure(
+                pdb_string="ATOM\nEND\n",
+                metadata={"final_energy": -1.0},
             )
-        )
 
-        output_dir = tmp_path / "results"
-        wf = self._make_workflow(
-            tmp_path,
-            [{"operation": "idealize"}],
-            output="results/",
-        )
-        wf.run()
-
-        assert output_dir.exists()
-        pdb_files = list(output_dir.glob("*.pdb"))
-        assert len(pdb_files) == 1
-        assert "idealized" in pdb_files[0].stem
-
-    @patch("boundry.workflow.Workflow._run_operation")
-    def test_directory_output_energy_json(self, mock_op, tmp_path):
-        """Test that energy breakdown is written as JSON."""
-        from boundry.operations import Structure
-
-        self._make_input(tmp_path)
-        mock_op.return_value = Structure(
-            pdb_string=(
-                "ATOM      1  N   ALA A   1       "
-                "1.000   1.000   1.000  1.00  0.00"
-                "           N\nEND\n"
-            ),
-            metadata={"energy_breakdown": {"total_energy": -100.0}},
-        )
+        mock_op.side_effect = _dispatch
 
         wf = self._make_workflow(
             tmp_path,
-            [{"operation": "idealize"}],
-            output="results/",
+            [
+                {"operation": "idealize"},
+                {"operation": "minimize"},
+            ],
+            project_path="results",
         )
         wf.run()
 
-        output_dir = tmp_path / "results"
-        json_files = list(output_dir.glob("*_energy.json"))
-        assert len(json_files) == 1
+        assert (
+            tmp_path / "results" / "0.idealize"
+        ).exists()
+        assert (
+            tmp_path / "results" / "1.minimize"
+        ).exists()
 
     @patch("boundry.workflow.Workflow._run_operation")
-    def test_directory_output_with_tokens(self, mock_op, tmp_path):
-        """Test that tokens are incorporated into filenames."""
+    def test_iterate_creates_cycle_dirs(
+        self, mock_op, tmp_path
+    ):
+        """Iterate block creates cycle_N subdirectories."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
@@ -1241,44 +1329,197 @@ class TestDirectoryOutput:
         def _side_effect(name, structure, params):
             call_count["n"] += 1
             return Structure(
-                pdb_string=(
-                    "ATOM      1  N   ALA A   1       "
-                    "1.000   1.000   1.000  1.00  0.00"
-                    "           N\nEND\n"
-                ),
+                pdb_string="ATOM\nEND\n",
                 metadata={"final_energy": -1.0 * call_count["n"]},
             )
 
         mock_op.side_effect = _side_effect
 
-        output_dir = tmp_path / "results"
         wf = self._make_workflow(
             tmp_path,
             [
                 {
                     "iterate": {
-                        "n": 2,
-                        "output": str(output_dir) + "/",
+                        "n": 3,
                         "steps": [{"operation": "relax"}],
                     }
                 }
             ],
+            project_path="results",
         )
         wf.run()
 
-        assert output_dir.exists()
-        pdb_files = list(output_dir.glob("*.pdb"))
-        assert len(pdb_files) == 2
-        # Token should be in filename
-        filenames = sorted(f.stem for f in pdb_files)
-        assert any("cycle_1" in f for f in filenames)
-        assert any("cycle_2" in f for f in filenames)
+        base = tmp_path / "results" / "0.iterate"
+        assert base.exists()
+        for c in range(1, 4):
+            cycle_dir = base / f"cycle_{c}" / "0.relax"
+            assert cycle_dir.exists(), (
+                f"cycle_{c}/0.relax missing"
+            )
+            assert (cycle_dir / "relaxed.pdb").exists()
 
     @patch("boundry.workflow.Workflow._run_operation")
-    def test_directory_output_multiple_population(
+    def test_beam_creates_round_rank_dirs(
         self, mock_op, tmp_path
     ):
-        """Test that multiple structures get rank suffixes."""
+        """Beam block creates round_N/rank_N structure."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        scores = [5.0, 1.0, 3.0, 2.0]
+        call_idx = {"i": 0}
+
+        def _dispatch(name, structure, params):
+            i = call_idx["i"]
+            call_idx["i"] += 1
+            return Structure(
+                pdb_string=f"ATOM beam {i}\nEND\n",
+                metadata={"dG": scores[i % len(scores)]},
+            )
+
+        mock_op.side_effect = _dispatch
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {
+                    "beam": {
+                        "width": 2,
+                        "rounds": 1,
+                        "expand": 4,
+                        "metric": "dG",
+                        "direction": "min",
+                        "steps": [
+                            {"operation": "analyze_interface"}
+                        ],
+                    }
+                }
+            ],
+            project_path="results",
+        )
+        wf.run_population()
+
+        beam_dir = tmp_path / "results" / "0.beam"
+        assert beam_dir.exists()
+        round_dir = beam_dir / "round_1"
+        assert round_dir.exists()
+        # Selected candidates
+        assert (round_dir / "rank_1").exists()
+        assert (round_dir / "rank_2").exists()
+        # Non-selected candidates
+        assert (round_dir / "others").exists()
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_step_before_iterate(self, mock_op, tmp_path):
+        """Step before iterate block gets correct index."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+
+        def _dispatch(name, structure, params):
+            return Structure(
+                pdb_string="ATOM\nEND\n",
+                metadata={"final_energy": -1.0},
+            )
+
+        mock_op.side_effect = _dispatch
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {"operation": "idealize"},
+                {
+                    "iterate": {
+                        "n": 2,
+                        "steps": [{"operation": "relax"}],
+                    }
+                },
+            ],
+            project_path="results",
+        )
+        wf.run()
+
+        assert (
+            tmp_path / "results" / "0.idealize"
+        ).exists()
+        assert (
+            tmp_path / "results" / "1.iterate"
+        ).exists()
+        assert (
+            tmp_path
+            / "results"
+            / "1.iterate"
+            / "cycle_1"
+            / "0.relax"
+        ).exists()
+
+
+# ------------------------------------------------------------------
+# Operation-aware output
+# ------------------------------------------------------------------
+
+
+class TestOperationAwareOutput:
+    """Tests that each operation writes only its native artifacts."""
+
+    def _make_workflow(self, tmp_path, steps, project_path=None):
+        wf_file = tmp_path / "wf.yaml"
+        data = {
+            "input": str(tmp_path / "input.pdb"),
+            "steps": steps,
+        }
+        if project_path is not None:
+            data["project_path"] = str(tmp_path / project_path)
+        wf_file.write_text(yaml.dump(data))
+        return Workflow.from_yaml(wf_file)
+
+    def _make_input(self, tmp_path):
+        pdb = tmp_path / "input.pdb"
+        pdb.write_text(
+            "ATOM      1  N   ALA A   1       0.000   0.000   0.000"
+            "  1.00  0.00           N\nEND\n"
+        )
+        return pdb
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_analyze_interface_writes_no_pdb(
+        self, mock_op, tmp_path
+    ):
+        """analyze_interface should not write a PDB file."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        mock_op.return_value = Structure(
+            pdb_string="ATOM\nEND\n",
+            metadata={
+                "dG": -5.0,
+                "complex_energy": -100.0,
+                "buried_sasa": 1200.0,
+                "sc_score": 0.65,
+                "n_interface_residues": 20,
+            },
+        )
+
+        wf = self._make_workflow(
+            tmp_path,
+            [{"operation": "analyze_interface"}],
+            project_path="results",
+        )
+        wf.run()
+
+        step_dir = tmp_path / "results" / "0.analyze_interface"
+        assert step_dir.exists()
+        # No PDB files should be written
+        pdb_files = list(step_dir.glob("*.pdb"))
+        assert len(pdb_files) == 0
+        # Interface JSON should be written
+        assert (step_dir / "interface.json").exists()
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_relax_writes_pdb_and_energy(
+        self, mock_op, tmp_path
+    ):
+        """relax should write PDB and energy.json."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
@@ -1288,37 +1529,193 @@ class TestDirectoryOutput:
                 "1.000   1.000   1.000  1.00  0.00"
                 "           N\nEND\n"
             ),
+            metadata={
+                "final_energy": -50.0,
+                "energy_breakdown": {"total": -50.0},
+            },
+        )
+
+        wf = self._make_workflow(
+            tmp_path,
+            [{"operation": "relax"}],
+            project_path="results",
+        )
+        wf.run()
+
+        step_dir = tmp_path / "results" / "0.relax"
+        assert (step_dir / "relaxed.pdb").exists()
+        assert (step_dir / "energy.json").exists()
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_idealize_writes_pdb_only(
+        self, mock_op, tmp_path
+    ):
+        """idealize writes PDB and metrics, no energy.json."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        mock_op.return_value = Structure(
+            pdb_string="ATOM\nEND\n",
+            metadata={"chain_gaps": 0},
         )
 
         wf = self._make_workflow(
             tmp_path,
             [{"operation": "idealize"}],
-            output="results/",
+            project_path="results",
         )
-        # Manually set up a multi-structure population for _write_population
-        from boundry.operations import Structure as S
+        wf.run()
 
-        population = [
-            S(pdb_string=(
-                "ATOM      1  N   ALA A   1       "
-                "1.000   1.000   1.000  1.00  0.00"
-                "           N\nEND\n"
-            )),
-            S(pdb_string=(
-                "ATOM      1  N   ALA A   1       "
-                "2.000   2.000   2.000  1.00  0.00"
-                "           N\nEND\n"
-            )),
-        ]
+        step_dir = tmp_path / "results" / "0.idealize"
+        assert (step_dir / "idealized.pdb").exists()
+        # No energy.json for idealize
+        assert not (step_dir / "energy.json").exists()
+        # Should have metrics.json with chain_gaps
+        assert (step_dir / "metrics.json").exists()
+        metrics = json.loads(
+            (step_dir / "metrics.json").read_text()
+        )
+        assert metrics["chain_gaps"] == 0
 
-        output_dir = tmp_path / "results"
-        wf._write_population(population, str(output_dir) + "/", operation="relax")
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_metrics_from_prior_steps_dont_leak(
+        self, mock_op, tmp_path
+    ):
+        """Metrics from step 1 should not appear in step 2's output."""
+        from boundry.operations import Structure
 
-        pdb_files = list(output_dir.glob("*.pdb"))
-        assert len(pdb_files) == 2
-        filenames = sorted(f.stem for f in pdb_files)
-        assert any("rank_1" in f for f in filenames)
-        assert any("rank_2" in f for f in filenames)
+        self._make_input(tmp_path)
+
+        def _dispatch(name, structure, params):
+            if name == "idealize":
+                return Structure(
+                    pdb_string="ATOM\nEND\n",
+                    metadata={"chain_gaps": 2},
+                )
+            else:
+                return Structure(
+                    pdb_string="ATOM\nEND\n",
+                    metadata={
+                        "final_energy": -50.0,
+                        "energy_breakdown": {"total": -50.0},
+                    },
+                )
+
+        mock_op.side_effect = _dispatch
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {"operation": "idealize"},
+                {"operation": "relax"},
+            ],
+            project_path="results",
+        )
+        wf.run()
+
+        # Relax metrics should only contain relax-native keys
+        relax_dir = tmp_path / "results" / "1.relax"
+        if (relax_dir / "metrics.json").exists():
+            metrics = json.loads(
+                (relax_dir / "metrics.json").read_text()
+            )
+            # chain_gaps is from idealize, should not appear
+            assert "chain_gaps" not in metrics
+
+    def test_operation_output_specs_complete(self):
+        """All valid operations have an output spec."""
+        for op in VALID_OPERATIONS:
+            assert op in _OPERATION_OUTPUT_SPECS, (
+                f"Missing output spec for {op}"
+            )
+
+    def test_native_metric_keys_complete(self):
+        """All valid operations have native metric keys defined."""
+        for op in VALID_OPERATIONS:
+            assert op in _NATIVE_METRIC_KEYS, (
+                f"Missing native metric keys for {op}"
+            )
+
+    def test_structural_ops_write_pdb(self):
+        """Operations that modify structure should write PDB."""
+        structural_ops = {
+            "idealize",
+            "minimize",
+            "repack",
+            "mpnn",
+            "relax",
+            "design",
+            "renumber",
+        }
+        for op in structural_ops:
+            spec = _OPERATION_OUTPUT_SPECS[op]
+            assert spec.writes_pdb, (
+                f"{op} should write PDB"
+            )
+
+    def test_non_structural_ops_skip_pdb(self):
+        """Operations that don't modify structure skip PDB."""
+        non_structural_ops = {
+            "select_positions",
+            "analyze_interface",
+        }
+        for op in non_structural_ops:
+            spec = _OPERATION_OUTPUT_SPECS[op]
+            assert not spec.writes_pdb, (
+                f"{op} should not write PDB"
+            )
+
+
+# ------------------------------------------------------------------
+# Project path
+# ------------------------------------------------------------------
+
+
+class TestProjectPath:
+    """Tests for project_path handling."""
+
+    def test_project_path_from_yaml(self, tmp_path):
+        """project_path is parsed from YAML."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "project_path": "results",
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert wf.config.project_path == "results"
+
+    def test_project_path_none_when_omitted(self, tmp_path):
+        """project_path is None when not specified."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert wf.config.project_path is None
+
+    def test_cli_override_project_path(self, tmp_path):
+        """project_path can be overridden via CLI."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            "input: input.pdb\n"
+            "project_path: original\n"
+            "steps:\n"
+            "  - operation: idealize\n"
+        )
+        wf = Workflow.from_yaml(
+            wf_file, overrides=["project_path=overridden"]
+        )
+        assert wf.config.project_path == "overridden"
 
 
 # ------------------------------------------------------------------
@@ -1337,7 +1734,11 @@ class TestSafeParamHandling:
         mock_op.return_value = struct
 
         # Should not raise, even with unknown 'bogus' param
-        Workflow._run_operation("idealize", struct, {"fix_cis_omega": False, "bogus": 42})
+        Workflow._run_operation(
+            "idealize",
+            struct,
+            {"fix_cis_omega": False, "bogus": 42},
+        )
 
         _, kwargs = mock_op.call_args
         config = kwargs["config"]
@@ -1351,7 +1752,9 @@ class TestSafeParamHandling:
         mock_op.return_value = struct
 
         Workflow._run_operation(
-            "minimize", struct, {"constrained": True, "bogus": 42}
+            "minimize",
+            struct,
+            {"constrained": True, "bogus": 42},
         )
 
         _, kwargs = mock_op.call_args
@@ -1360,14 +1763,18 @@ class TestSafeParamHandling:
 
     @patch("boundry.weights.ensure_weights")
     @patch("boundry.operations.repack")
-    def test_repack_ignores_unknown_params(self, mock_op, mock_weights):
+    def test_repack_ignores_unknown_params(
+        self, mock_op, mock_weights
+    ):
         from boundry.operations import Structure
 
         struct = Structure(pdb_string="ATOM\nEND\n")
         mock_op.return_value = struct
 
         Workflow._run_operation(
-            "repack", struct, {"temperature": 0.2, "bogus": 42}
+            "repack",
+            struct,
+            {"temperature": 0.2, "bogus": 42},
         )
 
         _, kwargs = mock_op.call_args
@@ -1376,14 +1783,18 @@ class TestSafeParamHandling:
 
     @patch("boundry.weights.ensure_weights")
     @patch("boundry.operations.mpnn")
-    def test_mpnn_ignores_unknown_params(self, mock_op, mock_weights):
+    def test_mpnn_ignores_unknown_params(
+        self, mock_op, mock_weights
+    ):
         from boundry.operations import Structure
 
         struct = Structure(pdb_string="ATOM\nEND\n")
         mock_op.return_value = struct
 
         Workflow._run_operation(
-            "mpnn", struct, {"temperature": 0.2, "bogus": 42}
+            "mpnn",
+            struct,
+            {"temperature": 0.2, "bogus": 42},
         )
 
         _, kwargs = mock_op.call_args
@@ -1462,7 +1873,9 @@ class TestWorkflowSeedParsing:
                 }
             )
         )
-        with pytest.raises(WorkflowError, match="seed.*must be an integer"):
+        with pytest.raises(
+            WorkflowError, match="seed.*must be an integer"
+        ):
             Workflow.from_yaml(wf_file)
 
     def test_bool_seed_rejected(self, tmp_path):
@@ -1476,7 +1889,9 @@ class TestWorkflowSeedParsing:
                 }
             )
         )
-        with pytest.raises(WorkflowError, match="seed.*must be an integer"):
+        with pytest.raises(
+            WorkflowError, match="seed.*must be an integer"
+        ):
             Workflow.from_yaml(wf_file)
 
     def test_old_iterate_seed_key_rejected(self, tmp_path):
@@ -1491,7 +1906,9 @@ class TestWorkflowSeedParsing:
                             "iterate": {
                                 "n": 3,
                                 "seed": True,
-                                "steps": [{"operation": "relax"}],
+                                "steps": [
+                                    {"operation": "relax"}
+                                ],
                             }
                         }
                     ],
@@ -1546,63 +1963,20 @@ class TestWithSeed:
 class TestVarInterpolation:
     """Tests for ${key} variable interpolation in workflow YAML."""
 
-    def test_output_referenced_in_step(self, tmp_path):
-        """${output} in a step output resolves to top-level output."""
-        wf_file = tmp_path / "wf.yaml"
-        wf_file.write_text(
-            "input: input.pdb\n"
-            "output: results\n"
-            "steps:\n"
-            "  - operation: idealize\n"
-            "    output: ${output}/idealized.pdb\n"
-        )
-        wf = Workflow.from_yaml(wf_file)
-        assert wf.config.steps[0].output == "results/idealized.pdb"
-
-    def test_output_referenced_in_iterate(self, tmp_path):
-        """${output} in iterate output resolves correctly."""
-        wf_file = tmp_path / "wf.yaml"
-        wf_file.write_text(
-            "input: input.pdb\n"
-            "output: results\n"
-            "steps:\n"
-            "  - iterate:\n"
-            "      n: 3\n"
-            "      output: ${output}/cycle_{cycle}/\n"
-            "      steps:\n"
-            "        - operation: relax\n"
-        )
-        wf = Workflow.from_yaml(wf_file)
-        block = wf.config.steps[0]
-        assert block.output == "results/cycle_{cycle}/"
-
     def test_input_referenceable(self, tmp_path):
         """${input} resolves to the top-level input value."""
         wf_file = tmp_path / "wf.yaml"
         wf_file.write_text(
             "input: structures/my_protein.pdb\n"
+            "project_path: ${input}_results\n"
             "steps:\n"
             "  - operation: idealize\n"
-            "    output: ${input}_idealized.pdb\n"
         )
         wf = Workflow.from_yaml(wf_file)
         assert (
-            wf.config.steps[0].output
-            == "structures/my_protein.pdb_idealized.pdb"
+            wf.config.project_path
+            == "structures/my_protein.pdb_results"
         )
-
-    def test_user_var_in_step_output(self, tmp_path):
-        """Custom user-defined key in step output."""
-        wf_file = tmp_path / "wf.yaml"
-        wf_file.write_text(
-            "input: input.pdb\n"
-            "project: my_project\n"
-            "steps:\n"
-            "  - operation: idealize\n"
-            "    output: ${project}/idealized.pdb\n"
-        )
-        wf = Workflow.from_yaml(wf_file)
-        assert wf.config.steps[0].output == "my_project/idealized.pdb"
 
     def test_user_var_in_params(self, tmp_path):
         """Custom key referenced in params."""
@@ -1616,60 +1990,23 @@ class TestVarInterpolation:
             "      resfile: ${resfile_path}\n"
         )
         wf = Workflow.from_yaml(wf_file)
-        assert wf.config.steps[0].params["resfile"] == "design.resfile"
+        assert (
+            wf.config.steps[0].params["resfile"]
+            == "design.resfile"
+        )
 
     def test_cross_reference(self, tmp_path):
         """User var can reference another variable."""
         wf_file = tmp_path / "wf.yaml"
         wf_file.write_text(
             "input: input.pdb\n"
-            "output: results\n"
-            "run_dir: ${output}/run_1\n"
+            "project_path: results\n"
+            "run_dir: ${project_path}/run_1\n"
             "steps:\n"
             "  - operation: idealize\n"
-            "    output: ${run_dir}/idealized.pdb\n"
         )
         wf = Workflow.from_yaml(wf_file)
-        assert (
-            wf.config.steps[0].output
-            == "results/run_1/idealized.pdb"
-        )
-
-    def test_multiple_refs_in_one_string(self, tmp_path):
-        """Multiple ${...} in a single string."""
-        wf_file = tmp_path / "wf.yaml"
-        wf_file.write_text(
-            "input: input.pdb\n"
-            "output: results\n"
-            "project: myproj\n"
-            "steps:\n"
-            "  - operation: idealize\n"
-            "    output: ${output}/${project}/final.pdb\n"
-        )
-        wf = Workflow.from_yaml(wf_file)
-        assert (
-            wf.config.steps[0].output
-            == "results/myproj/final.pdb"
-        )
-
-    def test_vars_coexist_with_runtime_tokens(self, tmp_path):
-        """${var} resolved at load, {cycle} preserved for runtime."""
-        wf_file = tmp_path / "wf.yaml"
-        wf_file.write_text(
-            "input: input.pdb\n"
-            "output: results\n"
-            "steps:\n"
-            "  - iterate:\n"
-            "      n: 2\n"
-            "      output: ${output}/cycle_{cycle}/\n"
-            "      steps:\n"
-            "        - operation: relax\n"
-        )
-        wf = Workflow.from_yaml(wf_file)
-        block = wf.config.steps[0]
-        assert block.output == "results/cycle_{cycle}/"
-        assert "${" not in block.output
-        assert "{cycle}" in block.output
+        assert wf.config.vars["run_dir"] == "results/run_1"
 
     def test_no_var_references(self, tmp_path):
         """Existing workflows without ${...} work unchanged."""
@@ -1678,14 +2015,14 @@ class TestVarInterpolation:
             yaml.dump(
                 {
                     "input": "input.pdb",
-                    "output": "output.pdb",
+                    "project_path": "results",
                     "steps": [{"operation": "idealize"}],
                 }
             )
         )
         wf = Workflow.from_yaml(wf_file)
         assert wf.config.input == "input.pdb"
-        assert wf.config.output == "output.pdb"
+        assert wf.config.project_path == "results"
 
     def test_numeric_var_coerced(self, tmp_path):
         """Numeric user var is coerced to string in namespace."""
@@ -1693,12 +2030,12 @@ class TestVarInterpolation:
         wf_file.write_text(
             "input: input.pdb\n"
             "run_id: 42\n"
+            "project_path: run_${run_id}\n"
             "steps:\n"
             "  - operation: idealize\n"
-            "    output: run_${run_id}/idealized.pdb\n"
         )
         wf = Workflow.from_yaml(wf_file)
-        assert wf.config.steps[0].output == "run_42/idealized.pdb"
+        assert wf.config.project_path == "run_42"
 
     def test_numeric_params_not_affected(self, tmp_path):
         """Int/float params pass through unchanged."""
@@ -1739,9 +2076,12 @@ class TestVarInterpolation:
             "input: input.pdb\n"
             "steps:\n"
             "  - operation: idealize\n"
-            "    output: ${nonexistent}/out.pdb\n"
+            "    params:\n"
+            "      resfile: ${nonexistent}/out.resfile\n"
         )
-        with pytest.raises(WorkflowError, match="resolution failed"):
+        with pytest.raises(
+            WorkflowError, match="resolution failed"
+        ):
             Workflow.from_yaml(wf_file)
 
     def test_non_scalar_user_var_raises(self, tmp_path):
@@ -1767,7 +2107,9 @@ class TestVarInterpolation:
             "steps:\n"
             "  - operation: idealize\n"
         )
-        with pytest.raises(WorkflowError, match="Invalid variable name"):
+        with pytest.raises(
+            WorkflowError, match="Invalid variable name"
+        ):
             Workflow.from_yaml(wf_file)
 
     def test_circular_reference_raises(self, tmp_path):
@@ -1784,15 +2126,18 @@ class TestVarInterpolation:
             Workflow.from_yaml(wf_file)
 
     def test_steps_not_referenceable(self, tmp_path):
-        """${steps} is undefined because steps is non-scalar."""
+        """${steps} is non-scalar, so referencing it causes an error."""
         wf_file = tmp_path / "wf.yaml"
         wf_file.write_text(
             "input: input.pdb\n"
             "steps:\n"
             "  - operation: idealize\n"
-            "    output: ${steps}/out.pdb\n"
+            "    params:\n"
+            "      resfile: ${steps}\n"
         )
-        with pytest.raises(WorkflowError, match="resolution failed"):
+        with pytest.raises(
+            WorkflowError, match="resolution failed"
+        ):
             Workflow.from_yaml(wf_file)
 
     def test_bool_user_var_rejected(self, tmp_path):
@@ -1807,30 +2152,18 @@ class TestVarInterpolation:
         with pytest.raises(WorkflowError, match="scalar"):
             Workflow.from_yaml(wf_file)
 
-    def test_partial_dollar_brace_raises(self, tmp_path):
-        """Partial ${ without } raises a resolution error."""
-        wf_file = tmp_path / "wf.yaml"
-        wf_file.write_text(
-            'input: input.pdb\n'
-            'steps:\n'
-            '  - operation: idealize\n'
-            '    output: "some_${_incomplete"\n'
-        )
-        with pytest.raises(WorkflowError, match="resolution failed"):
-            Workflow.from_yaml(wf_file)
-
     def test_seed_in_namespace(self, tmp_path):
         """${seed} resolves to the YAML seed value."""
         wf_file = tmp_path / "wf.yaml"
         wf_file.write_text(
             "input: input.pdb\n"
             "seed: 42\n"
+            "project_path: run_seed_${seed}\n"
             "steps:\n"
             "  - operation: idealize\n"
-            "    output: run_seed_${seed}.pdb\n"
         )
         wf = Workflow.from_yaml(wf_file)
-        assert wf.config.steps[0].output == "run_seed_42.pdb"
+        assert wf.config.project_path == "run_seed_42"
 
 
 # ------------------------------------------------------------------
@@ -1841,19 +2174,19 @@ class TestVarInterpolation:
 class TestCliOverrides:
     """Tests for the overrides parameter in from_yaml."""
 
-    def test_override_output(self, tmp_path):
-        """Override output via dotlist."""
+    def test_override_project_path(self, tmp_path):
+        """Override project_path via dotlist."""
         wf_file = tmp_path / "wf.yaml"
         wf_file.write_text(
             "input: input.pdb\n"
-            "output: original.pdb\n"
+            "project_path: original\n"
             "steps:\n"
             "  - operation: idealize\n"
         )
         wf = Workflow.from_yaml(
-            wf_file, overrides=["output=overridden.pdb"]
+            wf_file, overrides=["project_path=overridden"]
         )
-        assert wf.config.output == "overridden.pdb"
+        assert wf.config.project_path == "overridden"
 
     def test_override_user_var(self, tmp_path):
         """Override a user-defined variable."""
@@ -1861,14 +2194,14 @@ class TestCliOverrides:
         wf_file.write_text(
             "input: input.pdb\n"
             "project: default_proj\n"
+            "project_path: ${project}\n"
             "steps:\n"
             "  - operation: idealize\n"
-            "    output: ${project}/out.pdb\n"
         )
         wf = Workflow.from_yaml(
             wf_file, overrides=["project=custom_proj"]
         )
-        assert wf.config.steps[0].output == "custom_proj/out.pdb"
+        assert wf.config.project_path == "custom_proj"
 
     def test_override_seed(self, tmp_path):
         """Override seed via dotlist."""
@@ -1914,12 +2247,12 @@ class TestCliOverrides:
         wf_file = tmp_path / "wf.yaml"
         wf_file.write_text(
             "input: input.pdb\n"
-            "output: out.pdb\n"
+            "project_path: results\n"
             "steps:\n"
             "  - operation: idealize\n"
         )
         wf = Workflow.from_yaml(wf_file, overrides=None)
-        assert wf.config.output == "out.pdb"
+        assert wf.config.project_path == "results"
 
 
 # ------------------------------------------------------------------
@@ -1935,7 +2268,9 @@ class TestBuiltinWorkflowLookup:
         from boundry.cli import _resolve_workflow
 
         wf_file = tmp_path / "my.yaml"
-        wf_file.write_text("input: x\nsteps:\n  - operation: idealize\n")
+        wf_file.write_text(
+            "input: x\nsteps:\n  - operation: idealize\n"
+        )
         result = _resolve_workflow(str(wf_file))
         assert result == wf_file
 
@@ -1965,7 +2300,9 @@ class TestBuiltinWorkflowLookup:
         user_wf_dir = tmp_path / ".boundry" / "workflows"
         user_wf_dir.mkdir(parents=True)
         wf_file = user_wf_dir / "custom.yaml"
-        wf_file.write_text("input: x\nsteps:\n  - operation: idealize\n")
+        wf_file.write_text(
+            "input: x\nsteps:\n  - operation: idealize\n"
+        )
         monkeypatch.setattr(_Path, "home", lambda: tmp_path)
         result = _resolve_workflow("custom")
         assert result == wf_file
