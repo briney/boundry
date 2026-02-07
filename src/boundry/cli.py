@@ -63,6 +63,7 @@ def _setup_logging(verbose: bool) -> None:
             "torch",
             "absl",
             "prody",
+            ".prody",
             "py.warnings",
         ):
             logging.getLogger(name).setLevel(logging.ERROR)
@@ -88,10 +89,18 @@ def _setup_logging(verbose: bool) -> None:
         except ImportError:
             pass  # absl not installed, nothing to suppress
 
-        # Suppress ProDy logger explicitly
+        # Suppress ProDy logger explicitly.
+        # ProDy uses logger name '.prody' (dot prefix).  Its PackageLogger
+        # __init__ resets the logger level to DEBUG and adds its own
+        # StreamHandler, so we must re-suppress AFTER the import.
+        # confProDy() emits an INFO message *before* applying the new
+        # verbosity, so we also disable propagation to the root handler.
         try:
             import prody
 
+            prody_logger = logging.getLogger(".prody")
+            prody_logger.setLevel(logging.CRITICAL)
+            prody_logger.propagate = False
             prody.confProDy(verbosity="none")
         except ImportError:
             pass  # prody not installed

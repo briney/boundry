@@ -110,6 +110,12 @@ def _suppress_worker_warnings() -> None:
         category=DeprecationWarning,
     )
 
+    # Suppress ProDy logger (uses '.prody' name with dot prefix).
+    # Setting propagate=False here persists through ProDy's PackageLogger
+    # __init__, which resets the logger level but not propagation.
+    prody_logger = logging.getLogger(".prody")
+    prody_logger.propagate = False
+
 
 # ------------------------------------------------------------------
 # Worker functions (top-level, pickle-safe targets)
