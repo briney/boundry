@@ -328,3 +328,139 @@ class TestSelectPositions:
         # dG < -8.0: A20 (-9.5)
         assert len(spec.residue_specs) == 1
         assert "A20" in spec.residue_specs
+
+    def test_top_k_descending(self):
+        """top_k=1, order='descending' selects the highest-ddG row."""
+        struct = _make_structure()
+        result = select_positions(
+            struct,
+            config=SelectPositionsConfig(
+                top_k=1, order="descending"
+            ),
+        )
+        spec = result.metadata["design_spec"]
+        assert len(spec.residue_specs) == 1
+        # A10 has ddG=4.0 (highest)
+        assert "A10" in spec.residue_specs
+
+    def test_top_k_ascending(self):
+        """top_k=1, order='ascending' selects the lowest-ddG row."""
+        struct = _make_structure()
+        result = select_positions(
+            struct,
+            config=SelectPositionsConfig(
+                top_k=1, order="ascending"
+            ),
+        )
+        spec = result.metadata["design_spec"]
+        assert len(spec.residue_specs) == 1
+        # A20 has ddG=0.5 (lowest)
+        assert "A20" in spec.residue_specs
+
+    def test_top_k_random(self):
+        """top_k=1, order='random' selects exactly 1 position."""
+        struct = _make_structure()
+        result = select_positions(
+            struct,
+            config=SelectPositionsConfig(
+                top_k=1, order="random"
+            ),
+        )
+        spec = result.metadata["design_spec"]
+        assert len(spec.residue_specs) == 1
+        assert result.metadata["selected_positions"] == 1
+
+    def test_top_k_random_with_threshold(self):
+        """Threshold filters first, then random picks from survivors."""
+        struct = _make_structure()
+        # threshold=1.0 above → A10 (4.0) and B15 (2.5), then random top_k=1
+        result = select_positions(
+            struct,
+            config=SelectPositionsConfig(
+                threshold=1.0,
+                top_k=1,
+                order="random",
+            ),
+        )
+        spec = result.metadata["design_spec"]
+        assert len(spec.residue_specs) == 1
+        selected_key = list(spec.residue_specs.keys())[0]
+        assert selected_key in ("A10", "B15")
+
+    def test_top_k_with_threshold(self):
+        """Threshold narrows to 2, top_k=1 picks the best."""
+        struct = _make_structure()
+        result = select_positions(
+            struct,
+            config=SelectPositionsConfig(
+                threshold=1.0,
+                top_k=1,
+                order="descending",
+            ),
+        )
+        spec = result.metadata["design_spec"]
+        assert len(spec.residue_specs) == 1
+        # A10 has ddG=4.0 (highest among threshold survivors)
+        assert "A10" in spec.residue_specs
+
+    def test_top_k_exceeds_candidates(self):
+        """top_k larger than candidate count returns all candidates."""
+        struct = _make_structure()
+        result = select_positions(
+            struct,
+            config=SelectPositionsConfig(top_k=100),
+        )
+        spec = result.metadata["design_spec"]
+        # All 3 rows are valid candidates
+        assert len(spec.residue_specs) == 3
+
+    def test_top_k_after_threshold_eliminates_all(self):
+        """Threshold eliminates all rows, top_k gets 0."""
+        struct = _make_structure()
+        result = select_positions(
+            struct,
+            config=SelectPositionsConfig(
+                threshold=100.0, top_k=2
+            ),
+        )
+        spec = result.metadata["design_spec"]
+        assert len(spec.residue_specs) == 0
+        assert result.metadata["selected_positions"] == 0
+
+    def test_top_k_metadata(self):
+        """selection_top_k and selection_order appear in metadata."""
+        struct = _make_structure()
+        result = select_positions(
+            struct,
+            config=SelectPositionsConfig(
+                top_k=2, order="ascending"
+            ),
+        )
+        meta = result.metadata
+        assert meta["selection_top_k"] == 2
+        assert meta["selection_order"] == "ascending"
+
+    def test_order_without_top_k_ignored(self):
+        """order alone (without top_k) has no effect on results."""
+        struct = _make_structure()
+        result_default = select_positions(struct)
+        result_asc = select_positions(
+            struct,
+            config=SelectPositionsConfig(order="ascending"),
+        )
+        spec_default = result_default.metadata["design_spec"]
+        spec_asc = result_asc.metadata["design_spec"]
+        assert set(spec_default.residue_specs.keys()) == set(
+            spec_asc.residue_specs.keys()
+        )
+
+    def test_no_threshold_no_top_k(self):
+        """Both None → all valid (non-skipped, non-None) rows selected."""
+        struct = _make_structure()
+        result = select_positions(struct)
+        spec = result.metadata["design_spec"]
+        # All 3 rows are valid
+        assert len(spec.residue_specs) == 3
+        assert "A10" in spec.residue_specs
+        assert "A20" in spec.residue_specs
+        assert "B15" in spec.residue_specs

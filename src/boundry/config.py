@@ -83,8 +83,10 @@ class SelectPositionsConfig:
 
     source: str = "alanine_scan"  # "per_position" or "alanine_scan"
     metric: str = "ddG"  # PositionRow field to threshold on
-    threshold: float = 1.0  # Threshold value
+    threshold: Optional[float] = None  # Threshold value (None = no filtering)
     direction: str = "above"  # "above" (metric > threshold) or "below"
+    top_k: Optional[int] = None  # Select top-k positions (None = no limit)
+    order: str = "descending"  # "ascending" | "descending" | "random"
     mode: str = "ALLAA"  # ResidueMode for selected positions
     default_mode: str = "NATAA"  # ResidueMode for non-selected positions
     allowed_aas: Optional[str] = None  # For PIKAA mode: e.g. "ACDEF"

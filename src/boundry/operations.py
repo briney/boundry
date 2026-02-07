@@ -881,47 +881,77 @@ def select_positions(
     if config.allowed_aas is not None:
         allowed_aa_set = set(config.allowed_aas.upper())
 
-    # Filter rows by metric threshold
-    residue_specs: dict = {}
-    selected_count = 0
-
+    # Phase 1 — Collect candidates
+    candidates = []
     for row in position_result.rows:
         if row.scan_skipped:
             continue
-
         metric_value = getattr(row, config.metric, None)
         if metric_value is None:
             continue
+        if config.threshold is not None:
+            passes = (
+                config.direction == "above"
+                and metric_value > config.threshold
+            ) or (
+                config.direction == "below"
+                and metric_value < config.threshold
+            )
+            if not passes:
+                continue
+        candidates.append((row, metric_value))
 
-        passes = (
-            config.direction == "above" and metric_value > config.threshold
-        ) or (
-            config.direction == "below" and metric_value < config.threshold
+    # Phase 2 — Top-k selection
+    if config.top_k is not None:
+        import random
+
+        if config.order == "descending":
+            candidates.sort(key=lambda x: x[1], reverse=True)
+        elif config.order == "ascending":
+            candidates.sort(key=lambda x: x[1])
+        elif config.order == "random":
+            candidates = random.sample(
+                candidates, min(len(candidates), config.top_k)
+            )
+        candidates = candidates[: config.top_k]
+
+    # Phase 3 — Build residue specs
+    residue_specs: dict = {}
+    for row, _ in candidates:
+        key = (
+            f"{row.chain_id}{row.residue_number}"
+            f"{row.insertion_code}"
+        )
+        residue_specs[key] = ResidueSpec(
+            chain=row.chain_id,
+            resnum=row.residue_number,
+            icode=row.insertion_code,
+            mode=selected_mode,
+            allowed_aas=allowed_aa_set,
         )
 
-        if passes:
-            key = (
-                f"{row.chain_id}{row.residue_number}"
-                f"{row.insertion_code}"
-            )
-            residue_specs[key] = ResidueSpec(
-                chain=row.chain_id,
-                resnum=row.residue_number,
-                icode=row.insertion_code,
-                mode=selected_mode,
-                allowed_aas=allowed_aa_set,
-            )
-            selected_count += 1
-
+    selected_count = len(residue_specs)
     design_spec = DesignSpec(
         residue_specs=residue_specs,
         default_mode=default_mode,
     )
 
+    # Build log message
+    filter_desc = ""
+    if config.threshold is not None:
+        filter_desc += (
+            f"{config.metric} {config.direction} {config.threshold}"
+        )
+    if config.top_k is not None:
+        if filter_desc:
+            filter_desc += ", "
+        filter_desc += f"top_k={config.top_k} order={config.order}"
+    if not filter_desc:
+        filter_desc = "all valid positions"
+
     logger.info(
         f"select_positions: {selected_count} positions selected "
-        f"({config.metric} {config.direction} {config.threshold} "
-        f"from {config.source}), mode={config.mode}"
+        f"({filter_desc} from {config.source}), mode={config.mode}"
     )
 
     metadata: Dict[str, Any] = {
@@ -933,6 +963,8 @@ def select_positions(
         "selection_threshold": config.threshold,
         "selection_direction": config.direction,
         "selection_mode": config.mode,
+        "selection_top_k": config.top_k,
+        "selection_order": config.order,
     }
 
     return Structure(

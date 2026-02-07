@@ -166,6 +166,8 @@ _NATIVE_METRIC_KEYS: Dict[str, tuple[str, ...]] = {
         "selection_threshold",
         "selection_direction",
         "selection_mode",
+        "selection_top_k",
+        "selection_order",
     ),
     "analyze_interface": (
         "dG",
