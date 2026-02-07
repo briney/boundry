@@ -1022,6 +1022,11 @@ def run(
         help="Number of parallel worker processes "
         "(overrides YAML workers; default 1 = sequential)",
     ),
+    no_progress: bool = typer.Option(
+        False,
+        "--no-progress",
+        help="Suppress workflow progress bars",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -1052,6 +1057,9 @@ def run(
         )
         raise typer.Exit(code=1)
 
+    # Disable progress when verbose is active (they conflict visually)
+    show_progress = not no_progress and not verbose
+
     overrides = ctx.args or None
     workflow = Workflow.from_yaml(
         resolved,
@@ -1059,7 +1067,7 @@ def run(
         workers=workers,
         overrides=overrides,
     )
-    workflow.run()
+    workflow.run(show_progress=show_progress)
 
 
 # -------------------------------------------------------------------

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
+from boundry._progress import WorkflowProgress, _extract_metric_names
 from boundry.condition import ConditionError, check_condition, parse_condition
 from boundry.config import (
     BeamBlock,
@@ -718,6 +719,7 @@ class Workflow:
     ):
         self.config = config
         self.last_population: List["Structure"] = []
+        self._progress = WorkflowProgress(enabled=False)
         self._validate()
 
     @classmethod
@@ -1013,12 +1015,18 @@ class Workflow:
     # Execution
     # ------------------------------------------------------------------
 
-    def run(self) -> "Structure":
+    def run(
+        self, show_progress: bool = False
+    ) -> "Structure":
         """Execute workflow and return the best final structure."""
-        population = self.run_population()
+        population = self.run_population(
+            show_progress=show_progress
+        )
         return population[0]
 
-    def run_population(self) -> List["Structure"]:
+    def run_population(
+        self, show_progress: bool = False
+    ) -> List["Structure"]:
         """Execute workflow and return the full final candidate
         population."""
         from boundry.operations import Structure
@@ -1042,17 +1050,26 @@ class Workflow:
         logger.info(f"Project path: {project_path.resolve()}")
 
         total = len(self.config.steps)
-        for i, item in enumerate(self.config.steps):
-            logger.info(
-                f"Step {i + 1}/{total}: "
-                f"{self._describe_item(item)}"
-            )
-            current = self._execute_item(
-                item,
-                current,
-                seed_base=self.config.seed,
-                step_index=i,
-            )
+
+        with WorkflowProgress(enabled=show_progress) as progress:
+            self._progress = progress
+            progress.start_workflow(total)
+
+            for i, item in enumerate(self.config.steps):
+                desc = self._describe_item(item)
+                logger.info(
+                    f"Step {i + 1}/{total}: {desc}"
+                )
+                progress.advance_workflow(desc)
+                current = self._execute_item(
+                    item,
+                    current,
+                    seed_base=self.config.seed,
+                    step_index=i,
+                )
+
+            progress.finish_workflow()
+            self._progress = WorkflowProgress(enabled=False)
 
         self.last_population = list(current.population)
         return list(current.population)
@@ -1093,6 +1110,8 @@ class Workflow:
             raise WorkflowError(
                 f"Unknown operation '{step.operation}'"
             )
+
+        self._progress.start_inner_step(step.operation)
 
         # Build output context for this step
         step_ctx = (
@@ -1144,6 +1163,9 @@ class Workflow:
                     ),
                 )
             )
+
+        self._progress.finish_inner_step()
+
         return _ExecutionContext(
             population=updated,
             last_operation=step.operation,
@@ -1255,10 +1277,17 @@ class Workflow:
 
         current = context
         previous_metadata: Optional[Dict[str, Any]] = None
-        max_iters = (
-            block.max_n if block.until is not None else block.n
-        )
+        convergence = block.until is not None
+        max_iters = block.max_n if convergence else block.n
         converged = False
+
+        # Extract metric name from convergence condition for display
+        metric_names = _extract_metric_names(block.until)
+        metric_name = metric_names[0] if metric_names else ""
+
+        self._progress.start_iterate(
+            max_iters, convergence, metric_name
+        )
 
         for cycle in range(1, max_iters + 1):
             # Create cycle context
@@ -1288,7 +1317,15 @@ class Workflow:
                     step_index=inner_idx,
                 )
 
-            if block.until is not None:
+            # Extract metric value for progress display
+            metric_value = None
+            if metric_name:
+                metric_value = extract_numeric_metric(
+                    current.population[0].metadata, metric_name
+                )
+            self._progress.advance_iterate(cycle, metric_value)
+
+            if convergence:
                 converged, previous_metadata = (
                     self._check_convergence(
                         block.until,
@@ -1304,11 +1341,13 @@ class Workflow:
                     )
                     break
 
-        if block.until is not None and not converged:
+        if convergence and not converged:
             logger.warning(
                 f"Iterate block reached max_n={block.max_n} "
                 "without meeting convergence condition"
             )
+
+        self._progress.finish_iterate()
 
         # Restore parent output context
         return _ExecutionContext(
@@ -1333,6 +1372,8 @@ class Workflow:
 
         population = list(context.population)
         previous_best_metadata: Optional[Dict[str, Any]] = None
+
+        self._progress.start_beam(block.rounds)
 
         for round_num in range(1, block.rounds + 1):
             if not population:
@@ -1424,6 +1465,9 @@ class Workflow:
                 f"Beam round {round_num}/{block.rounds}: "
                 f"best {block.metric}={best_metric:.4f}"
             )
+            self._progress.advance_beam_round(
+                round_num, best_metric, block.metric
+            )
 
             # Phase 2: Write outputs to ranked directories
             if round_ctx is not None:
@@ -1468,6 +1512,8 @@ class Workflow:
                     )
                     break
 
+        self._progress.finish_beam()
+
         # Restore parent output context
         return _ExecutionContext(
             population=population,
@@ -1483,6 +1529,9 @@ class Workflow:
         expand_per: int,
     ) -> List[tuple["Structure", List[_StepSnapshot]]]:
         """Expand beam branches sequentially (original path)."""
+        total_branches = len(population) * expand_per
+        self._progress.start_branches(total_branches)
+
         expanded: List[
             tuple["Structure", List[_StepSnapshot]]
         ] = []
@@ -1513,6 +1562,9 @@ class Workflow:
                     )
                 for struct in branch.population:
                     expanded.append((struct, snapshots))
+                self._progress.advance_branch()
+
+        self._progress.finish_branches()
         return expanded
 
     def _expand_beam_parallel(
@@ -1569,6 +1621,8 @@ class Workflow:
             f"across {max_workers} workers"
         )
 
+        self._progress.start_branches(total)
+
         # Submit to pool
         expanded: List[
             tuple["Structure", List[_StepSnapshot]]
@@ -1597,6 +1651,7 @@ class Workflow:
                 logger.info(
                     f"  Branch {completed}/{total} completed"
                 )
+                self._progress.advance_branch()
 
                 # Reconstruct Structure + snapshots
                 struct = Structure(
@@ -1625,6 +1680,7 @@ class Workflow:
         else:
             pool.shutdown(wait=True)
 
+        self._progress.finish_branches()
         return expanded
 
     def _execute_item_with_snapshots(
