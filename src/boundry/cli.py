@@ -998,6 +998,13 @@ def run(
         "--seed",
         help="Random seed for reproducibility (overrides YAML seed)",
     ),
+    workers: Optional[int] = typer.Option(
+        None,
+        "--workers",
+        "-j",
+        help="Number of parallel worker processes "
+        "(overrides YAML workers; default 1 = sequential)",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -1032,6 +1039,7 @@ def run(
     workflow = Workflow.from_yaml(
         resolved,
         seed=seed,
+        workers=workers,
         overrides=overrides,
     )
     workflow.run()

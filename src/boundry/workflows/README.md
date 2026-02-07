@@ -21,6 +21,7 @@ workflow_version: 1          # optional, defaults to 1
 input: input.pdb             # required
 output: results/             # optional
 seed: 42                     # optional, workflow-level seed
+workers: 4                   # optional, parallel workers (default 1)
 resfile_path: design.resfile # user-defined variable (see §2)
 steps:                       # required, non-empty
   - operation: design
@@ -29,7 +30,7 @@ steps:                       # required, non-empty
     output: ${output}/designed.pdb
 ```
 
-Reserved top-level keys: `workflow_version`, `input`, `output`, `seed`,
+Reserved top-level keys: `workflow_version`, `input`, `output`, `seed`, `workers`,
 `steps`. Any other top-level key is treated as a user-defined variable
 (see §2).
 
@@ -48,6 +49,37 @@ precedence over the workflow-derived seed. Omit the workflow `seed`
 (or set it to `null`) for fully stochastic runs.
 
 The `--seed` CLI flag overrides the YAML `seed` when both are present.
+
+### Parallel Workers
+
+Set `workers` at the workflow level to enable process-level parallelism
+for beam expansion and multi-member population steps:
+
+```yaml
+workers: 4
+steps:
+  - beam:
+      width: 3
+      rounds: 10
+      workers: 8       # per-block override (optional)
+      steps:
+        - operation: design
+        - operation: analyze_interface
+```
+
+How it works:
+
+- `workers: 1` (default) runs everything sequentially — no process pool
+  is created.
+- `workers: N` (N > 1) uses a `ProcessPoolExecutor` with the `spawn`
+  start method for true parallel execution.
+- Per-block `workers` overrides the global value for that block.
+- Beam steps with nested iterate/beam blocks automatically fall back to
+  sequential execution (with a warning).
+- The `--workers` / `-j` CLI flag overrides the YAML `workers` value.
+
+Memory note: each worker process imports PyTorch/OpenMM independently
+(~500MB–1GB each). Use a worker count appropriate for your system.
 
 ## 2. Variable Interpolation
 
@@ -231,6 +263,7 @@ Fields:
 - `n` (default `1`) for fixed-count mode (`until` omitted)
 - `until` (optional condition string) for convergence mode
 - `max_n` (default `100`) safety cap when `until` is set
+- `workers` (optional int, overrides global `workers` for this block)
 - `output` (optional path template or directory path)
 
 Notes:
@@ -263,6 +296,7 @@ Fields:
 - `metric` (default `"dG"`) dotted path metric to score by
 - `direction` (`"min"` or `"max"`, default `"min"`)
 - `until` (optional condition string checked on best candidate each round)
+- `workers` (optional int, overrides global `workers` for this block)
 - `output` (optional path template)
 
 Notes:
@@ -554,7 +588,7 @@ You can also use arithmetic expressions combining variables, for example:
 - Block-level unknown keys raise errors.
 - Node must be exactly one of `operation`, `iterate`, `beam`.
 - `steps` lists must be non-empty.
-- Numeric block controls (`n`, `max_n`, `width`, `rounds`, `expand`) must be `>= 1`.
+- Numeric block controls (`n`, `max_n`, `width`, `rounds`, `expand`, `workers`) must be `>= 1`.
 - `beam.direction` must be `min` or `max`.
 - Invalid `until` syntax fails at parse time.
 - Undefined `${...}` references, circular references, and malformed

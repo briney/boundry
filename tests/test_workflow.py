@@ -2306,3 +2306,409 @@ class TestBuiltinWorkflowLookup:
         monkeypatch.setattr(_Path, "home", lambda: tmp_path)
         result = _resolve_workflow("custom")
         assert result == wf_file
+
+
+# ------------------------------------------------------------------
+# Workers parsing
+# ------------------------------------------------------------------
+
+
+class TestWorkersParsing:
+    """Tests for workers field parsing in YAML and config."""
+
+    def test_default_workers_is_one(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert wf.config.workers == 1
+
+    def test_yaml_workers_parsed(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "workers": 4,
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        assert wf.config.workers == 4
+
+    def test_cli_workers_overrides_yaml(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "workers": 2,
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file, workers=8)
+        assert wf.config.workers == 8
+
+    def test_invalid_workers_type_raises(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "workers": "four",
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        with pytest.raises(
+            WorkflowError, match="workers.*must be an integer"
+        ):
+            Workflow.from_yaml(wf_file)
+
+    def test_zero_workers_raises(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "workers": 0,
+                    "steps": [{"operation": "idealize"}],
+                }
+            )
+        )
+        with pytest.raises(
+            WorkflowError, match="workers.*must be >= 1"
+        ):
+            Workflow.from_yaml(wf_file)
+
+    def test_beam_block_workers_parsed(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [
+                        {
+                            "beam": {
+                                "width": 2,
+                                "rounds": 1,
+                                "metric": "dG",
+                                "workers": 8,
+                                "steps": [
+                                    {
+                                        "operation": (
+                                            "analyze_interface"
+                                        )
+                                    }
+                                ],
+                            }
+                        }
+                    ],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        block = wf.config.steps[0]
+        assert isinstance(block, BeamBlock)
+        assert block.workers == 8
+
+    def test_iterate_block_workers_parsed(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [
+                        {
+                            "iterate": {
+                                "n": 3,
+                                "workers": 4,
+                                "steps": [
+                                    {"operation": "relax"}
+                                ],
+                            }
+                        }
+                    ],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        block = wf.config.steps[0]
+        assert isinstance(block, IterateBlock)
+        assert block.workers == 4
+
+    def test_block_workers_none_by_default(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [
+                        {
+                            "beam": {
+                                "width": 2,
+                                "rounds": 1,
+                                "metric": "dG",
+                                "steps": [
+                                    {
+                                        "operation": (
+                                            "analyze_interface"
+                                        )
+                                    }
+                                ],
+                            }
+                        }
+                    ],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        block = wf.config.steps[0]
+        assert isinstance(block, BeamBlock)
+        assert block.workers is None
+
+
+# ------------------------------------------------------------------
+# Parallel execution
+# ------------------------------------------------------------------
+
+
+class TestParallelExecution:
+    """Tests for parallel beam and step execution."""
+
+    def _make_workflow(
+        self, tmp_path, steps, project_path=None, workers=1
+    ):
+        wf_file = tmp_path / "wf.yaml"
+        data = {
+            "input": str(tmp_path / "input.pdb"),
+            "workers": workers,
+            "steps": steps,
+        }
+        if project_path is not None:
+            data["project_path"] = str(tmp_path / project_path)
+        wf_file.write_text(yaml.dump(data))
+        return Workflow.from_yaml(wf_file)
+
+    def _make_input(self, tmp_path):
+        pdb = tmp_path / "input.pdb"
+        pdb.write_text(
+            "ATOM      1  N   ALA A   1       0.000   0.000"
+            "   0.000  1.00  0.00           N\nEND\n"
+        )
+        return pdb
+
+    def test_effective_workers_global(self):
+        """Global workers used when block has no override."""
+        config = WorkflowConfig(
+            input="input.pdb",
+            workers=4,
+            steps=[WorkflowStep(operation="idealize")],
+        )
+        wf = Workflow(config)
+        assert wf._effective_workers(None) == 4
+
+    def test_effective_workers_block_override(self):
+        """Block-level workers overrides global."""
+        config = WorkflowConfig(
+            input="input.pdb",
+            workers=4,
+            steps=[WorkflowStep(operation="idealize")],
+        )
+        wf = Workflow(config)
+        assert wf._effective_workers(8) == 8
+
+    def test_has_nested_blocks(self):
+        """Detect nested blocks in step list."""
+        simple = [WorkflowStep(operation="design")]
+        assert not Workflow._has_nested_blocks(simple)
+
+        nested = [
+            WorkflowStep(operation="design"),
+            IterateBlock(
+                steps=[WorkflowStep(operation="relax")],
+                n=3,
+            ),
+        ]
+        assert Workflow._has_nested_blocks(nested)
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_workers_one_uses_no_pool(
+        self, mock_op, tmp_path
+    ):
+        """workers=1 should never create a process pool."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        scores = [5.0, 1.0, 3.0, 2.0]
+        call_idx = {"i": 0}
+
+        def _dispatch(name, structure, params):
+            i = call_idx["i"]
+            call_idx["i"] += 1
+            return Structure(
+                pdb_string=f"ATOM beam {i}\nEND\n",
+                metadata={"dG": scores[i % len(scores)]},
+            )
+
+        mock_op.side_effect = _dispatch
+
+        with patch(
+            "boundry._parallel.get_pool"
+        ) as mock_pool:
+            wf = self._make_workflow(
+                tmp_path,
+                [
+                    {
+                        "beam": {
+                            "width": 2,
+                            "rounds": 1,
+                            "expand": 4,
+                            "metric": "dG",
+                            "direction": "min",
+                            "steps": [
+                                {
+                                    "operation": (
+                                        "analyze_interface"
+                                    )
+                                }
+                            ],
+                        }
+                    }
+                ],
+                workers=1,
+            )
+            wf.run()
+            mock_pool.assert_not_called()
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_nested_blocks_fall_back_to_sequential(
+        self, mock_op, tmp_path
+    ):
+        """Beam with nested iterate falls back to sequential."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        call_count = {"n": 0}
+
+        def _dispatch(name, structure, params):
+            call_count["n"] += 1
+            return Structure(
+                pdb_string=f"ATOM {call_count['n']}\nEND\n",
+                metadata={"dG": -1.0 * call_count["n"]},
+            )
+
+        mock_op.side_effect = _dispatch
+
+        with patch(
+            "boundry._parallel.get_pool"
+        ) as mock_pool:
+            wf = self._make_workflow(
+                tmp_path,
+                [
+                    {
+                        "beam": {
+                            "width": 1,
+                            "rounds": 1,
+                            "metric": "dG",
+                            "workers": 4,
+                            "steps": [
+                                {
+                                    "iterate": {
+                                        "n": 2,
+                                        "steps": [
+                                            {
+                                                "operation": (
+                                                    "relax"
+                                                )
+                                            }
+                                        ],
+                                    }
+                                },
+                                {
+                                    "operation": (
+                                        "analyze_interface"
+                                    )
+                                },
+                            ],
+                        }
+                    }
+                ],
+                workers=4,
+            )
+            wf.run()
+            mock_pool.assert_not_called()
+
+    @patch(
+        "boundry.workflow.Workflow._expand_beam_parallel"
+    )
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_beam_parallel_dispatched_when_workers_gt_1(
+        self, mock_op, mock_parallel, tmp_path
+    ):
+        """Beam with workers > 1 and simple steps uses parallel."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+
+        scores = [3.0, 1.0]
+        call_idx = {"i": 0}
+
+        def _dispatch(name, structure, params):
+            i = call_idx["i"]
+            call_idx["i"] += 1
+            return Structure(
+                pdb_string=f"ATOM {i}\nEND\n",
+                metadata={"dG": scores[i % len(scores)]},
+            )
+
+        mock_op.side_effect = _dispatch
+
+        # Mock _expand_beam_parallel to return 2 candidates
+        from boundry.workflow import _StepSnapshot
+
+        mock_parallel.return_value = [
+            (
+                Structure(
+                    pdb_string="ATOM a\nEND\n",
+                    metadata={"dG": 1.0},
+                ),
+                [],
+            ),
+            (
+                Structure(
+                    pdb_string="ATOM b\nEND\n",
+                    metadata={"dG": 2.0},
+                ),
+                [],
+            ),
+        ]
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {
+                    "beam": {
+                        "width": 2,
+                        "rounds": 1,
+                        "expand": 2,
+                        "metric": "dG",
+                        "direction": "min",
+                        "steps": [
+                            {"operation": "analyze_interface"}
+                        ],
+                    }
+                }
+            ],
+            workers=4,
+        )
+        wf.run_population()
+        mock_parallel.assert_called_once()

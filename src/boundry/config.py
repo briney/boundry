@@ -136,6 +136,7 @@ class IterateBlock:
     n: int = 1
     max_n: int = 100
     until: Optional[str] = None
+    workers: Optional[int] = None  # per-block override; None = use global
 
 
 @dataclass
@@ -149,6 +150,7 @@ class BeamBlock:
     direction: Literal["min", "max"] = "min"
     until: Optional[str] = None
     expand: int = 1
+    workers: Optional[int] = None  # per-block override; None = use global
 
 
 WorkflowStepOrBlock = Union[WorkflowStep, IterateBlock, BeamBlock]
@@ -164,6 +166,7 @@ class WorkflowConfig:
     input: str  # Input PDB/CIF path
     project_path: Optional[str] = None  # Base output directory (default: cwd)
     seed: Optional[int] = None  # Workflow-level seed for reproducibility
+    workers: int = 1  # Global default; 1 = sequential (no pool)
     workflow_version: int = 1
     steps: List[WorkflowStepOrBlock] = field(default_factory=list)
     vars: Dict[str, str] = field(default_factory=dict)
