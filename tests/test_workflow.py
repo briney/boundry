@@ -2756,3 +2756,601 @@ class TestParallelExecution:
         )
         wf.run_population()
         mock_parallel.assert_called_once()
+
+
+# ------------------------------------------------------------------
+# Checkpoint / Compare parsing
+# ------------------------------------------------------------------
+
+
+class TestCheckpointCompareParsing:
+    """Tests for checkpoint and compare YAML parsing."""
+
+    def test_parse_checkpoint(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [
+                        {"operation": "idealize"},
+                        {"checkpoint": "parent"},
+                    ],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        from boundry.config import CheckpointStep
+
+        assert isinstance(wf.config.steps[1], CheckpointStep)
+        assert wf.config.steps[1].name == "parent"
+
+    def test_parse_compare(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [
+                        {"operation": "idealize"},
+                        {"checkpoint": "parent"},
+                        {"compare": "parent"},
+                    ],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        from boundry.config import CompareStep
+
+        assert isinstance(wf.config.steps[2], CompareStep)
+        assert wf.config.steps[2].name == "parent"
+
+    def test_checkpoint_invalid_name_non_identifier(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [{"checkpoint": "not-valid"}],
+                }
+            )
+        )
+        with pytest.raises(
+            WorkflowError, match="valid Python identifier"
+        ):
+            Workflow.from_yaml(wf_file)
+
+    def test_checkpoint_invalid_name_underscore_prefix(
+        self, tmp_path
+    ):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [{"checkpoint": "_private"}],
+                }
+            )
+        )
+        with pytest.raises(
+            WorkflowError, match="must not start with an underscore"
+        ):
+            Workflow.from_yaml(wf_file)
+
+    def test_checkpoint_invalid_name_non_string(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [{"checkpoint": 123}],
+                }
+            )
+        )
+        with pytest.raises(
+            WorkflowError, match="name must be a string"
+        ):
+            Workflow.from_yaml(wf_file)
+
+    def test_compare_invalid_name_non_identifier(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [{"compare": "bad name"}],
+                }
+            )
+        )
+        with pytest.raises(
+            WorkflowError, match="valid Python identifier"
+        ):
+            Workflow.from_yaml(wf_file)
+
+    def test_checkpoint_unknown_extra_key_rejected(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [
+                        {
+                            "checkpoint": "parent",
+                            "extra": True,
+                        }
+                    ],
+                }
+            )
+        )
+        with pytest.raises(WorkflowError, match="unknown fields"):
+            Workflow.from_yaml(wf_file)
+
+    def test_compare_unknown_extra_key_rejected(self, tmp_path):
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [
+                        {
+                            "compare": "parent",
+                            "extra": True,
+                        }
+                    ],
+                }
+            )
+        )
+        with pytest.raises(WorkflowError, match="unknown fields"):
+            Workflow.from_yaml(wf_file)
+
+    def test_checkpoint_inside_iterate(self, tmp_path):
+        """Checkpoint can be placed inside iterate blocks."""
+        wf_file = tmp_path / "wf.yaml"
+        wf_file.write_text(
+            yaml.dump(
+                {
+                    "input": "input.pdb",
+                    "steps": [
+                        {
+                            "iterate": {
+                                "n": 2,
+                                "steps": [
+                                    {"operation": "relax"},
+                                    {"checkpoint": "cycle_ref"},
+                                ],
+                            }
+                        }
+                    ],
+                }
+            )
+        )
+        wf = Workflow.from_yaml(wf_file)
+        from boundry.config import CheckpointStep
+
+        block = wf.config.steps[0]
+        assert isinstance(block.steps[1], CheckpointStep)
+        assert block.steps[1].name == "cycle_ref"
+
+
+# ------------------------------------------------------------------
+# Checkpoint / Compare execution
+# ------------------------------------------------------------------
+
+
+class TestCheckpointCompareExecution:
+    """Tests for checkpoint and compare execution."""
+
+    def _make_workflow(
+        self, tmp_path, steps, project_path=None
+    ):
+        wf_file = tmp_path / "wf.yaml"
+        data = {
+            "input": str(tmp_path / "input.pdb"),
+            "steps": steps,
+        }
+        if project_path is not None:
+            data["project_path"] = str(
+                tmp_path / project_path
+            )
+        wf_file.write_text(yaml.dump(data))
+        return Workflow.from_yaml(wf_file)
+
+    def _make_input(self, tmp_path):
+        pdb = tmp_path / "input.pdb"
+        pdb.write_text(
+            "ATOM      1  N   ALA A   1       0.000   0.000"
+            "   0.000  1.00  0.00           N\nEND\n"
+        )
+        return pdb
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_checkpoint_saves_structure(
+        self, mock_op, tmp_path
+    ):
+        """Checkpoint stores a deep copy of population[0]."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        mock_op.return_value = Structure(
+            pdb_string="ATOM relaxed\nEND\n",
+            metadata={"dG": -10.0},
+        )
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {"operation": "relax"},
+                {"checkpoint": "parent"},
+            ],
+        )
+        wf.run()
+
+        assert "parent" in wf._checkpoints
+        ckpt = wf._checkpoints["parent"]
+        assert "relaxed" in ckpt.pdb_string
+        assert ckpt.metadata["dG"] == -10.0
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_checkpoint_deep_copies(
+        self, mock_op, tmp_path
+    ):
+        """Checkpoint metadata is independent of later mutations."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        call_count = {"n": 0}
+
+        def _dispatch(name, structure, params):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return Structure(
+                    pdb_string="ATOM first\nEND\n",
+                    metadata={"dG": -5.0},
+                )
+            return Structure(
+                pdb_string="ATOM second\nEND\n",
+                metadata={"dG": -15.0},
+            )
+
+        mock_op.side_effect = _dispatch
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {"operation": "relax"},
+                {"checkpoint": "parent"},
+                {"operation": "relax"},
+            ],
+        )
+        wf.run()
+
+        # Checkpoint should still have original dG
+        assert wf._checkpoints["parent"].metadata["dG"] == -5.0
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_checkpoint_is_passthrough(
+        self, mock_op, tmp_path
+    ):
+        """Checkpoint doesn't modify the structure or metadata."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        mock_op.return_value = Structure(
+            pdb_string="ATOM relaxed\nEND\n",
+            metadata={"dG": -10.0},
+        )
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {"operation": "relax"},
+                {"checkpoint": "parent"},
+            ],
+        )
+        result = wf.run()
+
+        # Checkpoint shouldn't alter the result
+        assert "relaxed" in result.pdb_string
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_compare_injects_deltas(
+        self, mock_op, tmp_path
+    ):
+        """Compare step computes deltas for shared numeric keys."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        call_count = {"n": 0}
+
+        def _dispatch(name, structure, params):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return Structure(
+                    pdb_string="ATOM ref\nEND\n",
+                    metadata={"dG": -10.0, "rmsd": 1.0},
+                )
+            return Structure(
+                pdb_string="ATOM new\nEND\n",
+                metadata={"dG": -15.0, "rmsd": 0.5},
+            )
+
+        mock_op.side_effect = _dispatch
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {"operation": "relax"},
+                {"checkpoint": "parent"},
+                {"operation": "relax"},
+                {"compare": "parent"},
+            ],
+        )
+        result = wf.run()
+
+        assert "parent" in result.metadata
+        compare = result.metadata["parent"]
+        assert "delta" in compare
+        assert "ref" in compare
+        # dG delta: -15.0 - (-10.0) = -5.0
+        assert compare["delta"]["dG"] == pytest.approx(-5.0)
+        # rmsd delta: 0.5 - 1.0 = -0.5
+        assert compare["delta"]["rmsd"] == pytest.approx(-0.5)
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_compare_ref_contains_checkpoint_metrics(
+        self, mock_op, tmp_path
+    ):
+        """Compare ref dict contains the checkpoint's numeric metrics."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        call_count = {"n": 0}
+
+        def _dispatch(name, structure, params):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return Structure(
+                    pdb_string="ATOM ref\nEND\n",
+                    metadata={"dG": -10.0},
+                )
+            return Structure(
+                pdb_string="ATOM new\nEND\n",
+                metadata={"dG": -15.0},
+            )
+
+        mock_op.side_effect = _dispatch
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {"operation": "relax"},
+                {"checkpoint": "parent"},
+                {"operation": "relax"},
+                {"compare": "parent"},
+            ],
+        )
+        result = wf.run()
+
+        ref = result.metadata["parent"]["ref"]
+        assert ref["dG"] == pytest.approx(-10.0)
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_compare_missing_checkpoint_raises(
+        self, mock_op, tmp_path
+    ):
+        """Compare referencing non-existent checkpoint raises error."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        mock_op.return_value = Structure(
+            pdb_string="ATOM\nEND\n",
+            metadata={"dG": -10.0},
+        )
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {"operation": "relax"},
+                {"compare": "nonexistent"},
+            ],
+        )
+        with pytest.raises(
+            WorkflowError, match="unknown checkpoint"
+        ):
+            wf.run()
+
+    def test_compare_only_deltas_shared_keys(self, tmp_path):
+        """Delta dict only contains keys present in both ref and
+        current."""
+        from boundry.config import CompareStep
+        from boundry.operations import Structure
+        from boundry.workflow import _ExecutionContext
+
+        # Construct structures directly to control metadata exactly
+        ref_struct = Structure(
+            pdb_string="ATOM ref\nEND\n",
+            metadata={"dG": -10.0, "only_ref": 1.0},
+        )
+        cur_struct = Structure(
+            pdb_string="ATOM new\nEND\n",
+            metadata={"dG": -15.0, "only_current": 2.0},
+        )
+
+        self._make_input(tmp_path)
+        wf = self._make_workflow(
+            tmp_path,
+            [{"operation": "idealize"}],
+        )
+
+        # Manually set checkpoint and run compare
+        wf._checkpoints["parent"] = ref_struct
+        ctx = _ExecutionContext(population=[cur_struct])
+        result_ctx = wf._execute_compare(
+            CompareStep(name="parent"), ctx
+        )
+
+        delta = result_ctx.population[0].metadata["parent"][
+            "delta"
+        ]
+        assert "dG" in delta
+        assert "only_ref" not in delta
+        assert "only_current" not in delta
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_compare_deltas_accessible_via_dot_path(
+        self, mock_op, tmp_path
+    ):
+        """Delta values are resolvable via dot-path in conditions."""
+        from boundry.operations import Structure
+        from boundry.workflow_metadata import (
+            extract_numeric_metric,
+        )
+
+        self._make_input(tmp_path)
+        call_count = {"n": 0}
+
+        def _dispatch(name, structure, params):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return Structure(
+                    pdb_string="ATOM ref\nEND\n",
+                    metadata={"dG": -10.0},
+                )
+            return Structure(
+                pdb_string="ATOM new\nEND\n",
+                metadata={"dG": -15.0},
+            )
+
+        mock_op.side_effect = _dispatch
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {"operation": "relax"},
+                {"checkpoint": "parent"},
+                {"operation": "relax"},
+                {"compare": "parent"},
+            ],
+        )
+        result = wf.run()
+
+        val = extract_numeric_metric(
+            result.metadata, "parent.delta.dG"
+        )
+        assert val == pytest.approx(-5.0)
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_iterate_with_compare_convergence(
+        self, mock_op, tmp_path
+    ):
+        """Iterate block using checkpoint compare for convergence."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        call_count = {"n": 0}
+        # dG values: ref=-10, then -12, -14, -16
+        dg_values = [-10.0, -12.0, -14.0, -16.0]
+
+        def _dispatch(name, structure, params):
+            call_count["n"] += 1
+            idx = min(call_count["n"] - 1, len(dg_values) - 1)
+            return Structure(
+                pdb_string=f"ATOM iter {call_count['n']}\nEND\n",
+                metadata={"dG": dg_values[idx]},
+            )
+
+        mock_op.side_effect = _dispatch
+
+        # Workflow: relax -> checkpoint -> iterate(relax + compare)
+        # until parent.delta.dG < -5.0
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {"operation": "relax"},
+                {"checkpoint": "parent"},
+                {
+                    "iterate": {
+                        "until": "{parent.delta.dG} < -5.0",
+                        "max_n": 10,
+                        "steps": [
+                            {"operation": "relax"},
+                            {"compare": "parent"},
+                        ],
+                    }
+                },
+            ],
+        )
+        result = wf.run()
+
+        # dG=-16 gives delta=-6 which satisfies < -5.0
+        # That's cycle 3 (dG values: -12, -14, -16)
+        # Total ops: 1 (initial relax) + 3 (iterate relax)
+        assert call_count["n"] == 4
+        assert result.metadata["parent"]["delta"]["dG"] == (
+            pytest.approx(-6.0)
+        )
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_checkpoint_inside_iterate_overwrites(
+        self, mock_op, tmp_path
+    ):
+        """Checkpoint inside iterate gets overwritten each cycle."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        call_count = {"n": 0}
+
+        def _dispatch(name, structure, params):
+            call_count["n"] += 1
+            return Structure(
+                pdb_string=f"ATOM iter {call_count['n']}\n"
+                f"END\n",
+                metadata={
+                    "dG": -1.0 * call_count["n"],
+                },
+            )
+
+        mock_op.side_effect = _dispatch
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {
+                    "iterate": {
+                        "n": 3,
+                        "steps": [
+                            {"operation": "relax"},
+                            {"checkpoint": "cycle_ref"},
+                        ],
+                    }
+                }
+            ],
+        )
+        wf.run()
+
+        # Checkpoint should have the last cycle's value
+        ckpt = wf._checkpoints["cycle_ref"]
+        assert ckpt.metadata["dG"] == -3.0
+
+
+# ------------------------------------------------------------------
+# Describe item for checkpoint / compare
+# ------------------------------------------------------------------
+
+
+class TestDescribeCheckpointCompare:
+    """Tests for _describe_item with checkpoint/compare."""
+
+    def test_describe_checkpoint(self):
+        from boundry.config import CheckpointStep
+
+        item = CheckpointStep(name="parent")
+        desc = Workflow._describe_item(item)
+        assert desc == "checkpoint 'parent'"
+
+    def test_describe_compare(self):
+        from boundry.config import CompareStep
+
+        item = CompareStep(name="parent")
+        desc = Workflow._describe_item(item)
+        assert desc == "compare 'parent'"

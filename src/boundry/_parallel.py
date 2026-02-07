@@ -38,6 +38,9 @@ class BranchTask:
     candidate_source_path: Optional[str]
     steps: List[Tuple[str, Dict[str, Any]]]
     branch_seed: Optional[int]
+    checkpoint_metadata: Dict[str, Dict[str, float]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -147,6 +150,45 @@ def _execute_branch_worker(task: BranchTask) -> BranchResult:
         for step_index, (operation, step_params) in enumerate(
             task.steps
         ):
+            # Handle pseudo-ops for checkpoint/compare
+            if operation == "__checkpoint__":
+                # No-op in workers — checkpoints are saved
+                # by the main process only.
+                continue
+
+            if operation == "__compare__":
+                name = step_params["name"]
+                ref_metrics = task.checkpoint_metadata.get(name)
+                if ref_metrics is None:
+                    raise RuntimeError(
+                        f"Compare references unknown checkpoint "
+                        f"'{name}'"
+                    )
+                from boundry.workflow import (
+                    _collect_flat_numerics,
+                )
+
+                cur_metrics = _collect_flat_numerics(
+                    structure.metadata
+                )
+                delta = {
+                    k: cur_metrics[k] - ref_metrics[k]
+                    for k in cur_metrics
+                    if k in ref_metrics
+                }
+                compare_data = {
+                    "delta": delta,
+                    "ref": ref_metrics,
+                }
+                new_meta = dict(structure.metadata)
+                new_meta[name] = compare_data
+                structure = Structure(
+                    pdb_string=structure.pdb_string,
+                    metadata=new_meta,
+                    source_path=structure.source_path,
+                )
+                continue
+
             params = Workflow._with_seed(
                 operation,
                 dict(step_params),

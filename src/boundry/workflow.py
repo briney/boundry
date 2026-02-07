@@ -15,6 +15,8 @@ from boundry._progress import WorkflowProgress, _extract_metric_names
 from boundry.condition import ConditionError, check_condition, parse_condition
 from boundry.config import (
     BeamBlock,
+    CheckpointStep,
+    CompareStep,
     IterateBlock,
     WorkflowConfig,
     WorkflowStep,
@@ -605,6 +607,48 @@ def _parse_beam(
     )
 
 
+def _validate_checkpoint_name(name: Any, label: str) -> str:
+    """Validate a checkpoint/compare name is a valid identifier."""
+    if not isinstance(name, str):
+        raise WorkflowError(
+            f"{label}: name must be a string, "
+            f"got {type(name).__name__}"
+        )
+    if not name.isidentifier():
+        raise WorkflowError(
+            f"{label}: name must be a valid Python "
+            f"identifier, got '{name}'"
+        )
+    if name.startswith("_"):
+        raise WorkflowError(
+            f"{label}: name must not start with an "
+            f"underscore, got '{name}'"
+        )
+    return name
+
+
+@_register_parser("checkpoint")
+def _parse_checkpoint(
+    step_data: Dict[str, Any], label: str
+) -> CheckpointStep:
+    _validate_unknown_keys(step_data, {"checkpoint"}, label)
+    name = _validate_checkpoint_name(
+        step_data["checkpoint"], label
+    )
+    return CheckpointStep(name=name)
+
+
+@_register_parser("compare")
+def _parse_compare(
+    step_data: Dict[str, Any], label: str
+) -> CompareStep:
+    _validate_unknown_keys(step_data, {"compare"}, label)
+    name = _validate_checkpoint_name(
+        step_data["compare"], label
+    )
+    return CompareStep(name=name)
+
+
 def _ensure_resolvers() -> None:
     """Register custom OmegaConf resolvers (idempotent)."""
     from omegaconf import OmegaConf
@@ -719,6 +763,7 @@ class Workflow:
     ):
         self.config = config
         self.last_population: List["Structure"] = []
+        self._checkpoints: Dict[str, "Structure"] = {}
         self._progress = WorkflowProgress(enabled=False)
         self._validate()
 
@@ -935,6 +980,8 @@ class Workflow:
                 self._validate_iterate(item, label)
             elif isinstance(item, BeamBlock):
                 self._validate_beam(item, label)
+            elif isinstance(item, (CheckpointStep, CompareStep)):
+                pass  # already validated during parsing
             else:
                 raise WorkflowError(
                     f"{label}: unsupported node type "
@@ -1094,6 +1141,10 @@ class Workflow:
             return self._execute_beam(
                 item, context, seed_base, step_index
             )
+        if isinstance(item, CheckpointStep):
+            return self._execute_checkpoint(item, context)
+        if isinstance(item, CompareStep):
+            return self._execute_compare(item, context)
         raise WorkflowError(
             f"Unsupported node type '{type(item).__name__}'"
         )
@@ -1587,6 +1638,31 @@ class Workflow:
         )
         from boundry.operations import Structure
 
+        # Serialize steps — checkpoint/compare become pseudo-ops
+        serialized_steps: List[tuple[str, Dict[str, Any]]] = []
+        for s in block.steps:
+            if isinstance(s, WorkflowStep):
+                serialized_steps.append(
+                    (s.operation, dict(s.params))
+                )
+            elif isinstance(s, CheckpointStep):
+                serialized_steps.append(
+                    ("__checkpoint__", {"name": s.name})
+                )
+            elif isinstance(s, CompareStep):
+                serialized_steps.append(
+                    ("__compare__", {"name": s.name})
+                )
+
+        # Collect checkpoint metrics for workers
+        checkpoint_metadata: Dict[
+            str, Dict[str, float]
+        ] = {}
+        for name, ckpt in self._checkpoints.items():
+            checkpoint_metadata[name] = (
+                _collect_flat_numerics(ckpt.metadata)
+            )
+
         # Build tasks
         tasks: List[BranchTask] = []
         for cand_idx, candidate in enumerate(population, 1):
@@ -1608,11 +1684,11 @@ class Workflow:
                         candidate_source_path=(
                             candidate.source_path
                         ),
-                        steps=[
-                            (s.operation, dict(s.params))
-                            for s in block.steps
-                        ],
+                        steps=serialized_steps,
                         branch_seed=branch_seed,
+                        checkpoint_metadata=(
+                            checkpoint_metadata
+                        ),
                     )
                 )
 
@@ -1709,6 +1785,10 @@ class Workflow:
             return self._execute_beam(
                 item, context, seed_base, step_index
             )
+        if isinstance(item, CheckpointStep):
+            return self._execute_checkpoint(item, context)
+        if isinstance(item, CompareStep):
+            return self._execute_compare(item, context)
         raise WorkflowError(
             f"Unsupported node type '{type(item).__name__}'"
         )
@@ -1768,6 +1848,73 @@ class Workflow:
         return _ExecutionContext(
             population=updated,
             last_operation=step.operation,
+            output_context=context.output_context,
+        )
+
+    # ------------------------------------------------------------------
+    # Checkpoint / compare
+    # ------------------------------------------------------------------
+
+    def _execute_checkpoint(
+        self,
+        step: CheckpointStep,
+        context: _ExecutionContext,
+    ) -> _ExecutionContext:
+        """Save a deep copy of population[0] under the given name."""
+        self._checkpoints[step.name] = _clone_structure(
+            context.population[0]
+        )
+        logger.info(f"  Checkpoint '{step.name}' saved")
+        return context
+
+    def _execute_compare(
+        self,
+        step: CompareStep,
+        context: _ExecutionContext,
+    ) -> _ExecutionContext:
+        """Compute deltas vs a named checkpoint for each population
+        member."""
+        from boundry.operations import Structure
+
+        ref = self._checkpoints.get(step.name)
+        if ref is None:
+            raise WorkflowError(
+                f"Compare references unknown checkpoint "
+                f"'{step.name}'. "
+                f"Available: {sorted(self._checkpoints)}"
+            )
+
+        ref_metrics = _collect_flat_numerics(ref.metadata)
+        updated: List[Structure] = []
+        for structure in context.population:
+            cur_metrics = _collect_flat_numerics(
+                structure.metadata
+            )
+            delta = {
+                k: cur_metrics[k] - ref_metrics[k]
+                for k in cur_metrics
+                if k in ref_metrics
+            }
+            compare_data = {"delta": delta, "ref": ref_metrics}
+
+            new_meta = dict(structure.metadata)
+            new_meta[step.name] = compare_data
+            updated.append(
+                Structure(
+                    pdb_string=structure.pdb_string,
+                    metadata=new_meta,
+                    source_path=structure.source_path,
+                )
+            )
+
+        logger.info(
+            f"  Compare '{step.name}': "
+            f"{len(updated[0].metadata[step.name]['delta'])} "
+            f"delta metrics computed"
+        )
+        return _ExecutionContext(
+            population=updated,
+            last_operation=context.last_operation,
             output_context=context.output_context,
         )
 
@@ -1909,6 +2056,10 @@ class Workflow:
                 f"rounds={item.rounds}, "
                 f"metric={item.metric})"
             )
+        if isinstance(item, CheckpointStep):
+            return f"checkpoint '{item.name}'"
+        if isinstance(item, CompareStep):
+            return f"compare '{item.name}'"
         return type(item).__name__
 
     # ------------------------------------------------------------------
@@ -2131,3 +2282,28 @@ def _clone_structure(structure: "Structure") -> "Structure":
         metadata=copy.deepcopy(structure.metadata),
         source_path=structure.source_path,
     )
+
+
+def _collect_flat_numerics(
+    data: Any, prefix: str = "", target: Optional[Dict[str, float]] = None
+) -> Dict[str, float]:
+    """Collect all numeric values from nested dicts into a flat dict.
+
+    Keys use dot-separated paths. Private keys (starting with ``_``)
+    are skipped.
+    """
+    if target is None:
+        target = {}
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(key, str) and key.startswith("_"):
+                continue
+            path = f"{prefix}.{key}" if prefix else str(key)
+            _collect_flat_numerics(value, path, target)
+    elif (
+        isinstance(data, (int, float))
+        and not isinstance(data, bool)
+        and prefix
+    ):
+        target[prefix] = float(data)
+    return target

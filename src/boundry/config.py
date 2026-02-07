@@ -156,7 +156,23 @@ class BeamBlock:
     workers: Optional[int] = None  # per-block override; None = use global
 
 
-WorkflowStepOrBlock = Union[WorkflowStep, IterateBlock, BeamBlock]
+@dataclass
+class CheckpointStep:
+    """Save the current structure under a named checkpoint."""
+
+    name: str
+
+
+@dataclass
+class CompareStep:
+    """Compute deltas between current structure and a named checkpoint."""
+
+    name: str
+
+
+WorkflowStepOrBlock = Union[
+    WorkflowStep, IterateBlock, BeamBlock, CheckpointStep, CompareStep
+]
 
 
 @dataclass
