@@ -77,10 +77,18 @@ class TestWorkflowProgressDisabled:
             p.start_inner_step("minimizing")
             p.finish_inner_step()
 
+    def test_disabled_update_workflow_status(self):
+        p = WorkflowProgress(enabled=False)
+        with p:
+            p.start_workflow(3)
+            p.update_workflow_status("idealize")
+            p.finish_workflow()
+
     def test_methods_safe_without_context_manager(self):
         """Methods should not raise even outside a context manager."""
         p = WorkflowProgress(enabled=False)
         p.start_workflow(3)
+        p.update_workflow_status("test")
         p.advance_workflow("test")
         p.finish_workflow()
         p.start_iterate(5, False)
@@ -119,11 +127,28 @@ class TestWorkflowProgressEnabled:
         progress.start_workflow(3)
         assert progress._workflow_task is not None
 
+        # Mirrors real usage: set status before execution, advance after
+        progress.update_workflow_status("idealize")
         progress.advance_workflow("idealize")
+        progress.update_workflow_status("iterate")
         progress.advance_workflow("iterate")
+        progress.update_workflow_status("beam")
         progress.advance_workflow("beam")
         progress.finish_workflow()
         assert progress._workflow_task is None
+
+    def test_update_workflow_status_does_not_advance(self, progress):
+        progress.start_workflow(3)
+        task = progress._progress._tasks[progress._workflow_task]
+        assert task.completed == 0
+
+        progress.update_workflow_status("idealize")
+
+        # Counter should remain at 0 — only status text changes
+        task = progress._progress._tasks[progress._workflow_task]
+        assert task.completed == 0
+        assert task.fields["status"] == "idealize"
+        progress.finish_workflow()
 
     def test_iterate_fixed_n(self, progress):
         progress.start_iterate(5, convergence=False)

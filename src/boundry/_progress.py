@@ -95,6 +95,11 @@ class WorkflowProgress:
             status=description,
         )
 
+    def update_workflow_status(self, description: str) -> None:
+        if self._progress is None or self._workflow_task is None:
+            return
+        self._progress.update(self._workflow_task, status=description)
+
     def finish_workflow(self) -> None:
         if self._progress is None or self._workflow_task is None:
             return

@@ -1060,13 +1060,14 @@ class Workflow:
                 logger.info(
                     f"Step {i + 1}/{total}: {desc}"
                 )
-                progress.advance_workflow(desc)
+                progress.update_workflow_status(desc)
                 current = self._execute_item(
                     item,
                     current,
                     seed_base=self.config.seed,
                     step_index=i,
                 )
+                progress.advance_workflow(desc)
 
             progress.finish_workflow()
             self._progress = WorkflowProgress(enabled=False)
