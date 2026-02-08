@@ -3332,6 +3332,112 @@ class TestCheckpointCompareExecution:
         ckpt = wf._checkpoints["cycle_ref"]
         assert ckpt.metadata["dG"] == -3.0
 
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_compare_writes_json(self, mock_op, tmp_path):
+        """Compare step writes compare.json to its output directory."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        call_count = {"n": 0}
+
+        def _dispatch(name, structure, params):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return Structure(
+                    pdb_string="ATOM ref\nEND\n",
+                    metadata={"dG": -10.0, "rmsd": 1.0},
+                )
+            return Structure(
+                pdb_string="ATOM new\nEND\n",
+                metadata={"dG": -15.0, "rmsd": 0.5},
+            )
+
+        mock_op.side_effect = _dispatch
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {"operation": "relax"},
+                {"checkpoint": "parent"},
+                {"operation": "relax"},
+                {"compare": "parent"},
+            ],
+            project_path="output",
+        )
+        wf.run()
+
+        compare_json = (
+            tmp_path / "output" / "3.compare" / "compare.json"
+        )
+        assert compare_json.exists()
+        data = json.loads(compare_json.read_text())
+        assert data["checkpoint"] == "parent"
+        assert data["delta"]["dG"] == pytest.approx(-5.0)
+        assert data["delta"]["rmsd"] == pytest.approx(-0.5)
+        assert data["ref"]["dG"] == pytest.approx(-10.0)
+        assert data["ref"]["rmsd"] == pytest.approx(1.0)
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_compare_writes_json_multi_population(
+        self, mock_op, tmp_path
+    ):
+        """Compare writes rank_N/compare.json for each population
+        member."""
+        from boundry.config import CompareStep
+        from boundry.operations import Structure
+        from boundry.workflow import (
+            OutputPathContext,
+            _ExecutionContext,
+        )
+
+        self._make_input(tmp_path)
+        wf = self._make_workflow(
+            tmp_path,
+            [{"operation": "idealize"}],
+            project_path="output",
+        )
+
+        ref_struct = Structure(
+            pdb_string="ATOM ref\nEND\n",
+            metadata={"dG": -10.0},
+        )
+        pop = [
+            Structure(
+                pdb_string="ATOM a\nEND\n",
+                metadata={"dG": -12.0},
+            ),
+            Structure(
+                pdb_string="ATOM b\nEND\n",
+                metadata={"dG": -18.0},
+            ),
+        ]
+
+        wf._checkpoints["parent"] = ref_struct
+        out_ctx = OutputPathContext(
+            base_path=tmp_path / "output"
+        )
+        ctx = _ExecutionContext(
+            population=pop, output_context=out_ctx
+        )
+        wf._execute_compare(
+            CompareStep(name="parent"), ctx, step_index=0
+        )
+
+        for rank, expected_delta in [(1, -2.0), (2, -8.0)]:
+            path = (
+                tmp_path
+                / "output"
+                / "0.compare"
+                / f"rank_{rank}"
+                / "compare.json"
+            )
+            assert path.exists(), f"rank_{rank}/compare.json missing"
+            data = json.loads(path.read_text())
+            assert data["checkpoint"] == "parent"
+            assert data["delta"]["dG"] == pytest.approx(
+                expected_delta
+            )
+
 
 # ------------------------------------------------------------------
 # Describe item for checkpoint / compare

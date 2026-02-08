@@ -1144,7 +1144,9 @@ class Workflow:
         if isinstance(item, CheckpointStep):
             return self._execute_checkpoint(item, context)
         if isinstance(item, CompareStep):
-            return self._execute_compare(item, context)
+            return self._execute_compare(
+                item, context, step_index
+            )
         raise WorkflowError(
             f"Unsupported node type '{type(item).__name__}'"
         )
@@ -1788,7 +1790,9 @@ class Workflow:
         if isinstance(item, CheckpointStep):
             return self._execute_checkpoint(item, context)
         if isinstance(item, CompareStep):
-            return self._execute_compare(item, context)
+            return self._execute_compare(
+                item, context, step_index
+            )
         raise WorkflowError(
             f"Unsupported node type '{type(item).__name__}'"
         )
@@ -1871,6 +1875,7 @@ class Workflow:
         self,
         step: CompareStep,
         context: _ExecutionContext,
+        step_index: int = 0,
     ) -> _ExecutionContext:
         """Compute deltas vs a named checkpoint for each population
         member."""
@@ -1884,9 +1889,19 @@ class Workflow:
                 f"Available: {sorted(self._checkpoints)}"
             )
 
+        # Build output context for this step
+        step_ctx = (
+            context.output_context.step_dir(
+                step_index, "compare"
+            )
+            if context.output_context is not None
+            else None
+        )
+
         ref_metrics = _collect_flat_numerics(ref.metadata)
+        pop_size = len(context.population)
         updated: List[Structure] = []
-        for structure in context.population:
+        for idx, structure in enumerate(context.population):
             cur_metrics = _collect_flat_numerics(
                 structure.metadata
             )
@@ -1896,6 +1911,26 @@ class Workflow:
                 if k in ref_metrics
             }
             compare_data = {"delta": delta, "ref": ref_metrics}
+
+            # Write compare.json
+            if step_ctx is not None:
+                if pop_size > 1:
+                    write_ctx = step_ctx.rank_dir(idx + 1)
+                else:
+                    write_ctx = step_ctx
+                out_dir = write_ctx.resolve()
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out_file = out_dir / "compare.json"
+                out_file.write_text(
+                    json.dumps(
+                        {
+                            "checkpoint": step.name,
+                            "delta": delta,
+                            "ref": ref_metrics,
+                        },
+                        indent=2,
+                    )
+                )
 
             new_meta = dict(structure.metadata)
             new_meta[step.name] = compare_data
