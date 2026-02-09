@@ -15,6 +15,7 @@
 
 workflow_version: 1
 input: input.pdb
+project_path: beam_optimize_results
 seed: 42
 
 steps:

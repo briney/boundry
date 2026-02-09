@@ -8,6 +8,7 @@
 #   boundry run multi_step_pipeline.yaml
 
 input: input.pdb
+project_path: multi_step_pipeline_results
 
 steps:
   # Step 1: Fix backbone geometry

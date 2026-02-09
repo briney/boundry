@@ -7,6 +7,7 @@
 #   boundry run simple_relax.yaml
 
 input: input.pdb
+project_path: simple_relax_results
 
 steps:
   - operation: idealize

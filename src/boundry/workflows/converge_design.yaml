@@ -4,6 +4,7 @@
 
 workflow_version: 1
 input: input.pdb
+project_path: converge_design_results
 seed: 42
 
 steps:

@@ -10,7 +10,7 @@ This document covers:
 - All supported step/block types.
 - Every workflow operation and its workflow `params`.
 - Condition syntax and valid variable references.
-- Output filename template variables (`{cycle}`, `{round}`, `{rank}`).
+- Auto-generated output directory structure.
 
 ## 1. Workflow Structure
 
@@ -19,7 +19,7 @@ All workflows use this top-level shape:
 ```yaml
 workflow_version: 1          # optional, defaults to 1
 input: input.pdb             # required
-output: results/             # optional
+project_path: results/       # optional, output root directory
 seed: 42                     # optional, workflow-level seed
 workers: 4                   # optional, parallel workers (default 1)
 resfile_path: design.resfile # user-defined variable (see §2)
@@ -27,12 +27,11 @@ steps:                       # required, non-empty
   - operation: design
     params:
       resfile: ${resfile_path}
-    output: ${output}/designed.pdb
 ```
 
-Reserved top-level keys: `workflow_version`, `input`, `output`, `seed`, `workers`,
-`steps`. Any other top-level key is treated as a user-defined variable
-(see §2).
+Reserved top-level keys: `workflow_version`, `input`, `project_path`, `seed`,
+`workers`, `steps`. Any other top-level key is treated as a user-defined
+variable (see §2).
 
 ### Deterministic Seeds
 
@@ -92,35 +91,33 @@ parsed or executed.
 All reserved top-level keys with scalar values can be referenced:
 
 - `${input}` — the input file path
-- `${output}` — the output path
+- `${project_path}` — the output root directory
 - `${seed}` — the workflow seed
 
 ```yaml
 input: structures/my_protein.pdb
-output: results
+project_path: results
 seed: 42
 steps:
   - operation: idealize
-    output: ${output}/idealized.pdb    # -> results/idealized.pdb
   - operation: relax
-    output: ${output}/seed_${seed}.pdb # -> results/seed_42.pdb
 ```
 
 ### 2.2 User-Defined Variables
 
 Any top-level key that is not a reserved key (`workflow_version`, `input`,
-`output`, `seed`, `workers`, `steps`) is treated as a user-defined variable. These
-are resolved identically to built-in references.
+`project_path`, `seed`, `workers`, `steps`) is treated as a user-defined
+variable. These are resolved identically to built-in references.
 
 ```yaml
 input: input.pdb
+project_path: ${project}/output       # cross-reference a user variable
 project: my_project
 resfile_path: design.resfile
 steps:
   - operation: design
     params:
       resfile: ${resfile_path}         # -> design.resfile
-    output: ${project}/designed.pdb    # -> my_project/designed.pdb
 ```
 
 Rules for user-defined variables:
@@ -139,11 +136,10 @@ Variables can reference other variables:
 
 ```yaml
 input: input.pdb
-output: results
-run_dir: ${output}/run_1
+base_dir: results
+project_path: ${base_dir}/run_1       # -> results/run_1
 steps:
   - operation: idealize
-    output: ${run_dir}/idealized.pdb   # -> results/run_1/idealized.pdb
 ```
 
 Circular references (e.g. `a: ${b}`, `b: ${a}`) are detected and raise
@@ -156,7 +152,7 @@ environment variables:
 
 ```yaml
 input: ${env:INPUT_PDB,input.pdb}
-output: ${env:OUTPUT_DIR,results}/
+project_path: ${env:OUTPUT_DIR,results}
 steps:
   - operation: idealize
 ```
@@ -164,23 +160,11 @@ steps:
 If the environment variable is unset and no default is provided, an
 empty string is used.
 
-### 2.5 Coexistence with Runtime Tokens
+### 2.5 Runtime Directory Naming
 
-Variable interpolation (`${...}`, resolved at load time) and output
-runtime tokens (`{cycle}`, `{round}`, `{rank}`, resolved at execution
-time) use different syntax and do not conflict:
-
-```yaml
-output: results
-steps:
-  - iterate:
-      n: 5
-      output: ${output}/cycle_{cycle}/  # ${output} resolves at load time;
-      steps:                             # {cycle} resolves at runtime
-        - operation: relax
-```
-
-After loading, the iterate block's output becomes `results/cycle_{cycle}/`.
+Output directories are created automatically using an opinionated naming
+scheme (see §5). Runtime tokens like `{cycle}`, `{round}`, and `{rank}`
+are handled internally and do not appear in workflow YAML files.
 
 ### 2.6 Errors
 
@@ -196,7 +180,7 @@ variable resolution, so they can change variable values that propagate
 through `${...}` references.
 
 ```bash
-boundry run workflow.yaml output=custom_results/ project=my_proj seed=99
+boundry run workflow.yaml project_path=custom_results/ project=my_proj seed=99
 ```
 
 - Any top-level key (reserved or user-defined) can be overridden.
@@ -209,7 +193,7 @@ from boundry import Workflow
 
 wf = Workflow.from_yaml(
     "workflow.yaml",
-    overrides=["output=results/", "project=custom_proj"],
+    overrides=["project_path=results/", "project=custom_proj"],
 )
 ```
 
@@ -230,21 +214,18 @@ Each item in `steps:` must contain exactly one of:
   params:
     n_iterations: 3
     constrained: true
-  output: relax_out.pdb
 ```
 
 Allowed keys:
 
 - `operation` (required, string)
 - `params` (optional mapping; `null` is treated as `{}`)
-- `output` (optional string path template)
 
 ### 4.2 Iterate Block
 
 ```yaml
 - iterate:
     n: 5
-    output: iterate_cycle_{cycle}.pdb
     steps:
       - operation: relax
 ```
@@ -266,7 +247,6 @@ Fields:
 - `until` (optional condition string) for convergence mode
 - `max_n` (default `100`) safety cap when `until` is set
 - `workers` (optional int, overrides global `workers` for this block)
-- `output` (optional path template or directory path)
 
 Notes:
 
@@ -283,7 +263,6 @@ Notes:
     metric: dG
     direction: min
     until: "{dG} < -15.0"
-    output: beam_round_{round}_rank_{rank}.pdb
     steps:
       - operation: design
       - operation: analyze_interface
@@ -299,16 +278,12 @@ Fields:
 - `direction` (`"min"` or `"max"`, default `"min"`)
 - `until` (optional condition string checked on best candidate each round)
 - `workers` (optional int, overrides global `workers` for this block)
-- `output` (optional path template)
 
 Notes:
 
 - Beam is first-class population flow: top-K candidates continue into later steps.
 - `Workflow.run()` returns best rank-1 candidate.
 - `Workflow.run_population()` returns final kept population.
-- By default, running a workflow requires at least one configured output
-  path (`output` at top-level or in a step/block). For in-memory runs in
-  Python, pass `require_output=False` to `Workflow.from_yaml(...)`.
 
 ### 4.4 Checkpoint Step
 
@@ -358,27 +333,104 @@ relative to a checkpoint:
       - compare: parent
 ```
 
-## 5. Output Template Variables
+## 5. Output Directory Structure
 
-Any `output` field uses Python `str.format(...)` templating.
+Output directories are created automatically under `project_path` (defaults
+to the current working directory when omitted). You do not need to specify
+per-step output paths — Boundry uses an opinionated naming scheme.
 
-### 5.1 Available Variables by Context
+### 5.1 Top-level Steps
 
-- Top-level `output` and operation-step `output`:
-  - `{rank}` (always available; defaults to `1` for single structure)
-- Iterate block `output`:
-  - `{cycle}` (1-based iterate cycle index)
-  - `{rank}` (if population size > 1, or explicit use)
-- Beam block `output`:
-  - `{round}` (1-based beam round index)
-  - `{rank}` (1-based candidate rank)
+Each step creates a `{index}.{operation_name}/` directory:
 
-### 5.2 Multi-candidate Naming
+```
+project_path/
+├── 0.idealize/
+│   ├── idealized.pdb
+│   └── metrics.json
+├── 1.design/
+│   ├── designed.pdb
+│   ├── metrics.json
+│   └── energy.json
+└── 2.analyze_interface/
+    ├── interface.json
+    ├── metrics.json
+    └── per_position.csv
+```
 
-If more than one structure is written and no `{rank}` placeholder is present,
-Boundry auto-appends `_rankN` before the extension:
+### 5.2 Iterate Blocks
 
-- `out.pdb` -> `out_rank1.pdb`, `out_rank2.pdb`, ...
+Iterate blocks create an `{index}.iterate/` directory with `cycle_{n}/`
+subdirectories (1-indexed). Each cycle contains its own numbered step
+directories:
+
+```
+project_path/
+├── 0.idealize/
+│   └── ...
+└── 1.iterate/
+    ├── cycle_1/
+    │   ├── 0.relax/
+    │   │   ├── relaxed.pdb
+    │   │   ├── metrics.json
+    │   │   └── energy.json
+    │   └── 1.analyze_interface/
+    │       ├── interface.json
+    │       └── metrics.json
+    ├── cycle_2/
+    │   └── ...
+    └── cycle_3/
+        └── ...
+```
+
+### 5.3 Beam Blocks
+
+Beam blocks create an `{index}.beam/` directory with `round_{n}/` and
+`rank_{k}/` subdirectories. Candidates that are pruned (not in the top
+`width`) are placed under `others/rank_{k}/`:
+
+```
+project_path/
+└── 1.beam/
+    ├── round_1/
+    │   ├── rank_1/
+    │   │   ├── 0.design/
+    │   │   │   ├── designed.pdb
+    │   │   │   ├── metrics.json
+    │   │   │   └── energy.json
+    │   │   └── 1.analyze_interface/
+    │   │       ├── interface.json
+    │   │       └── metrics.json
+    │   ├── rank_2/
+    │   │   └── ...
+    │   └── others/
+    │       ├── rank_3/
+    │       │   └── ...
+    │       └── rank_4/
+    │           └── ...
+    └── round_2/
+        └── ...
+```
+
+### 5.4 Operation Output Files
+
+Each operation writes a standard set of files:
+
+| Operation | PDB stem | Additional files |
+|-----------|----------|-----------------|
+| `idealize` | `idealized.pdb` | `metrics.json` |
+| `minimize` | `minimized.pdb` | `metrics.json` |
+| `repack` | `repacked.pdb` | `metrics.json` |
+| `mpnn` | `designed_mpnn.pdb` | `metrics.json` |
+| `relax` | `relaxed.pdb` | `metrics.json`, `energy.json` |
+| `design` | `designed.pdb` | `metrics.json`, `energy.json` |
+| `renumber` | `renumbered.pdb` | `metrics.json` |
+| `select_positions` | — | `metrics.json`, `selected_positions.json` |
+| `analyze_interface` | — | `metrics.json`, `interface.json`, `per_position.csv`*, `alanine_scan.csv`* |
+| `checkpoint` | — | — |
+| `compare` | — | `compare.json` |
+
+\* Written only when `per_position: true` or `alanine_scan: true` is set.
 
 ## 6. Condition Expressions (`until`)
 
