@@ -29,22 +29,31 @@ pip install -e ".[dev]"
 
 ## CLI
 
-Boundry provides a subcommand-based CLI. Run `boundry --help` for a full list of commands.
+Boundry provides a subcommand-based CLI. The primary entry point is `boundry run`, which executes multi-step YAML workflows. Individual operations are also available as standalone commands for quick, one-off tasks. Run `boundry --help` for a full list of commands.
 
-```
-boundry
-├── idealize              Fix backbone geometry
-├── minimize              Energy minimization (OpenMM AMBER)
-├── repack                Repack side chains (LigandMPNN)
-├── relax                 Iterative repack + minimize cycles
-├── mpnn                  Sequence design (LigandMPNN)
-├── design                Iterative design + minimize cycles
-├── renumber              Remove insertion codes (Kabat numbering)
-├── analyze-interface     Interface scoring and analysis
-└── run                   Execute a YAML workflow
+### Workflows
+
+Use `boundry run` to execute YAML workflow files:
+
+```bash
+# Run a workflow
+boundry run workflow.yaml
+
+# With seed and parallel workers
+boundry run workflow.yaml --seed 42 --workers 4
+
+# With config overrides
+boundry run workflow.yaml output=results/ project=my_proj
+
+# Run a bundled workflow
+boundry run simple_relax.yaml
 ```
 
-### Examples
+See the [Workflows](#workflows) section and [Workflow Reference](src/boundry/workflows/README.md) for the full workflow schema.
+
+### Operations
+
+Individual operations are available as standalone commands for one-off tasks:
 
 ```bash
 # Fix backbone geometry
@@ -79,9 +88,6 @@ boundry analyze-interface complex.pdb --output interface.json
 # Per-position interface energetics
 boundry analyze-interface complex.pdb --per-position --alanine-scan
 boundry analyze-interface complex.pdb --per-position --scan-chains A,B --position-csv results.csv
-
-# Execute a YAML workflow
-boundry run workflow.yaml
 ```
 
 All commands that include energy minimization (`minimize`, `relax`, `design`) support `--pre-idealize` to fix backbone geometry before processing. These commands also automatically handle PDB insertion codes (e.g., Kabat-numbered antibodies) by renumbering residues before processing and restoring original numbering in the output. Use `--verbose` or `-v` on any command for detailed logging.
@@ -282,10 +288,23 @@ By default, workflow execution requires at least one output path
 (top-level `output` or step/block `output`). For in-memory execution in
 Python, construct with `Workflow.from_yaml(..., require_output=False)`.
 
-Compound block nodes are also supported:
+Compound block nodes and snapshot steps are also supported:
 
 - `iterate`: repeat nested steps for `n` cycles or until `until` condition.
 - `beam`: population search with `width`, `rounds`, `metric`, and pruning.
+- `checkpoint`: save a named snapshot of the current structure for later comparison.
+- `compare`: compute metric deltas between the current structure and a named checkpoint.
+
+Checkpoint and compare enable before/after tracking within a workflow:
+
+```yaml
+steps:
+  - operation: relax
+  - checkpoint: parent
+  - operation: design
+  - operation: analyze_interface
+  - compare: parent  # deltas available as {parent.delta.dG}, etc.
+```
 
 See the [Workflow Reference](src/boundry/workflows/README.md) for complete
 documentation and examples.

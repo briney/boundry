@@ -220,6 +220,8 @@ Each item in `steps:` must contain exactly one of:
 - `operation` (single operation step)
 - `iterate` (fixed or convergence loop)
 - `beam` (population beam search)
+- `checkpoint` (save named snapshot)
+- `compare` (compute deltas against a checkpoint)
 
 ### 4.1 Operation Step
 
@@ -307,6 +309,54 @@ Notes:
 - By default, running a workflow requires at least one configured output
   path (`output` at top-level or in a step/block). For in-memory runs in
   Python, pass `require_output=False` to `Workflow.from_yaml(...)`.
+
+### 4.4 Checkpoint Step
+
+```yaml
+- checkpoint: parent
+```
+
+Saves a snapshot of the current structure's metadata under a named key.
+The name must be a valid Python identifier and cannot start with an
+underscore. Checkpoint is a passthrough — it does not modify the
+structure or its metadata.
+
+Use checkpoints to capture a baseline for later comparison (see §4.5).
+
+### 4.5 Compare Step
+
+```yaml
+- compare: parent
+```
+
+Computes numeric deltas between the current structure's metrics and the
+metrics saved at the named checkpoint. The named checkpoint must have
+been saved by a prior `checkpoint` step, otherwise an error is raised.
+
+Compare stores results in metadata under the checkpoint name:
+
+- `{name.delta.key}` — difference between current and checkpoint value
+  for any numeric metric (e.g., `{parent.delta.dG}`)
+- `{name.ref.key}` — the reference value from the checkpoint
+  (e.g., `{parent.ref.dG}`)
+
+Compare also writes a `compare.json` file to the step output directory
+containing the delta and reference values.
+
+Example — iterate until binding energy improves by at least 5 kcal/mol
+relative to a checkpoint:
+
+```yaml
+- operation: relax
+- checkpoint: parent
+- iterate:
+    until: "{parent.delta.dG} < -5.0"
+    max_n: 10
+    steps:
+      - operation: design
+      - operation: analyze_interface
+      - compare: parent
+```
 
 ## 5. Output Template Variables
 
@@ -577,6 +627,11 @@ Common keys:
 - From `select_positions`:
   - `{selected_positions}` (int, number of positions selected for design)
   - `{selection_source}`, `{selection_metric}`, `{selection_threshold}`
+- From `compare` (where *name* is the checkpoint name):
+  - `{name.delta.key}` — delta between current and checkpoint for any
+    numeric metric (e.g., `{parent.delta.dG}`)
+  - `{name.ref.key}` — the reference value from the checkpoint
+    (e.g., `{parent.ref.dG}`)
 
 You can also use arithmetic expressions combining variables, for example:
 
@@ -588,7 +643,7 @@ You can also use arithmetic expressions combining variables, for example:
 - Unknown top-level keys are treated as user-defined variables (see §2).
   They must be valid Python identifiers with scalar values.
 - Block-level unknown keys raise errors.
-- Node must be exactly one of `operation`, `iterate`, `beam`.
+- Node must be exactly one of `operation`, `iterate`, `beam`, `checkpoint`, `compare`.
 - `steps` lists must be non-empty.
 - Numeric block controls (`n`, `max_n`, `width`, `rounds`, `expand`, `workers`) must be `>= 1`.
 - `beam.direction` must be `min` or `max`.
