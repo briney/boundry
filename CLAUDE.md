@@ -81,7 +81,7 @@ Subcommands: `idealize`, `minimize`, `repack`, `relax`, `mpnn`, `design`, `renum
 
 **Variable interpolation:** OmegaConf-powered `${key}` resolution with `${env:VAR}` for environment variables. User-defined variables are any top-level key not in the known workflow schema keys. CLI overrides via dotlist syntax.
 
-**Parallel execution:** `_parallel.py` provides `ProcessPoolExecutor` with `spawn` context (avoids CUDA fork hazards). `BranchTask`/`BranchResult` for beam-level parallelism, `StepTask`/`StepResult` for population-level parallelism. Dispatched by `_expand_beam_sequential()`/`_expand_beam_parallel()` and `_execute_step_sequential()`/`_execute_step_parallel()` based on effective worker count. Workers field: `WorkflowConfig.workers` (global default=1), `BeamBlock.workers`/`IterateBlock.workers` (per-block override, `None`=use global). Nested blocks in beam steps trigger fallback to sequential with warning.
+**Parallel execution:** A single `WorkPool` (context manager wrapping `ProcessPoolExecutor` with `spawn` context to avoid CUDA fork hazards) is created once in `run_population()` and stored as `self._pool`. `OperationTask`/`OperationResult` are the unified task/result types for all parallel dispatch via `_execute_operation_worker()`. Beam uses step-level parallelism: all branches execute step N in parallel (barrier sync), then step N+1. `_BranchState` tracks per-branch structure, seed, snapshots, and branch-local checkpoints. `analyze_interface` always runs in main process so per-position scans can fan out to the shared pool. `WorkflowConfig.workers` is the single parallelism control (global default=1); block-level `workers` is deprecated.
 
 **Seed composition:** Hierarchical deterministic seed derivation via `_compose_seed()`. Top-level steps inherit workflow seed; iterate cycles derive `seed * 100000 + cycle`; beam branches derive `seed * 100000 + (round * 10000 + candidate * 100 + expansion)`. Step-level seed params take precedence.
 
@@ -94,7 +94,7 @@ Subcommands: `idealize`, `minimize`, `repack`, `relax`, `mpnn`, `design`, `renum
 ### Key Modules
 - **`operations.py`** — Core Python API. Standalone functions for each operation plus the `Structure` and `InterfaceAnalysisResult` data classes. This is the primary interface for programmatic use.
 - **`workflow.py`** — YAML workflow runner. `Workflow.from_yaml()` loads and validates, `Workflow.run()` executes. Handles iterate/beam blocks, checkpoints, and parallel dispatch.
-- **`_parallel.py`** — Parallel execution for workflows. `ProcessPoolExecutor` with `spawn` context. `BranchTask`/`BranchResult` for beam, `StepTask`/`StepResult` for steps, `ScanTask`/`ScanResult` for per-position interface scans.
+- **`_parallel.py`** — Parallel execution for workflows. `WorkPool` wraps `ProcessPoolExecutor` with `spawn` context. `OperationTask`/`OperationResult` for unified operation dispatch, `ScanTask`/`ScanResult` for per-position interface scans. Scan workers use config-fingerprint-keyed `_worker_cache` for lazy Relaxer/Designer init.
 - **`condition.py`** — Safe condition expression parser for workflow convergence (`until` fields). Grammar supports comparisons, arithmetic, `abs()`, `delta()`, `{dotted.path}` variable references.
 - **`_progress.py`** — Rich-based workflow progress monitoring with multi-level progress bars.
 - **`workflow_metadata.py`** — Metadata merge strategy (`merge_metadata()`), numeric metric extraction (`extract_numeric_metric()`), dotted path resolution.
@@ -103,10 +103,15 @@ Subcommands: `idealize`, `minimize`, `repack`, `relax`, `mpnn`, `design`, `renum
 - **`idealize.py`** — Optional preprocessing to fix backbone geometry while preserving dihedral angles.
 - **`renumber.py`** — PDB insertion code handling. `has_insertion_codes()`, `renumber_pdb()`, `restore_numbering()`. Operations that need sequential numbering (minimize, relax, design) auto-renumber and restore.
 - **`interface.py` / `binding_energy.py` / `surface_area.py`** — Interface analysis: residue identification, ddG calculation, SASA, shape complementarity.
+- **`interface_position_energetics.py`** — Per-position interface energetics (residue removal and alanine scanning). `compute_position_energetics()` with sequential and parallel scan paths via the shared pool.
+- **`runner.py`** — Shared operation runners with invocation-aware output handling. `run_structure_operation()` and `run_interface_operation()` unify execution across API/CLI/workflow modes.
+- **`invocation.py`** — Invocation/output policy helpers. `InvocationMode`, `OperationKind`, `OutputRequirement`, `OutputPolicy` manage output-path requirements across calling contexts.
+- **`result_io.py`** — Result serialization and output-path helpers. `write_structure_output()`, `write_interface_json()`, `write_interface_csv()`.
 - **`chain_gaps.py`** — Detects missing residues via residue number discontinuities and large C-N distances.
 - **`resfile.py`** — Parses Rosetta-style resfiles (NATRO, NATAA, ALLAA, PIKAA, NOTAA, POLAR, APOLAR).
 - **`structure_io.py`** — Unified PDB/CIF I/O with auto-detection and format conversion.
 - **`weights.py`** — Manages LigandMPNN model weight downloads to `~/.boundry/weights/` (or `BOUNDRY_WEIGHTS_DIR`).
+- **`utils.py`** — Scoring and I/O utilities: `suppress_stderr()`, `remove_waters()`, `filter_protein_only()`, `compute_sequence_recovery()`, `write_scorefile()`.
 - **`config.py`** — All configuration dataclasses.
 - **`cli.py`** — Typer-based CLI with subcommands.
 
@@ -123,9 +128,10 @@ Tests are in `tests/` using pytest. Two custom markers:
 - `slow` — long-running tests
 
 ### Test Patterns
-- Workflow execution tests mock `Workflow._run_operation` with `side_effect` dispatchers when multiple operations are involved.
+- Workflow execution tests mock `Workflow._run_operation` with `side_effect` dispatchers when multiple operations are involved. Dispatchers must accept `**kwargs` (for `pool` parameter).
 - Operation runner unit tests call `Workflow._run_operation("name", struct, params)` directly and mock the underlying `boundry.operations.*` or `boundry.config.*`.
 - `_run_analyze_interface` tests call the method directly since it remains a separate static method.
+- `WorkPool` tests need top-level functions (not lambdas) for pickle compatibility with `spawn` context.
 
 ### Test Files
 - **`test_operations.py`** — Tests for all operation functions, `Structure`, `InterfaceAnalysisResult`, input resolution helpers, and top-level imports. Uses `unittest.mock.patch` to mock heavy dependencies (Designer, Relaxer, OpenMM).
@@ -138,9 +144,21 @@ Tests are in `tests/` using pytest. Two custom markers:
 - **`test_idealize.py`** — Tests for backbone idealization and dihedral extraction.
 - **`test_chain_gaps.py`** — Tests for chain gap detection.
 - **`test_resfile.py`** — Tests for resfile parsing.
+- **`test_renumber.py`** — Tests for PDB insertion code handling.
 - **`test_structure_io.py`** — Tests for PDB/CIF I/O.
 - **`test_surface_area.py`** — Tests for SASA and shape complementarity.
+- **`test_binding_energy.py`** — Tests for binding energy calculation.
+- **`test_interface.py`** — Tests for interface residue identification.
+- **`test_interface_position_energetics.py`** — Tests for per-position energetics.
 - **`test_config.py`** — Tests for configuration dataclasses.
+- **`test_runner.py`** — Tests for operation runner functions.
+- **`test_result_io.py`** — Tests for result serialization.
+- **`test_utils.py`** — Tests for utility functions.
+- **`test_weights.py`** — Tests for LigandMPNN weight management.
+- **`test_designer_unit.py`** — Unit tests for Designer.
+- **`test_designer_integration.py`** — Integration tests for Designer/LigandMPNN.
+- **`test_relaxer_integration.py`** — Integration tests for Relaxer/OpenMM.
+- **`test_cli_integration.py`** — Integration tests for CLI.
 - **`test_interface_scoring_integration.py`** — Integration tests using real PDB structures (1VFB).
 - **`test_pipeline_interface.py`** — Interface analysis integration tests.
 
