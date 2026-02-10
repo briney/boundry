@@ -1,46 +1,74 @@
-# Beam-search optimization with adaptive position selection
-#
-# Uses interface analysis to identify energetically important positions,
-# selects positions for redesign via alanine scanning, and focuses
-# design on those positions. Converges when no positions exceed the
-# ddG threshold (i.e., all interface positions are already optimized).
-#
-# Flow per beam round:
-#   relax -> analyze_interface -> select_positions -> design
-#
-# The select_positions step stores a DesignSpec in metadata, which
-# is automatically picked up by the downstream design step. When
-# no positions pass the threshold, selected_positions drops to 0
-# and the until condition terminates the search.
-
 workflow_version: 1
+
+project_path: .
+interface: null
+scan_chains: null
+
 input: input.pdb
-project_path: beam_optimize_results
 seed: 42
+workers: 16
+
+# expand_factor should be >= the expected number of bad positions
+# so random sampling covers most of them
+expand_factor: 20
 
 steps:
+  # Step 1: Fix backbone geometry once
   - operation: idealize
-  - beam:
-      width: 5
-      rounds: 10
-      metric: dG
-      direction: min
-      until: "{selected_positions} == 0"
+
+  # Step 2: Initial relax (done once, not every round)
+  - operation: relax
+    params:
+      n_iterations: 3
+
+  # Step 3: Iterative improvement rounds
+  - iterate:
+      n: 10
       steps:
-        - operation: relax
-          params:
-            n_iterations: 1
+        # 3a: Analyze interface to find bad positions
         - operation: analyze_interface
           params:
             calculate_binding_energy: true
             alanine_scan: true
-        - operation: select_positions
-          params:
-            source: alanine_scan
-            metric: ddG
-            threshold: 1.0
-            direction: above
-            mode: ALLAA
-        - operation: design
-          params:
-            n_iterations: 1
+            chain_pairs: ${interface}
+            scan_chains: ${scan_chains}
+
+        # 3b: Checkpoint the current "parent" for this round
+        - checkpoint: parent
+
+        # 3c: Beam search over single-position designs
+        #     Each expansion picks 1 random bad position and designs it.
+        #     With expand=20, we sample 20 random positions, keeping the
+        #     best 4 by dG improvement vs parent.
+        - beam:
+            width: 4
+            rounds: 1
+            expand: ${expand_factor}
+            metric: "parent.delta.dG"
+            direction: min
+            steps:
+              - operation: select_positions
+                params:
+                  source: alanine_scan
+                  metric: ddG
+                  threshold: 1.0
+                  direction: below
+                  top_k: 1
+                  order: random
+                  mode: ALLAA
+
+              - operation: design
+                params:
+                  n_iterations: 1
+
+              - operation: relax
+                params:
+                  n_iterations: 1
+
+              - operation: analyze_interface
+                params:
+                  calculate_binding_energy: true
+                  chain_pairs: ${interface}
+                  scan_chains: ${scan_chains}
+
+              - compare: parent
