@@ -22,7 +22,13 @@ from boundry.config import (
     WorkflowStep,
     WorkflowStepOrBlock,
 )
-from boundry.workflow_metadata import extract_numeric_metric, merge_metadata
+from boundry.workflow_metadata import (
+    _residue_map_to_sequences,
+    extract_numeric_metric,
+    extract_residue_map,
+    merge_metadata,
+    update_design_history,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -740,6 +746,7 @@ class _ExecutionContext:
     population: List["Structure"]
     last_operation: Optional[str] = None
     output_context: Optional[OutputPathContext] = None
+    _cycle: Optional[int] = None
 
 
 @dataclass
@@ -1085,6 +1092,7 @@ class Workflow:
             population=[Structure.from_file(input_path)],
             output_context=output_ctx,
         )
+        _init_design_history(current.population)
         logger.info(f"Loaded input: {input_path}")
         logger.info(f"Project path: {project_path.resolve()}")
 
@@ -1244,34 +1252,46 @@ class Workflow:
                 )
                 results.append(result)
 
-        # Write outputs and merge metadata (always sequential)
+        # Merge metadata first, then write outputs
+        is_design_op = step.operation in ("design", "mpnn")
         updated: List[Structure] = []
         for idx, (structure, result) in enumerate(
             zip(context.population, results)
         ):
+            merged = merge_metadata(
+                structure.metadata,
+                result.metadata,
+                operation=step.operation,
+            )
+            if is_design_op:
+                merged = update_design_history(
+                    merged,
+                    result.metadata,
+                    step.operation,
+                    cycle=getattr(context, "_cycle", None),
+                )
+
+            merged_struct = Structure(
+                pdb_string=result.pdb_string,
+                metadata=merged,
+                source_path=(
+                    result.source_path or structure.source_path
+                ),
+            )
+
             if step_ctx is not None:
                 if pop_size > 1:
                     write_ctx = step_ctx.rank_dir(idx + 1)
                 else:
                     write_ctx = step_ctx
                 self._write_step_output(
-                    result, write_ctx, step.operation
+                    merged_struct,
+                    write_ctx,
+                    step.operation,
+                    result_metadata=result.metadata,
                 )
 
-            merged = merge_metadata(
-                structure.metadata,
-                result.metadata,
-                operation=step.operation,
-            )
-            updated.append(
-                Structure(
-                    pdb_string=result.pdb_string,
-                    metadata=merged,
-                    source_path=(
-                        result.source_path or structure.source_path
-                    ),
-                )
-            )
+            updated.append(merged_struct)
 
         self._progress.finish_inner_step()
 
@@ -1327,6 +1347,7 @@ class Workflow:
                 population=current.population,
                 last_operation=current.last_operation,
                 output_context=cycle_ctx,
+                _cycle=cycle,
             )
 
             for inner_idx, inner in enumerate(block.steps):
@@ -1496,6 +1517,10 @@ class Workflow:
                         op_results = self._pool.map(
                             _execute_operation_worker, tasks
                         )
+                        beam_is_design = inner.operation in (
+                            "design",
+                            "mpnn",
+                        )
                         for b, op_r in zip(
                             branches, op_results
                         ):
@@ -1515,6 +1540,15 @@ class Workflow:
                                 result.metadata,
                                 operation=inner.operation,
                             )
+                            if beam_is_design:
+                                merged = (
+                                    update_design_history(
+                                        merged,
+                                        result.metadata,
+                                        inner.operation,
+                                        cycle=round_num,
+                                    )
+                                )
                             b.snapshots.append(
                                 _StepSnapshot(
                                     operation=inner.operation,
@@ -1547,6 +1581,10 @@ class Workflow:
                             )
                     else:
                         # Sequential: run in main process
+                        seq_is_design = inner.operation in (
+                            "design",
+                            "mpnn",
+                        )
                         for b in branches:
                             params = self._with_seed(
                                 inner.operation,
@@ -1565,6 +1603,15 @@ class Workflow:
                                 result.metadata,
                                 operation=inner.operation,
                             )
+                            if seq_is_design:
+                                merged = (
+                                    update_design_history(
+                                        merged,
+                                        result.metadata,
+                                        inner.operation,
+                                        cycle=round_num,
+                                    )
+                                )
                             b.snapshots.append(
                                 _StepSnapshot(
                                     operation=inner.operation,
@@ -1983,6 +2030,17 @@ class Workflow:
                         f"Failed to write {writer_key}: {exc}"
                     )
 
+        # Write mutation tracking for design/mpnn ops
+        if operation in ("design", "mpnn"):
+            try:
+                _write_mutations_output(
+                    structure.metadata, dir_path
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to write mutations: {exc}"
+                )
+
     # ------------------------------------------------------------------
     # Convergence and helpers
     # ------------------------------------------------------------------
@@ -2267,6 +2325,86 @@ class Workflow:
             source_path=structure.source_path,
             base_metadata=structure.metadata,
         )
+
+
+def _init_design_history(
+    population: List["Structure"],
+) -> None:
+    """Inject initial design_history into each structure's metadata."""
+    if not population:
+        return
+    residue_map = extract_residue_map(population[0].pdb_string)
+    if not residue_map:
+        return
+    original_sequences = _residue_map_to_sequences(residue_map)
+    for structure in population:
+        wf = dict(structure.metadata.get("_workflow") or {})
+        wf["design_history"] = {
+            "original_sequences": dict(original_sequences),
+            "original_residue_map": [
+                list(pos) for pos in residue_map
+            ],
+            "mutations": [],
+            "current_sequences": dict(original_sequences),
+            "total_mutations": 0,
+            "sequence_recovery": 1.0,
+        }
+        structure.metadata["_workflow"] = wf
+
+
+def _write_mutations_output(
+    metadata: Dict[str, Any], dir_path: Path
+) -> None:
+    """Write mutations.json and mutations.csv from design_history."""
+    import csv
+
+    wf = metadata.get("_workflow")
+    if not isinstance(wf, dict):
+        return
+    history = wf.get("design_history")
+    if not history:
+        return
+    mutations = history.get("mutations", [])
+    if not mutations:
+        return
+
+    # Write mutations.json
+    json_data = {
+        "total_mutations": history.get("total_mutations", 0),
+        "sequence_recovery": history.get(
+            "sequence_recovery", 1.0
+        ),
+        "original_sequences": history.get(
+            "original_sequences", {}
+        ),
+        "current_sequences": history.get(
+            "current_sequences", {}
+        ),
+        "mutations": mutations,
+    }
+    json_path = dir_path / "mutations.json"
+    with open(json_path, "w") as f:
+        json.dump(json_data, f, indent=2, default=str)
+    logger.info(f"  Wrote mutations: {json_path}")
+
+    # Write mutations.csv
+    csv_path = dir_path / "mutations.csv"
+    fieldnames = [
+        "chain",
+        "position",
+        "icode",
+        "from_aa",
+        "to_aa",
+        "introduced_by",
+        "introduced_at_cycle",
+    ]
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=fieldnames, extrasaction="ignore"
+        )
+        writer.writeheader()
+        writer.writerows(mutations)
+    logger.info(f"  Wrote mutations CSV: {csv_path}")
 
 
 def _compose_seed(

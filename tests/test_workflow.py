@@ -3470,3 +3470,298 @@ class TestDescribeCheckpointCompare:
         item = CompareStep(name="parent")
         desc = Workflow._describe_item(item)
         assert desc == "compare 'parent'"
+
+
+# ------------------------------------------------------------------
+# Mutation tracking
+# ------------------------------------------------------------------
+
+
+def _mutation_pdb_line(serial, name, resname, chain, resnum):
+    """Build a PDB ATOM line for mutation tracking tests."""
+    return (
+        f"ATOM  {serial:5d} {name:<4s} {resname:>3s} "
+        f"{chain}{resnum:4d}    "
+        f"{float(serial):8.3f}   0.000   0.000"
+        f"  1.00  0.00           {name[0]}"
+    )
+
+
+def _mutation_input_pdb(residues, chain="A"):
+    """Build a PDB string with N, CA, C atoms per residue."""
+    lines = []
+    serial = 1
+    for resnum, resname in residues:
+        for atom in ("N", "CA", "C"):
+            lines.append(
+                _mutation_pdb_line(
+                    serial, atom, resname, chain, resnum
+                )
+            )
+            serial += 1
+    lines.append("END")
+    return "\n".join(lines) + "\n"
+
+
+class TestMutationTracking:
+    """Tests for design history / mutation tracking in workflows."""
+
+    def _make_workflow(self, tmp_path, steps, project_path=None):
+        wf_file = tmp_path / "wf.yaml"
+        data = {
+            "input": str(tmp_path / "input.pdb"),
+            "steps": steps,
+        }
+        if project_path is not None:
+            data["project_path"] = str(tmp_path / project_path)
+        wf_file.write_text(yaml.dump(data))
+        return Workflow.from_yaml(wf_file)
+
+    def _make_input(self, tmp_path):
+        """Write a PDB with ALA-GLY-VAL (sequence AGV)."""
+        pdb = tmp_path / "input.pdb"
+        pdb.write_text(
+            _mutation_input_pdb(
+                [(1, "ALA"), (2, "GLY"), (3, "VAL")]
+            )
+        )
+        return pdb
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_design_step_tracks_mutations(
+        self, mock_op, tmp_path
+    ):
+        """Single design step writes mutations.json + csv."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+
+        # Design changes V→W at position 3
+        mock_op.return_value = Structure(
+            pdb_string=_mutation_input_pdb(
+                [(1, "ALA"), (2, "GLY"), (3, "TRP")]
+            ),
+            metadata={"sequence": "AGW"},
+        )
+
+        wf = self._make_workflow(
+            tmp_path,
+            [{"operation": "design"}],
+            project_path="results",
+        )
+        result = wf.run()
+
+        # Check metadata
+        history = result.metadata["_workflow"][
+            "design_history"
+        ]
+        assert history["total_mutations"] == 1
+        assert history["mutations"][0]["from_aa"] == "V"
+        assert history["mutations"][0]["to_aa"] == "W"
+        assert history["mutations"][0]["position"] == 3
+
+        # Check output files
+        out_dir = tmp_path / "results" / "0.design"
+        assert (out_dir / "mutations.json").exists()
+        assert (out_dir / "mutations.csv").exists()
+
+        mut_json = json.loads(
+            (out_dir / "mutations.json").read_text()
+        )
+        assert mut_json["total_mutations"] == 1
+        assert mut_json["mutations"][0]["to_aa"] == "W"
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_iterate_accumulates_mutations(
+        self, mock_op, tmp_path
+    ):
+        """Mutations accumulate across iterate cycles."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        calls = {"n": 0}
+
+        def _side_effect(name, structure, params, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # Cycle 1: mutate pos 1 A→M
+                return Structure(
+                    pdb_string=_mutation_input_pdb(
+                        [(1, "MET"), (2, "GLY"), (3, "VAL")]
+                    ),
+                    metadata={"sequence": "MGV"},
+                )
+            else:
+                # Cycle 2: mutate pos 3 V→W (pos 1 stays M)
+                return Structure(
+                    pdb_string=_mutation_input_pdb(
+                        [(1, "MET"), (2, "GLY"), (3, "TRP")]
+                    ),
+                    metadata={"sequence": "MGW"},
+                )
+
+        mock_op.side_effect = _side_effect
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {
+                    "iterate": {
+                        "n": 2,
+                        "steps": [{"operation": "mpnn"}],
+                    }
+                }
+            ],
+        )
+        result = wf.run()
+
+        history = result.metadata["_workflow"][
+            "design_history"
+        ]
+        assert history["total_mutations"] == 2
+        mutations = {
+            m["position"]: m for m in history["mutations"]
+        }
+        assert mutations[1]["from_aa"] == "A"
+        assert mutations[1]["to_aa"] == "M"
+        assert mutations[3]["from_aa"] == "V"
+        assert mutations[3]["to_aa"] == "W"
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_beam_branches_independent_mutations(
+        self, mock_op, tmp_path
+    ):
+        """Beam branches maintain separate mutation histories."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        call_count = {"n": 0}
+
+        def _side_effect(name, structure, params, **kwargs):
+            call_count["n"] += 1
+            if name == "design":
+                # Alternate mutations per branch
+                if call_count["n"] % 2 == 1:
+                    return Structure(
+                        pdb_string=_mutation_input_pdb(
+                            [
+                                (1, "MET"),
+                                (2, "GLY"),
+                                (3, "VAL"),
+                            ]
+                        ),
+                        metadata={"sequence": "MGV"},
+                    )
+                else:
+                    return Structure(
+                        pdb_string=_mutation_input_pdb(
+                            [
+                                (1, "ALA"),
+                                (2, "GLY"),
+                                (3, "TRP"),
+                            ]
+                        ),
+                        metadata={"sequence": "AGW"},
+                    )
+            # analyze_interface for scoring
+            return Structure(
+                pdb_string=structure.pdb_string,
+                metadata={
+                    "dG": -1.0 * call_count["n"],
+                    "sequence": structure.metadata.get(
+                        "sequence", "AGV"
+                    ),
+                },
+            )
+
+        mock_op.side_effect = _side_effect
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {
+                    "beam": {
+                        "width": 2,
+                        "rounds": 1,
+                        "metric": "dG",
+                        "direction": "min",
+                        "steps": [
+                            {"operation": "design"},
+                            {"operation": "analyze_interface"},
+                        ],
+                    }
+                }
+            ],
+        )
+        population = wf.run_population()
+
+        # Each branch should have independent mutations
+        for struct in population:
+            history = struct.metadata["_workflow"][
+                "design_history"
+            ]
+            assert history["total_mutations"] >= 1
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_mutations_csv_columns(self, mock_op, tmp_path):
+        """CSV has correct columns and data."""
+        import csv
+
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        mock_op.return_value = Structure(
+            pdb_string=_mutation_input_pdb(
+                [(1, "ALA"), (2, "TRP"), (3, "VAL")]
+            ),
+            metadata={"sequence": "AWV"},
+        )
+
+        wf = self._make_workflow(
+            tmp_path,
+            [{"operation": "design"}],
+            project_path="results",
+        )
+        wf.run()
+
+        csv_path = (
+            tmp_path / "results" / "0.design" / "mutations.csv"
+        )
+        assert csv_path.exists()
+
+        with open(csv_path) as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["chain"] == "A"
+        assert row["position"] == "2"
+        assert row["from_aa"] == "G"
+        assert row["to_aa"] == "W"
+        assert row["introduced_by"] == "design"
+        assert "introduced_at_cycle" in row
+
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_no_mutations_no_files(self, mock_op, tmp_path):
+        """When sequence is unchanged, no mutations files written."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        mock_op.return_value = Structure(
+            pdb_string=_mutation_input_pdb(
+                [(1, "ALA"), (2, "GLY"), (3, "VAL")]
+            ),
+            metadata={"sequence": "AGV"},
+        )
+
+        wf = self._make_workflow(
+            tmp_path,
+            [{"operation": "design"}],
+            project_path="results",
+        )
+        wf.run()
+
+        out_dir = tmp_path / "results" / "0.design"
+        assert not (out_dir / "mutations.json").exists()
+        assert not (out_dir / "mutations.csv").exists()
