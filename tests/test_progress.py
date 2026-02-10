@@ -152,45 +152,45 @@ class TestWorkflowProgressEnabled:
 
     def test_iterate_fixed_n(self, progress):
         progress.start_iterate(5, convergence=False)
-        assert progress._block_task is not None
+        assert len(progress._block_tasks) == 1
         for i in range(1, 6):
             progress.advance_iterate(i)
         progress.finish_iterate()
-        assert progress._block_task is None
+        assert len(progress._block_tasks) == 0
 
     def test_iterate_convergence(self, progress):
         progress.start_iterate(
             100, convergence=True, metric_name="dG"
         )
-        assert progress._block_task is not None
+        assert len(progress._block_tasks) == 1
         progress.advance_iterate(1, metric_value=-8.0)
         progress.advance_iterate(2, metric_value=-9.5)
         progress.finish_iterate()
-        assert progress._block_task is None
+        assert len(progress._block_tasks) == 0
 
     def test_beam_lifecycle(self, progress):
         progress.start_beam(5)
-        assert progress._block_task is not None
+        assert len(progress._block_tasks) == 1
         for r in range(1, 6):
             progress.advance_beam_round(
                 r, best_metric=-10.0 - r, metric_name="dG"
             )
         progress.finish_beam()
-        assert progress._block_task is None
+        assert len(progress._block_tasks) == 0
 
     def test_branch_lifecycle(self, progress):
         progress.start_branches(10)
-        assert progress._inner_task is not None
+        assert len(progress._inner_tasks) == 1
         for _ in range(10):
             progress.advance_branch()
         progress.finish_branches()
-        assert progress._inner_task is None
+        assert len(progress._inner_tasks) == 0
 
     def test_inner_step_lifecycle(self, progress):
         progress.start_inner_step("minimizing")
-        assert progress._inner_task is not None
+        assert len(progress._inner_tasks) == 1
         progress.finish_inner_step()
-        assert progress._inner_task is None
+        assert len(progress._inner_tasks) == 0
 
     def test_advance_beam_round_no_metric(self, progress):
         """advance_beam_round without metric should not raise."""
@@ -206,6 +206,132 @@ class TestWorkflowProgressEnabled:
         )
         progress.advance_iterate(1, metric_value=None)
         progress.finish_iterate()
+
+
+# ------------------------------------------------------------------
+# Nested block stacking
+# ------------------------------------------------------------------
+
+
+class TestNestedBlocks:
+    """Block and inner task stacks survive nesting."""
+
+    @pytest.fixture()
+    def progress(self):
+        with patch.object(
+            sys, "stderr", wraps=sys.stderr
+        ) as mock_stderr:
+            mock_stderr.isatty = lambda: True
+            p = WorkflowProgress(enabled=True)
+            with p:
+                yield p
+
+    def test_iterate_containing_beam(self, progress):
+        """iterate → beam nesting: iterate task survives beam
+        lifecycle."""
+        progress.start_iterate(5, convergence=False)
+        assert len(progress._block_tasks) == 1
+        iterate_task_id = progress._block_tasks[0].task_id
+
+        # Simulate beam block inside iterate
+        progress.start_beam(3)
+        assert len(progress._block_tasks) == 2
+
+        # Beam inner step
+        progress.start_inner_step("design")
+        assert len(progress._inner_tasks) == 1
+        progress.finish_inner_step()
+        assert len(progress._inner_tasks) == 0
+
+        # Beam branches
+        progress.start_branches(4)
+        assert len(progress._inner_tasks) == 1
+        for _ in range(4):
+            progress.advance_branch()
+        progress.finish_branches()
+        assert len(progress._inner_tasks) == 0
+
+        progress.advance_beam_round(1, best_metric=-10.0, metric_name="dG")
+        progress.finish_beam()
+
+        # Iterate task must still be intact
+        assert len(progress._block_tasks) == 1
+        assert progress._block_tasks[0].task_id == iterate_task_id
+
+        # Advance iterate cycle — must not be a no-op
+        progress.advance_iterate(1)
+        task = progress._progress._tasks[iterate_task_id]
+        assert task.completed == 1
+
+        progress.finish_iterate()
+        assert len(progress._block_tasks) == 0
+
+    def test_beam_inner_step_stacks_with_branches(self, progress):
+        """Inner step spinner and branch counter coexist on the
+        inner stack."""
+        progress.start_beam(1)
+
+        # Step spinner pushed first
+        progress.start_inner_step("design")
+        assert len(progress._inner_tasks) == 1
+
+        # Branches pushed on top (separate call site in real code,
+        # but validates the stack)
+        progress.start_branches(4)
+        assert len(progress._inner_tasks) == 2
+
+        progress.advance_branch()
+        progress.finish_branches()
+        assert len(progress._inner_tasks) == 1
+
+        progress.finish_inner_step()
+        assert len(progress._inner_tasks) == 0
+
+        progress.finish_beam()
+
+    def test_deeply_nested_iterate_beam_iterate(self, progress):
+        """iterate → beam → iterate nesting."""
+        progress.start_iterate(3, convergence=False)
+        assert len(progress._block_tasks) == 1
+
+        progress.start_beam(2)
+        assert len(progress._block_tasks) == 2
+
+        # Nested iterate inside beam
+        progress.start_iterate(
+            10, convergence=True, metric_name="dG"
+        )
+        assert len(progress._block_tasks) == 3
+
+        progress.advance_iterate(1, metric_value=-5.0)
+        progress.finish_iterate()
+        assert len(progress._block_tasks) == 2
+
+        progress.advance_beam_round(1)
+        progress.finish_beam()
+        assert len(progress._block_tasks) == 1
+
+        progress.advance_iterate(1)
+        progress.finish_iterate()
+        assert len(progress._block_tasks) == 0
+
+    def test_multiple_inner_steps_sequential(self, progress):
+        """Multiple inner steps pushed and popped sequentially."""
+        progress.start_beam(1)
+
+        progress.start_inner_step("select_positions")
+        progress.finish_inner_step()
+        assert len(progress._inner_tasks) == 0
+
+        progress.start_inner_step("design")
+        progress.finish_inner_step()
+        assert len(progress._inner_tasks) == 0
+
+        progress.start_inner_step("analyze_interface")
+        progress.finish_inner_step()
+        assert len(progress._inner_tasks) == 0
+
+        progress.finish_beam()
 
 
 # ------------------------------------------------------------------

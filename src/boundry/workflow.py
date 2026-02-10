@@ -1330,12 +1330,23 @@ class Workflow:
             )
 
             for inner_idx, inner in enumerate(block.steps):
+                # WorkflowStep gets its own inner-step
+                # spinner inside _execute_step; other item
+                # types need one here so the step name is
+                # visible during execution.
+                is_step = isinstance(inner, WorkflowStep)
+                if not is_step:
+                    self._progress.start_inner_step(
+                        self._describe_item(inner)
+                    )
                 current = self._execute_item(
                     inner,
                     current,
                     inner_seed,
                     step_index=inner_idx,
                 )
+                if not is_step:
+                    self._progress.finish_inner_step()
 
             # Extract metric value for progress display
             metric_value = None
@@ -1442,6 +1453,10 @@ class Workflow:
 
             # Step-level execution across all branches
             for inner_idx, inner in enumerate(block.steps):
+                self._progress.start_inner_step(
+                    self._describe_item(inner)
+                )
+
                 if isinstance(inner, WorkflowStep):
                     is_analyze = (
                         inner.operation == "analyze_interface"
@@ -1692,6 +1707,8 @@ class Workflow:
                         b.structure = (
                             branch_ctx.population[0]
                         )
+
+                self._progress.finish_inner_step()
 
             # Score candidates
             scored: List[
