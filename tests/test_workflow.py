@@ -3380,6 +3380,74 @@ class TestCheckpointCompareExecution:
                 expected_delta
             )
 
+    @patch("boundry.workflow.Workflow._run_operation")
+    def test_beam_compare_writes_json(self, mock_op, tmp_path):
+        """Compare step inside beam writes compare.json for each
+        ranked candidate."""
+        from boundry.operations import Structure
+
+        self._make_input(tmp_path)
+        scores = [5.0, 1.0, 3.0, 2.0]
+        call_idx = {"i": 0}
+
+        def _dispatch(name, structure, params, **kwargs):
+            i = call_idx["i"]
+            call_idx["i"] += 1
+            return Structure(
+                pdb_string=f"ATOM beam {i}\nEND\n",
+                metadata={"dG": scores[i % len(scores)]},
+            )
+
+        mock_op.side_effect = _dispatch
+
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {"operation": "relax"},
+                {"checkpoint": "baseline"},
+                {
+                    "beam": {
+                        "width": 2,
+                        "rounds": 1,
+                        "expand": 4,
+                        "metric": "dG",
+                        "direction": "min",
+                        "steps": [
+                            {"operation": "relax"},
+                            {"compare": "baseline"},
+                        ],
+                    }
+                },
+            ],
+            project_path="output",
+        )
+        wf.run()
+
+        beam_dir = tmp_path / "output" / "2.beam"
+        round_dir = beam_dir / "round_1"
+
+        # Check that compare.json exists for selected candidates
+        for rank in [1, 2]:
+            compare_json = (
+                round_dir
+                / f"rank_{rank}"
+                / "1.compare"
+                / "compare.json"
+            )
+            assert (
+                compare_json.exists()
+            ), f"rank_{rank}/1.compare/compare.json missing"
+            data = json.loads(compare_json.read_text())
+            assert data["checkpoint"] == "baseline"
+            assert "delta" in data
+            assert "ref" in data
+            assert "dG" in data["delta"]
+            assert "dG" in data["ref"]
+
+        # Check that compare.json also exists for non-selected
+        others_dir = round_dir / "others"
+        assert others_dir.exists()
+
 
 # ------------------------------------------------------------------
 # Describe item for checkpoint / compare

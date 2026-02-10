@@ -751,6 +751,7 @@ class _StepSnapshot:
     result_metadata: Dict[str, Any]  # pre-merge metadata from this step
     pdb_string: str
     structure: "Structure"  # the merged structure after this step
+    compare_data: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -1637,6 +1638,24 @@ class Workflow:
                                 b.structure.source_path
                             ),
                         )
+                        b.snapshots.append(
+                            _StepSnapshot(
+                                operation="compare",
+                                step_index=inner_idx,
+                                result_metadata={},
+                                pdb_string=(
+                                    b.structure.pdb_string
+                                ),
+                                structure=b.structure,
+                                compare_data={
+                                    "checkpoint": (
+                                        inner.name
+                                    ),
+                                    "delta": delta,
+                                    "ref": ref_metrics,
+                                },
+                            )
+                        )
 
                 elif isinstance(inner, IterateBlock):
                     # Nested iterate: run per-branch in main
@@ -1736,14 +1755,28 @@ class Workflow:
                         snap_ctx = rank_ctx.step_dir(
                             snap.step_index, snap.operation
                         )
-                        self._write_step_output(
-                            snap.structure,
-                            snap_ctx,
-                            snap.operation,
-                            result_metadata=(
-                                snap.result_metadata
-                            ),
-                        )
+                        if snap.compare_data is not None:
+                            out_dir = snap_ctx.resolve()
+                            out_dir.mkdir(
+                                parents=True, exist_ok=True
+                            )
+                            (
+                                out_dir / "compare.json"
+                            ).write_text(
+                                json.dumps(
+                                    snap.compare_data,
+                                    indent=2,
+                                )
+                            )
+                        else:
+                            self._write_step_output(
+                                snap.structure,
+                                snap_ctx,
+                                snap.operation,
+                                result_metadata=(
+                                    snap.result_metadata
+                                ),
+                            )
 
             population = [
                 cand for _, cand, _ in scored[: block.width]
