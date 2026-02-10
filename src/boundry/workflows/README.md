@@ -72,13 +72,16 @@ How it works:
 - `workers: 1` (default) runs everything sequentially — no process pool
   is created.
 - `workers: N` (N > 1) creates a single shared `ProcessPoolExecutor`
-  with the `spawn` start method. All parallel operations submit tasks to
-  this pool.
+  with the `spawn` start method (avoids CUDA fork hazards). All parallel
+  operations submit tasks to this pool.
 - Beam steps execute each operation across all branches in parallel
   (step-level parallelism), with a barrier between steps.
 - `analyze_interface` always runs in the main process so that
   per-position scans can fan out to the shared pool.
 - The `--workers` / `-j` CLI flag overrides the YAML `workers` value.
+
+Block-level `workers` (inside `iterate` or `beam`) is deprecated and
+ignored. Use the top-level `workers` setting instead.
 
 Memory note: each worker process imports PyTorch/OpenMM independently
 (~500MB–1GB each). Use a worker count appropriate for your system.

@@ -309,6 +309,37 @@ steps:
 See the [Workflow Reference](src/boundry/workflows/README.md) for complete
 documentation and examples.
 
+### Parallel Execution
+
+Set `workers` at the workflow level (or use `--workers`/`-j` on the CLI)
+to enable process-level parallelism. A single shared process pool is
+created once at workflow start and reused for all parallel operations:
+
+```yaml
+workers: 4
+steps:
+  - beam:
+      width: 3
+      rounds: 10
+      steps:
+        - operation: design
+        - operation: analyze_interface
+```
+
+- `workers: 1` (default) runs everything sequentially — no pool is
+  created.
+- `workers: N` (N > 1) creates a shared `ProcessPoolExecutor` with
+  the `spawn` start method.
+- Beam branches execute each inner step in parallel with a barrier
+  between steps.
+- `analyze_interface` runs in the main process so per-position scans
+  can fan out to the shared pool.
+
+Each worker process imports PyTorch/OpenMM independently (~500 MB–1 GB
+each), so choose a worker count appropriate for your system's memory.
+See the [Workflow Reference](src/boundry/workflows/README.md) for full
+details on parallel execution.
+
 ### Supported Operations
 
 | Operation           | Description                              | Key Parameters                             |
