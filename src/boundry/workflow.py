@@ -2222,9 +2222,17 @@ class Workflow:
 def _compose_seed(
     seed_base: Optional[int], local_seed: int
 ) -> int:
+    """Derive a deterministic child seed from a parent seed and local offset.
+
+    Uses a hash to fold the result into [0, 2**32 - 1] so nested blocks
+    (iterate → beam) don't overflow numpy/torch seed limits.
+    """
     if seed_base is None:
         return local_seed
-    return (seed_base * 100000) + local_seed
+    import hashlib
+
+    h = hashlib.sha256(f"{seed_base}:{local_seed}".encode()).digest()
+    return int.from_bytes(h[:4], "big")
 
 
 def _ceil_div(a: int, b: int) -> int:
