@@ -411,14 +411,6 @@ def _parse_positive_int(value: Any, label: str, field_name: str) -> int:
     return value
 
 
-def _parse_optional_positive_int(
-    value: Any, label: str, field_name: str
-) -> Optional[int]:
-    if value is None:
-        return None
-    return _parse_positive_int(value, label, field_name)
-
-
 def _parse_optional_str(
     value: Any, label: str, field_name: str
 ) -> Optional[str]:
@@ -497,11 +489,18 @@ def _parse_iterate(
         f"{label}.iterate",
         "until",
     )
-    workers = _parse_optional_positive_int(
-        block_data.get("workers"),
-        f"{label}.iterate",
-        "workers",
-    )
+
+    # Block-level workers is deprecated (pool size set once by
+    # WorkflowConfig.workers). Accept and warn.
+    if block_data.get("workers") is not None:
+        import warnings
+
+        warnings.warn(
+            "Block-level 'workers' is deprecated and ignored. "
+            "Set 'workers' at the workflow level instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     if until is None and n < 1:
         raise WorkflowError(f"{label}.iterate: n must be >= 1")
@@ -517,7 +516,6 @@ def _parse_iterate(
         n=n,
         max_n=max_n,
         until=until,
-        workers=workers,
     )
 
 
@@ -589,11 +587,18 @@ def _parse_beam(
     )
     if until is not None:
         parse_condition(until)
-    workers = _parse_optional_positive_int(
-        block_data.get("workers"),
-        f"{label}.beam",
-        "workers",
-    )
+
+    # Block-level workers is deprecated (pool size set once by
+    # WorkflowConfig.workers). Accept and warn.
+    if block_data.get("workers") is not None:
+        import warnings
+
+        warnings.warn(
+            "Block-level 'workers' is deprecated and ignored. "
+            "Set 'workers' at the workflow level instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     return BeamBlock(
         steps=steps,
@@ -603,7 +608,6 @@ def _parse_beam(
         direction=direction,
         until=until,
         expand=expand,
-        workers=workers,
     )
 
 
@@ -749,6 +753,18 @@ class _StepSnapshot:
     structure: "Structure"  # the merged structure after this step
 
 
+@dataclass
+class _BranchState:
+    """Mutable state for one beam branch during step-level expansion."""
+
+    structure: "Structure"
+    seed: Optional[int]
+    snapshots: List[_StepSnapshot] = field(default_factory=list)
+    checkpoints: Dict[str, Dict[str, Any]] = field(
+        default_factory=dict
+    )
+
+
 # ------------------------------------------------------------------
 # Workflow class
 # ------------------------------------------------------------------
@@ -764,6 +780,7 @@ class Workflow:
         self.config = config
         self.last_population: List["Structure"] = []
         self._checkpoints: Dict[str, "Structure"] = {}
+        self._pool = None
         self._progress = WorkflowProgress(enabled=False)
         self._validate()
 
@@ -1032,33 +1049,6 @@ class Workflow:
         )
 
     # ------------------------------------------------------------------
-    # Parallelism helpers
-    # ------------------------------------------------------------------
-
-    def _effective_workers(
-        self, block_workers: Optional[int]
-    ) -> int:
-        """Resolve the effective worker count for a block.
-
-        Per-block ``workers`` overrides the global
-        ``WorkflowConfig.workers``.
-        """
-        if block_workers is not None:
-            return block_workers
-        return self.config.workers
-
-    @staticmethod
-    def _has_nested_blocks(
-        steps: List[WorkflowStepOrBlock],
-    ) -> bool:
-        """Check if *steps* contain any nested IterateBlock or
-        BeamBlock."""
-        return any(
-            isinstance(s, (IterateBlock, BeamBlock))
-            for s in steps
-        )
-
-    # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
 
@@ -1076,6 +1066,7 @@ class Workflow:
     ) -> List["Structure"]:
         """Execute workflow and return the full final candidate
         population."""
+        from boundry._parallel import WorkPool
         from boundry.operations import Structure
 
         input_path = Path(self.config.input)
@@ -1098,7 +1089,9 @@ class Workflow:
 
         total = len(self.config.steps)
 
-        with WorkflowProgress(enabled=show_progress) as progress:
+        with WorkPool(self.config.workers) as pool, \
+                WorkflowProgress(enabled=show_progress) as progress:
+            self._pool = pool
             self._progress = progress
             progress.start_workflow(total)
 
@@ -1117,6 +1110,7 @@ class Workflow:
                 progress.advance_workflow(desc)
 
             progress.finish_workflow()
+            self._pool = None
             self._progress = WorkflowProgress(enabled=False)
 
         self.last_population = list(current.population)
@@ -1158,6 +1152,10 @@ class Workflow:
         seed_base: Optional[int],
         step_index: int,
     ) -> _ExecutionContext:
+        from boundry._parallel import (
+            OperationTask,
+            _execute_operation_worker,
+        )
         from boundry.operations import Structure
 
         if step.operation not in _OPERATION_REGISTRY:
@@ -1177,17 +1175,73 @@ class Workflow:
         )
 
         pop_size = len(context.population)
-        workers = self.config.workers
-        use_parallel = workers > 1 and pop_size > 1
 
-        if use_parallel:
-            results = self._execute_step_parallel(
-                step, context.population, seed_base, workers
+        # analyze_interface always runs in main process so scan
+        # tasks can fan out to the shared pool.
+        is_analyze = step.operation == "analyze_interface"
+        use_pool = (
+            self._pool is not None
+            and self._pool.active
+            and pop_size > 1
+            and not is_analyze
+        )
+
+        if use_pool:
+            # Build tasks for all population members
+            tasks = []
+            for idx, structure in enumerate(context.population):
+                params = self._with_seed(
+                    step.operation,
+                    dict(step.params),
+                    seed_base,
+                    idx,
+                )
+                tasks.append(
+                    OperationTask(
+                        pdb_string=structure.pdb_string,
+                        metadata=dict(structure.metadata),
+                        source_path=structure.source_path,
+                        operation=step.operation,
+                        params=params,
+                    )
+                )
+
+            op_results = self._pool.map(
+                _execute_operation_worker, tasks
             )
+
+            results: List[Structure] = []
+            for idx, op_result in enumerate(op_results):
+                if op_result.error is not None:
+                    raise WorkflowError(
+                        f"Step '{step.operation}' member "
+                        f"{idx + 1}/{pop_size} failed: "
+                        f"{op_result.error}"
+                    )
+                results.append(
+                    Structure(
+                        pdb_string=op_result.pdb_string,
+                        metadata=op_result.metadata,
+                        source_path=op_result.source_path,
+                    )
+                )
         else:
-            results = self._execute_step_sequential(
-                step, context.population, seed_base
-            )
+            # Sequential: run each operation in the main process
+            results = []
+            for idx, structure in enumerate(context.population):
+                params = self._with_seed(
+                    step.operation,
+                    dict(step.params),
+                    seed_base,
+                    idx,
+                )
+                result = self._run_operation(
+                    step.operation,
+                    structure,
+                    params,
+                    pool=self._pool,
+                )
+                results.append(result)
 
         # Write outputs and merge metadata (always sequential)
         updated: List[Structure] = []
@@ -1225,95 +1279,6 @@ class Workflow:
             last_operation=step.operation,
             output_context=context.output_context,
         )
-
-    def _execute_step_sequential(
-        self,
-        step: WorkflowStep,
-        population: List["Structure"],
-        seed_base: Optional[int],
-    ) -> List["Structure"]:
-        """Run an operation on each population member sequentially."""
-        results = []
-        for idx, structure in enumerate(population):
-            params = self._with_seed(
-                step.operation,
-                dict(step.params),
-                seed_base,
-                idx,
-            )
-            result = self._run_operation(
-                step.operation, structure, params
-            )
-            results.append(result)
-        return results
-
-    def _execute_step_parallel(
-        self,
-        step: WorkflowStep,
-        population: List["Structure"],
-        seed_base: Optional[int],
-        max_workers: int,
-    ) -> List["Structure"]:
-        """Run an operation on each population member in parallel."""
-        from concurrent.futures import as_completed
-
-        from boundry._parallel import (
-            StepTask,
-            _execute_step_worker,
-            get_pool,
-        )
-        from boundry.operations import Structure
-
-        tasks = []
-        for idx, structure in enumerate(population):
-            params = self._with_seed(
-                step.operation,
-                dict(step.params),
-                seed_base,
-                idx,
-            )
-            tasks.append(
-                StepTask(
-                    pdb_string=structure.pdb_string,
-                    metadata=dict(structure.metadata),
-                    source_path=structure.source_path,
-                    operation=step.operation,
-                    params=params,
-                )
-            )
-
-        total = len(tasks)
-        results: List[Structure] = [None] * total  # type: ignore
-
-        pool = get_pool(max_workers)
-        try:
-            future_to_idx = {
-                pool.submit(_execute_step_worker, task): idx
-                for idx, task in enumerate(tasks)
-            }
-            for future in as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                step_result = future.result()
-
-                if step_result.error is not None:
-                    raise WorkflowError(
-                        f"Step '{step.operation}' member "
-                        f"{idx + 1}/{total} failed: "
-                        f"{step_result.error}"
-                    )
-
-                results[idx] = Structure(
-                    pdb_string=step_result.pdb_string,
-                    metadata=step_result.metadata,
-                    source_path=step_result.source_path,
-                )
-        except Exception:
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise
-        else:
-            pool.shutdown(wait=True)
-
-        return results
 
     def _execute_iterate(
         self,
@@ -1417,6 +1382,12 @@ class Workflow:
         seed_base: Optional[int],
         step_index: int,
     ) -> _ExecutionContext:
+        from boundry._parallel import (
+            OperationTask,
+            _execute_operation_worker,
+        )
+        from boundry.operations import Structure
+
         # Build beam block output directory context
         block_ctx = (
             context.output_context.step_dir(step_index, "beam")
@@ -1444,43 +1415,264 @@ class Workflow:
                 _ceil_div(block.width, len(population)),
             )
 
-            # Phase 1: Execute all branches without writing,
-            # collecting snapshots
-            workers = self._effective_workers(block.workers)
-            use_parallel = (
-                workers > 1
-                and not self._has_nested_blocks(block.steps)
-            )
-            if (
-                workers > 1
-                and self._has_nested_blocks(block.steps)
+            # Build branch states
+            branches: List[_BranchState] = []
+            for cand_idx, candidate in enumerate(
+                population, 1
             ):
-                logger.warning(
-                    "Beam steps contain nested blocks; "
-                    "falling back to sequential execution"
-                )
+                for exp_idx in range(expand_per):
+                    branch_seed = _compose_seed(
+                        seed_base,
+                        (round_num * 10000)
+                        + (cand_idx * 100)
+                        + exp_idx,
+                    )
+                    branches.append(
+                        _BranchState(
+                            structure=_clone_structure(
+                                candidate
+                            ),
+                            seed=branch_seed,
+                        )
+                    )
 
-            expanded: List[
-                tuple["Structure", List[_StepSnapshot]]
-            ] = []
+            total_branches = len(branches)
+            self._progress.start_branches(total_branches)
 
-            if use_parallel:
-                expanded = self._expand_beam_parallel(
-                    population,
-                    block,
-                    seed_base,
-                    round_num,
-                    expand_per,
-                    workers,
-                )
-            else:
-                expanded = self._expand_beam_sequential(
-                    population,
-                    block,
-                    seed_base,
-                    round_num,
-                    expand_per,
-                )
+            # Step-level execution across all branches
+            for inner_idx, inner in enumerate(block.steps):
+                if isinstance(inner, WorkflowStep):
+                    is_analyze = (
+                        inner.operation == "analyze_interface"
+                    )
+                    use_pool = (
+                        self._pool is not None
+                        and self._pool.active
+                        and not is_analyze
+                    )
+
+                    if use_pool:
+                        # Parallel: all branches execute this
+                        # step simultaneously
+                        tasks = []
+                        for b in branches:
+                            params = self._with_seed(
+                                inner.operation,
+                                dict(inner.params),
+                                b.seed,
+                                0,
+                            )
+                            tasks.append(
+                                OperationTask(
+                                    pdb_string=(
+                                        b.structure.pdb_string
+                                    ),
+                                    metadata=dict(
+                                        b.structure.metadata
+                                    ),
+                                    source_path=(
+                                        b.structure.source_path
+                                    ),
+                                    operation=inner.operation,
+                                    params=params,
+                                )
+                            )
+                        op_results = self._pool.map(
+                            _execute_operation_worker, tasks
+                        )
+                        for b, op_r in zip(
+                            branches, op_results
+                        ):
+                            if op_r.error is not None:
+                                raise WorkflowError(
+                                    f"Beam step "
+                                    f"'{inner.operation}' "
+                                    f"failed: {op_r.error}"
+                                )
+                            result = Structure(
+                                pdb_string=op_r.pdb_string,
+                                metadata=op_r.metadata,
+                                source_path=op_r.source_path,
+                            )
+                            merged = merge_metadata(
+                                b.structure.metadata,
+                                result.metadata,
+                                operation=inner.operation,
+                            )
+                            b.snapshots.append(
+                                _StepSnapshot(
+                                    operation=inner.operation,
+                                    step_index=inner_idx,
+                                    result_metadata=dict(
+                                        result.metadata
+                                    ),
+                                    pdb_string=(
+                                        result.pdb_string
+                                    ),
+                                    structure=Structure(
+                                        pdb_string=(
+                                            result.pdb_string
+                                        ),
+                                        metadata=merged,
+                                        source_path=(
+                                            result.source_path
+                                            or b.structure.source_path
+                                        ),
+                                    ),
+                                )
+                            )
+                            b.structure = Structure(
+                                pdb_string=result.pdb_string,
+                                metadata=merged,
+                                source_path=(
+                                    result.source_path
+                                    or b.structure.source_path
+                                ),
+                            )
+                    else:
+                        # Sequential: run in main process
+                        for b in branches:
+                            params = self._with_seed(
+                                inner.operation,
+                                dict(inner.params),
+                                b.seed,
+                                0,
+                            )
+                            result = self._run_operation(
+                                inner.operation,
+                                b.structure,
+                                params,
+                                pool=self._pool,
+                            )
+                            merged = merge_metadata(
+                                b.structure.metadata,
+                                result.metadata,
+                                operation=inner.operation,
+                            )
+                            b.snapshots.append(
+                                _StepSnapshot(
+                                    operation=inner.operation,
+                                    step_index=inner_idx,
+                                    result_metadata=dict(
+                                        result.metadata
+                                    ),
+                                    pdb_string=(
+                                        result.pdb_string
+                                    ),
+                                    structure=Structure(
+                                        pdb_string=(
+                                            result.pdb_string
+                                        ),
+                                        metadata=merged,
+                                        source_path=(
+                                            result.source_path
+                                            or b.structure.source_path
+                                        ),
+                                    ),
+                                )
+                            )
+                            b.structure = Structure(
+                                pdb_string=result.pdb_string,
+                                metadata=merged,
+                                source_path=(
+                                    result.source_path
+                                    or b.structure.source_path
+                                ),
+                            )
+
+                elif isinstance(inner, CheckpointStep):
+                    # Branch-local checkpoint
+                    for b in branches:
+                        b.checkpoints[inner.name] = (
+                            copy.deepcopy(
+                                b.structure.metadata
+                            )
+                        )
+
+                elif isinstance(inner, CompareStep):
+                    # Compare against branch-local or
+                    # workflow-level checkpoint
+                    for b in branches:
+                        ref_meta = b.checkpoints.get(
+                            inner.name
+                        )
+                        if ref_meta is None:
+                            ref = self._checkpoints.get(
+                                inner.name
+                            )
+                            if ref is None:
+                                raise WorkflowError(
+                                    f"Compare references "
+                                    f"unknown checkpoint "
+                                    f"'{inner.name}'"
+                                )
+                            ref_meta = ref.metadata
+                        ref_metrics = (
+                            _collect_flat_numerics(ref_meta)
+                        )
+                        cur_metrics = (
+                            _collect_flat_numerics(
+                                b.structure.metadata
+                            )
+                        )
+                        delta = {
+                            k: cur_metrics[k] - ref_metrics[k]
+                            for k in cur_metrics
+                            if k in ref_metrics
+                        }
+                        compare_data = {
+                            "delta": delta,
+                            "ref": ref_metrics,
+                        }
+                        new_meta = dict(
+                            b.structure.metadata
+                        )
+                        new_meta[inner.name] = compare_data
+                        b.structure = Structure(
+                            pdb_string=(
+                                b.structure.pdb_string
+                            ),
+                            metadata=new_meta,
+                            source_path=(
+                                b.structure.source_path
+                            ),
+                        )
+
+                elif isinstance(inner, IterateBlock):
+                    # Nested iterate: run per-branch in main
+                    # process, inner ops can use the pool
+                    for b in branches:
+                        branch_ctx = _ExecutionContext(
+                            population=[b.structure],
+                            output_context=None,
+                        )
+                        branch_ctx = self._execute_iterate(
+                            inner,
+                            branch_ctx,
+                            b.seed,
+                            step_index=inner_idx,
+                        )
+                        b.structure = (
+                            branch_ctx.population[0]
+                        )
+
+                elif isinstance(inner, BeamBlock):
+                    # Nested beam: run per-branch in main
+                    # process
+                    for b in branches:
+                        branch_ctx = _ExecutionContext(
+                            population=[b.structure],
+                            output_context=None,
+                        )
+                        branch_ctx = self._execute_beam(
+                            inner,
+                            branch_ctx,
+                            b.seed,
+                            step_index=inner_idx,
+                        )
+                        b.structure = (
+                            branch_ctx.population[0]
+                        )
 
             # Score candidates
             scored: List[
@@ -1490,23 +1682,27 @@ class Workflow:
                     List[_StepSnapshot],
                 ]
             ] = []
-            for candidate, snaps in expanded:
+            for b in branches:
                 metric_value = extract_numeric_metric(
-                    candidate.metadata,
+                    b.structure.metadata,
                     block.metric,
                 )
                 if metric_value is None:
                     logger.warning(
-                        f"Dropping beam candidate missing metric "
-                        f"'{block.metric}'"
+                        f"Dropping beam candidate missing "
+                        f"metric '{block.metric}'"
                     )
                     continue
-                scored.append((metric_value, candidate, snaps))
+                scored.append(
+                    (metric_value, b.structure, b.snapshots)
+                )
+                self._progress.advance_branch()
 
             if not scored:
                 raise WorkflowError(
-                    "Beam search could not score any candidates. "
-                    f"Missing metric '{block.metric}'."
+                    "Beam search could not score any "
+                    "candidates. Missing metric "
+                    f"'{block.metric}'."
                 )
 
             scored.sort(
@@ -1532,7 +1728,9 @@ class Workflow:
                     if is_selected:
                         rank_ctx = round_ctx.rank_dir(rank)
                     else:
-                        rank_ctx = round_ctx.others_rank_dir(rank)
+                        rank_ctx = round_ctx.others_rank_dir(
+                            rank
+                        )
 
                     for snap in snaps:
                         snap_ctx = rank_ctx.step_dir(
@@ -1542,12 +1740,16 @@ class Workflow:
                             snap.structure,
                             snap_ctx,
                             snap.operation,
-                            result_metadata=snap.result_metadata,
+                            result_metadata=(
+                                snap.result_metadata
+                            ),
                         )
 
             population = [
                 cand for _, cand, _ in scored[: block.width]
             ]
+
+            self._progress.finish_branches()
 
             if block.until is not None:
                 done, previous_best_metadata = (
@@ -1571,287 +1773,6 @@ class Workflow:
         # Restore parent output context
         return _ExecutionContext(
             population=population,
-            output_context=context.output_context,
-        )
-
-    def _expand_beam_sequential(
-        self,
-        population: List["Structure"],
-        block: BeamBlock,
-        seed_base: Optional[int],
-        round_num: int,
-        expand_per: int,
-    ) -> List[tuple["Structure", List[_StepSnapshot]]]:
-        """Expand beam branches sequentially (original path)."""
-        total_branches = len(population) * expand_per
-        self._progress.start_branches(total_branches)
-
-        expanded: List[
-            tuple["Structure", List[_StepSnapshot]]
-        ] = []
-        for cand_idx, candidate in enumerate(population, 1):
-            for exp_idx in range(expand_per):
-                branch_seed = _compose_seed(
-                    seed_base,
-                    (round_num * 10000)
-                    + (cand_idx * 100)
-                    + exp_idx,
-                )
-                snapshots: List[_StepSnapshot] = []
-                branch = _ExecutionContext(
-                    population=[_clone_structure(candidate)],
-                    output_context=None,
-                )
-                for inner_idx, inner in enumerate(
-                    block.steps
-                ):
-                    branch = (
-                        self._execute_item_with_snapshots(
-                            inner,
-                            branch,
-                            branch_seed,
-                            step_index=inner_idx,
-                            snapshots=snapshots,
-                        )
-                    )
-                for struct in branch.population:
-                    expanded.append((struct, snapshots))
-                self._progress.advance_branch()
-
-        self._progress.finish_branches()
-        return expanded
-
-    def _expand_beam_parallel(
-        self,
-        population: List["Structure"],
-        block: BeamBlock,
-        seed_base: Optional[int],
-        round_num: int,
-        expand_per: int,
-        max_workers: int,
-    ) -> List[tuple["Structure", List[_StepSnapshot]]]:
-        """Expand beam branches in parallel using a process pool."""
-        from concurrent.futures import as_completed
-
-        from boundry._parallel import (
-            BranchTask,
-            _execute_branch_worker,
-            get_pool,
-        )
-        from boundry.operations import Structure
-
-        # Serialize steps — checkpoint/compare become pseudo-ops
-        serialized_steps: List[tuple[str, Dict[str, Any]]] = []
-        for s in block.steps:
-            if isinstance(s, WorkflowStep):
-                serialized_steps.append(
-                    (s.operation, dict(s.params))
-                )
-            elif isinstance(s, CheckpointStep):
-                serialized_steps.append(
-                    ("__checkpoint__", {"name": s.name})
-                )
-            elif isinstance(s, CompareStep):
-                serialized_steps.append(
-                    ("__compare__", {"name": s.name})
-                )
-
-        # Collect checkpoint metrics for workers
-        checkpoint_metadata: Dict[
-            str, Dict[str, float]
-        ] = {}
-        for name, ckpt in self._checkpoints.items():
-            checkpoint_metadata[name] = (
-                _collect_flat_numerics(ckpt.metadata)
-            )
-
-        # Build tasks
-        tasks: List[BranchTask] = []
-        for cand_idx, candidate in enumerate(population, 1):
-            for exp_idx in range(expand_per):
-                branch_seed = _compose_seed(
-                    seed_base,
-                    (round_num * 10000)
-                    + (cand_idx * 100)
-                    + exp_idx,
-                )
-                tasks.append(
-                    BranchTask(
-                        candidate_pdb_string=(
-                            candidate.pdb_string
-                        ),
-                        candidate_metadata=dict(
-                            candidate.metadata
-                        ),
-                        candidate_source_path=(
-                            candidate.source_path
-                        ),
-                        steps=serialized_steps,
-                        branch_seed=branch_seed,
-                        checkpoint_metadata=(
-                            checkpoint_metadata
-                        ),
-                    )
-                )
-
-        total = len(tasks)
-        logger.info(
-            f"  Beam expansion: {total} branches "
-            f"across {max_workers} workers"
-        )
-
-        self._progress.start_branches(total)
-
-        # Submit to pool
-        expanded: List[
-            tuple["Structure", List[_StepSnapshot]]
-        ] = [None] * total  # type: ignore[list-item]
-
-        pool = get_pool(max_workers)
-        try:
-            future_to_idx = {
-                pool.submit(
-                    _execute_branch_worker, task
-                ): idx
-                for idx, task in enumerate(tasks)
-            }
-            completed = 0
-            for future in as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                result = future.result()
-
-                if result.error is not None:
-                    raise WorkflowError(
-                        f"Beam branch {idx + 1}/{total} "
-                        f"failed: {result.error}"
-                    )
-
-                completed += 1
-                logger.info(
-                    f"  Branch {completed}/{total} completed"
-                )
-                self._progress.advance_branch()
-
-                # Reconstruct Structure + snapshots
-                struct = Structure(
-                    pdb_string=result.pdb_string,
-                    metadata=result.metadata,
-                    source_path=result.source_path,
-                )
-                snapshots = [
-                    _StepSnapshot(
-                        operation=s.operation,
-                        step_index=s.step_index,
-                        result_metadata=s.result_metadata,
-                        pdb_string=s.pdb_string,
-                        structure=Structure(
-                            pdb_string=s.merged_pdb_string,
-                            metadata=s.merged_metadata,
-                            source_path=s.merged_source_path,
-                        ),
-                    )
-                    for s in result.snapshots
-                ]
-                expanded[idx] = (struct, snapshots)
-        except Exception:
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise
-        else:
-            pool.shutdown(wait=True)
-
-        self._progress.finish_branches()
-        return expanded
-
-    def _execute_item_with_snapshots(
-        self,
-        item: WorkflowStepOrBlock,
-        context: _ExecutionContext,
-        seed_base: Optional[int],
-        step_index: int,
-        snapshots: List[_StepSnapshot],
-    ) -> _ExecutionContext:
-        """Execute an item and capture step snapshots for deferred
-        writing (used by beam blocks)."""
-        if isinstance(item, WorkflowStep):
-            return self._execute_step_with_snapshot(
-                item, context, seed_base, step_index, snapshots
-            )
-        # For nested iterate/beam blocks inside beam steps,
-        # execute normally without snapshots (the block-level
-        # output directories are handled by the block itself).
-        if isinstance(item, IterateBlock):
-            return self._execute_iterate(
-                item, context, seed_base, step_index
-            )
-        if isinstance(item, BeamBlock):
-            return self._execute_beam(
-                item, context, seed_base, step_index
-            )
-        if isinstance(item, CheckpointStep):
-            return self._execute_checkpoint(item, context)
-        if isinstance(item, CompareStep):
-            return self._execute_compare(
-                item, context, step_index
-            )
-        raise WorkflowError(
-            f"Unsupported node type '{type(item).__name__}'"
-        )
-
-    def _execute_step_with_snapshot(
-        self,
-        step: WorkflowStep,
-        context: _ExecutionContext,
-        seed_base: Optional[int],
-        step_index: int,
-        snapshots: List[_StepSnapshot],
-    ) -> _ExecutionContext:
-        """Execute a step and record a snapshot for deferred writing."""
-        from boundry.operations import Structure
-
-        if step.operation not in _OPERATION_REGISTRY:
-            raise WorkflowError(
-                f"Unknown operation '{step.operation}'"
-            )
-
-        updated: List[Structure] = []
-        for idx, structure in enumerate(context.population):
-            params = self._with_seed(
-                step.operation,
-                dict(step.params),
-                seed_base,
-                idx,
-            )
-            result = self._run_operation(
-                step.operation, structure, params
-            )
-            merged = merge_metadata(
-                structure.metadata,
-                result.metadata,
-                operation=step.operation,
-            )
-            merged_struct = Structure(
-                pdb_string=result.pdb_string,
-                metadata=merged,
-                source_path=(
-                    result.source_path or structure.source_path
-                ),
-            )
-            updated.append(merged_struct)
-
-            # Record snapshot with pre-merge metadata
-            snapshots.append(
-                _StepSnapshot(
-                    operation=step.operation,
-                    step_index=step_index,
-                    result_metadata=dict(result.metadata),
-                    pdb_string=result.pdb_string,
-                    structure=merged_struct,
-                )
-            )
-
-        return _ExecutionContext(
-            population=updated,
-            last_operation=step.operation,
             output_context=context.output_context,
         )
 
@@ -2102,7 +2023,7 @@ class Workflow:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _run_operation(name, structure, params):
+    def _run_operation(name, structure, params, pool=None):
         """Unified operation dispatch driven by
         _OPERATION_REGISTRY."""
         import boundry.config as _cfg
@@ -2113,7 +2034,7 @@ class Workflow:
         # analyze_interface is special-cased
         if spec is None:
             return Workflow._run_analyze_interface(
-                structure, params
+                structure, params, pool=pool
             )
 
         if spec.needs_weights:
@@ -2200,7 +2121,7 @@ class Workflow:
         return op_fn(structure, **kwargs)
 
     @staticmethod
-    def _run_analyze_interface(structure, params):
+    def _run_analyze_interface(structure, params, pool=None):
         from boundry.config import (
             DesignConfig,
             InterfaceConfig,
@@ -2274,6 +2195,7 @@ class Workflow:
             config=config,
             relaxer=relaxer,
             designer=designer,
+            pool=pool,
         )
 
         if result.interface_info:

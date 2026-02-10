@@ -20,7 +20,6 @@ import contextlib
 import csv
 import io
 import logging
-import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import (
@@ -631,21 +630,30 @@ def _run_scans_parallel(
     show_progress: bool,
     quiet: bool,
     workers: int,
+    pool: Optional[object] = None,
 ) -> Tuple[
     Dict[ResidueKey, Tuple[Optional[float], Optional[float]]],
     Dict[ResidueKey, Optional[float]],
 ]:
-    """Run alanine scan and/or per-position dG in parallel."""
-    from concurrent.futures import as_completed
+    """Run alanine scan and/or per-position dG in parallel.
 
+    Uses the shared *pool* when provided, otherwise creates a local
+    ``WorkPool`` (standalone CLI fallback).
+    """
     from boundry._parallel import (
         ScanTask,
+        WorkPool,
         _execute_scan_worker,
-        _init_scan_worker,
     )
 
     scan_sites = _select_scan_sites(
         interface_residues, scan_chains, max_scan_sites
+    )
+
+    # Serialize configs so worker processes can reconstruct them
+    relax_config_dict = asdict(relaxer.config)
+    design_config_dict = (
+        asdict(designer.config) if designer is not None else None
     )
 
     # Build tasks
@@ -677,6 +685,8 @@ def _run_scans_parallel(
                         position_relax=position_relax,
                         dG_wt=dG_wt,
                         quiet=quiet,
+                        relax_config_dict=relax_config_dict,
+                        design_config_dict=design_config_dict,
                     )
                 )
         if run_per_position:
@@ -694,21 +704,13 @@ def _run_scans_parallel(
                     position_relax=position_relax,
                     dG_wt=dG_wt,
                     quiet=quiet,
+                    relax_config_dict=relax_config_dict,
+                    design_config_dict=design_config_dict,
                 )
             )
 
     if not tasks:
         return dict(ala_skipped), {}
-
-    # Serialize configs for the pool initializer
-    relax_config_dict = asdict(relaxer.config)
-    design_config_dict = (
-        asdict(designer.config) if designer is not None else None
-    )
-
-    import multiprocessing
-
-    ctx = multiprocessing.get_context("spawn")
 
     logger.info(
         f"Dispatching {len(tasks)} scan tasks across "
@@ -726,42 +728,44 @@ def _run_scans_parallel(
 
         bar = tqdm(total=len(tasks), desc="Scanning", unit="res")
 
-    from concurrent.futures import ProcessPoolExecutor
-
-    with ProcessPoolExecutor(
-        max_workers=workers,
-        mp_context=ctx,
-        initializer=_init_scan_worker,
-        initargs=(relax_config_dict, design_config_dict),
-    ) as pool:
-        futures = {
-            pool.submit(_execute_scan_worker, task): task
-            for task in tasks
-        }
-
-        for future in as_completed(futures):
-            result = future.result()
+    def _collect_results(scan_results):
+        for scan_result in scan_results:
             key = ResidueKey(
-                result.chain_id,
-                result.residue_number,
-                result.insertion_code,
+                scan_result.chain_id,
+                scan_result.residue_number,
+                scan_result.insertion_code,
             )
 
-            if result.error is not None:
+            if scan_result.error is not None:
                 logger.warning(
-                    f"  Scan failed for {key}: {result.error}"
+                    f"  Scan failed for {key}: "
+                    f"{scan_result.error}"
                 )
-                if result.scan_type == "alanine_scan":
+                if scan_result.scan_type == "alanine_scan":
                     ala_results[key] = (None, None)
                 else:
                     pp_dG_results[key] = None
-            elif result.scan_type == "alanine_scan":
-                ala_results[key] = (result.dG, result.ddG)
+            elif scan_result.scan_type == "alanine_scan":
+                ala_results[key] = (
+                    scan_result.dG,
+                    scan_result.ddG,
+                )
             else:
-                pp_dG_results[key] = result.dG
+                pp_dG_results[key] = scan_result.dG
 
             if bar is not None:
                 bar.update(1)
+
+    # Use shared pool if provided, otherwise create a local pool
+    if pool is not None and pool.active:
+        scan_results = pool.map(_execute_scan_worker, tasks)
+        _collect_results(scan_results)
+    else:
+        with WorkPool(workers) as local_pool:
+            scan_results = local_pool.map(
+                _execute_scan_worker, tasks
+            )
+            _collect_results(scan_results)
 
     if bar is not None:
         bar.close()
@@ -786,6 +790,7 @@ def compute_position_energetics(
     show_progress: bool = False,
     quiet: bool = False,
     workers: int = 1,
+    pool: Optional[object] = None,
 ) -> PositionEnergeticsResult:
     """Run the full per-position energetics pipeline.
 
@@ -825,17 +830,15 @@ def compute_position_energetics(
         )
     logger.info(f"  dG_wt = {dG_wt:.2f} kcal/mol")
 
-    # Determine effective workers (nested guard)
-    effective_workers = workers
-    if workers > 1 and os.environ.get("BOUNDRY_IN_WORKER_PROCESS"):
-        logger.warning(
-            "Nested parallelism detected (inside worker process); "
-            "forcing sequential scan (workers=1)"
-        )
-        effective_workers = 1
+    # Determine whether to use parallel dispatch.
+    # Use shared pool if provided, otherwise create a local pool
+    # when workers > 1.
+    use_parallel = (
+        (pool is not None and pool.active)
+        or workers > 1
+    ) and (run_alanine_scan or run_per_position)
 
-    # Parallel path: dispatch both scan types in a single pool
-    if effective_workers > 1 and (run_alanine_scan or run_per_position):
+    if use_parallel:
         ala_results, pp_dG_results = _run_scans_parallel(
             pdb_string=pdb_string,
             interface_residues=interface_residues,
@@ -852,10 +855,11 @@ def compute_position_energetics(
             run_alanine_scan=run_alanine_scan,
             show_progress=show_progress,
             quiet=quiet,
-            workers=effective_workers,
+            workers=workers,
+            pool=pool,
         )
     else:
-        # Sequential path (unchanged)
+        # Sequential path
         ala_results, pp_dG_results = _run_scans_sequential(
             pdb_string=pdb_string,
             interface_residues=interface_residues,

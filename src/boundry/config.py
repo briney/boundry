@@ -139,7 +139,6 @@ class IterateBlock:
     n: int = 1
     max_n: int = 100
     until: Optional[str] = None
-    workers: Optional[int] = None  # per-block override; None = use global
 
 
 @dataclass
@@ -153,7 +152,6 @@ class BeamBlock:
     direction: Literal["min", "max"] = "min"
     until: Optional[str] = None
     expand: int = 1
-    workers: Optional[int] = None  # per-block override; None = use global
 
 
 @dataclass

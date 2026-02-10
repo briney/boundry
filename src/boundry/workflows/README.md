@@ -51,8 +51,10 @@ The `--seed` CLI flag overrides the YAML `seed` when both are present.
 
 ### Parallel Workers
 
-Set `workers` at the workflow level to enable process-level parallelism
-for beam expansion and multi-member population steps:
+Set `workers` at the workflow level to enable process-level parallelism.
+A single shared process pool is created once at workflow start and reused
+for all parallel operations (beam steps, population steps, and
+per-position interface scans):
 
 ```yaml
 workers: 4
@@ -60,7 +62,6 @@ steps:
   - beam:
       width: 3
       rounds: 10
-      workers: 8       # per-block override (optional)
       steps:
         - operation: design
         - operation: analyze_interface
@@ -70,11 +71,13 @@ How it works:
 
 - `workers: 1` (default) runs everything sequentially — no process pool
   is created.
-- `workers: N` (N > 1) uses a `ProcessPoolExecutor` with the `spawn`
-  start method for true parallel execution.
-- Per-block `workers` overrides the global value for that block.
-- Beam steps with nested iterate/beam blocks automatically fall back to
-  sequential execution (with a warning).
+- `workers: N` (N > 1) creates a single shared `ProcessPoolExecutor`
+  with the `spawn` start method. All parallel operations submit tasks to
+  this pool.
+- Beam steps execute each operation across all branches in parallel
+  (step-level parallelism), with a barrier between steps.
+- `analyze_interface` always runs in the main process so that
+  per-position scans can fan out to the shared pool.
 - The `--workers` / `-j` CLI flag overrides the YAML `workers` value.
 
 Memory note: each worker process imports PyTorch/OpenMM independently
@@ -246,7 +249,6 @@ Fields:
 - `n` (default `1`) for fixed-count mode (`until` omitted)
 - `until` (optional condition string) for convergence mode
 - `max_n` (default `100`) safety cap when `until` is set
-- `workers` (optional int, overrides global `workers` for this block)
 
 Notes:
 
@@ -277,7 +279,6 @@ Fields:
 - `metric` (default `"dG"`) dotted path metric to score by
 - `direction` (`"min"` or `"max"`, default `"min"`)
 - `until` (optional condition string checked on best candidate each round)
-- `workers` (optional int, overrides global `workers` for this block)
 
 Notes:
 
@@ -697,7 +698,9 @@ You can also use arithmetic expressions combining variables, for example:
 - Block-level unknown keys raise errors.
 - Node must be exactly one of `operation`, `iterate`, `beam`, `checkpoint`, `compare`.
 - `steps` lists must be non-empty.
-- Numeric block controls (`n`, `max_n`, `width`, `rounds`, `expand`, `workers`) must be `>= 1`.
+- Numeric block controls (`n`, `max_n`, `width`, `rounds`, `expand`) must be `>= 1`.
+- Block-level `workers` is accepted but deprecated (emits a warning); use
+  the top-level `workers` setting instead.
 - `beam.direction` must be `min` or `max`.
 - Invalid `until` syntax fails at parse time.
 - Undefined `${...}` references, circular references, and malformed

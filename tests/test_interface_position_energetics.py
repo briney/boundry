@@ -881,31 +881,40 @@ class TestParallelDispatch:
         mock_parallel.assert_called_once()
         assert energetics.alanine_scan is not None
 
-    @patch.dict(
-        "os.environ", {"BOUNDRY_IN_WORKER_PROCESS": "1"}
-    )
     @patch("boundry.interface_position_energetics._compute_rosetta_dG")
-    def test_nested_guard_forces_sequential(self, mock_dG):
-        """workers > 1 inside a worker process falls back to sequential."""
-        mock_dG.side_effect = [-10.0, -5.0]  # dG_wt, dG_ala
+    def test_pool_param_uses_parallel(self, mock_dG):
+        """Providing a pool with active=True should use parallel."""
+        mock_dG.return_value = -10.0  # dG_wt
         relaxer = MagicMock()
         ir = _make_ir(residue_name="LEU")
 
-        energetics = compute_position_energetics(
-            TWO_CHAIN_PDB,
-            [ir],
-            chain_pairs=[("A", "B")],
-            relaxer=relaxer,
-            run_alanine_scan=True,
-            position_relax="none",
-            workers=4,  # should be forced to 1
-        )
+        # Mock pool with active=True
+        pool = MagicMock()
+        pool.active = True
+        pool.map.return_value = []  # No scan tasks after filtering
 
-        # Should still produce correct results via sequential path
-        assert energetics.alanine_scan is not None
-        row = energetics.alanine_scan.rows[0]
-        assert row.dG == -5.0
-        assert row.ddG == pytest.approx(5.0)
+        with patch(
+            "boundry.interface_position_energetics."
+            "_run_scans_parallel"
+        ) as mock_parallel:
+            mock_parallel.return_value = (
+                {ResidueKey("A", 1, ""): (-5.0, 5.0)},
+                {},
+            )
+            energetics = compute_position_energetics(
+                TWO_CHAIN_PDB,
+                [ir],
+                chain_pairs=[("A", "B")],
+                relaxer=relaxer,
+                run_alanine_scan=True,
+                position_relax="none",
+                workers=1,
+                pool=pool,
+            )
+            mock_parallel.assert_called_once()
+            # Verify pool was passed through
+            call_kwargs = mock_parallel.call_args[1]
+            assert call_kwargs["pool"] is pool
 
 
 class TestScanTaskResult:

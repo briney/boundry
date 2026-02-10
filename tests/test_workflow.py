@@ -434,7 +434,7 @@ class TestWorkflowRun:
             pdb_string="ATOM minimized\nEND\n"
         )
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             if name == "idealize":
                 return struct_after_ideal
             return struct_after_min
@@ -594,7 +594,7 @@ class TestCompoundExecution:
         self._make_input(tmp_path)
         call_count = {"n": 0}
 
-        def _side_effect(name, structure, params):
+        def _side_effect(name, structure, params, **kwargs):
             call_count["n"] += 1
             return Structure(
                 pdb_string=f"ATOM iter {call_count['n']}\nEND\n",
@@ -627,7 +627,7 @@ class TestCompoundExecution:
         dgs = [-1.0, -2.0, -4.0, -6.0]
         calls = {"n": 0}
 
-        def _side_effect(name, structure, params):
+        def _side_effect(name, structure, params, **kwargs):
             idx = calls["n"]
             calls["n"] += 1
             return Structure(
@@ -663,7 +663,7 @@ class TestCompoundExecution:
         self._make_input(tmp_path)
         seen_seeds = []
 
-        def _side_effect(name, structure, params):
+        def _side_effect(name, structure, params, **kwargs):
             seen_seeds.append(params.get("seed"))
             return Structure(
                 pdb_string="ATOM\nEND\n",
@@ -694,7 +694,7 @@ class TestCompoundExecution:
         self._make_input(tmp_path)
         seen_seeds = []
 
-        def _side_effect(name, structure, params):
+        def _side_effect(name, structure, params, **kwargs):
             seen_seeds.append(params.get("seed"))
             return Structure(
                 pdb_string="ATOM\nEND\n",
@@ -726,7 +726,7 @@ class TestCompoundExecution:
         self._make_input(tmp_path)
         seen_seeds = []
 
-        def _side_effect(name, structure, params):
+        def _side_effect(name, structure, params, **kwargs):
             seen_seeds.append(params.get("seed"))
             return Structure(
                 pdb_string="ATOM\nEND\n",
@@ -757,7 +757,7 @@ class TestCompoundExecution:
         self._make_input(tmp_path)
         seen_seeds = []
 
-        def _side_effect(name, structure, params):
+        def _side_effect(name, structure, params, **kwargs):
             seen_seeds.append(params.get("seed"))
             return Structure(
                 pdb_string="ATOM\nEND\n",
@@ -795,7 +795,7 @@ class TestCompoundExecution:
         scores = [5.0, 1.0, 3.0, 2.0]
         call_idx = {"i": 0}
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             if name == "analyze_interface":
                 i = call_idx["i"]
                 call_idx["i"] += 1
@@ -1335,7 +1335,7 @@ class TestAutomaticDirectoryStructure:
 
         self._make_input(tmp_path)
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             return Structure(
                 pdb_string="ATOM\nEND\n",
                 metadata={"final_energy": -1.0},
@@ -1370,7 +1370,7 @@ class TestAutomaticDirectoryStructure:
         self._make_input(tmp_path)
         call_count = {"n": 0}
 
-        def _side_effect(name, structure, params):
+        def _side_effect(name, structure, params, **kwargs):
             call_count["n"] += 1
             return Structure(
                 pdb_string="ATOM\nEND\n",
@@ -1413,7 +1413,7 @@ class TestAutomaticDirectoryStructure:
         scores = [5.0, 1.0, 3.0, 2.0]
         call_idx = {"i": 0}
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             i = call_idx["i"]
             call_idx["i"] += 1
             return Structure(
@@ -1460,7 +1460,7 @@ class TestAutomaticDirectoryStructure:
 
         self._make_input(tmp_path)
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             return Structure(
                 pdb_string="ATOM\nEND\n",
                 metadata={"final_energy": -1.0},
@@ -1630,7 +1630,7 @@ class TestOperationAwareOutput:
 
         self._make_input(tmp_path)
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             if name == "idealize":
                 return Structure(
                     pdb_string="ATOM\nEND\n",
@@ -2433,7 +2433,8 @@ class TestWorkersParsing:
         ):
             Workflow.from_yaml(wf_file)
 
-    def test_beam_block_workers_parsed(self, tmp_path):
+    def test_beam_block_workers_deprecated(self, tmp_path):
+        """Block-level workers emits deprecation warning."""
         wf_file = tmp_path / "wf.yaml"
         wf_file.write_text(
             yaml.dump(
@@ -2459,12 +2460,24 @@ class TestWorkersParsing:
                 }
             )
         )
-        wf = Workflow.from_yaml(wf_file)
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            wf = Workflow.from_yaml(wf_file)
+            dep = [
+                x
+                for x in w
+                if issubclass(x.category, DeprecationWarning)
+                and "workers" in str(x.message)
+            ]
+            assert len(dep) == 1
         block = wf.config.steps[0]
         assert isinstance(block, BeamBlock)
-        assert block.workers == 8
+        assert not hasattr(block, "workers")
 
-    def test_iterate_block_workers_parsed(self, tmp_path):
+    def test_iterate_block_workers_deprecated(self, tmp_path):
+        """Block-level workers on iterate emits deprecation warning."""
         wf_file = tmp_path / "wf.yaml"
         wf_file.write_text(
             yaml.dump(
@@ -2484,40 +2497,21 @@ class TestWorkersParsing:
                 }
             )
         )
-        wf = Workflow.from_yaml(wf_file)
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            wf = Workflow.from_yaml(wf_file)
+            dep = [
+                x
+                for x in w
+                if issubclass(x.category, DeprecationWarning)
+                and "workers" in str(x.message)
+            ]
+            assert len(dep) == 1
         block = wf.config.steps[0]
         assert isinstance(block, IterateBlock)
-        assert block.workers == 4
-
-    def test_block_workers_none_by_default(self, tmp_path):
-        wf_file = tmp_path / "wf.yaml"
-        wf_file.write_text(
-            yaml.dump(
-                {
-                    "input": "input.pdb",
-                    "steps": [
-                        {
-                            "beam": {
-                                "width": 2,
-                                "rounds": 1,
-                                "metric": "dG",
-                                "steps": [
-                                    {
-                                        "operation": (
-                                            "analyze_interface"
-                                        )
-                                    }
-                                ],
-                            }
-                        }
-                    ],
-                }
-            )
-        )
-        wf = Workflow.from_yaml(wf_file)
-        block = wf.config.steps[0]
-        assert isinstance(block, BeamBlock)
-        assert block.workers is None
+        assert not hasattr(block, "workers")
 
 
 # ------------------------------------------------------------------
@@ -2526,7 +2520,7 @@ class TestWorkersParsing:
 
 
 class TestParallelExecution:
-    """Tests for parallel beam and step execution."""
+    """Tests for shared WorkPool and parallel step execution."""
 
     def _make_workflow(
         self, tmp_path, steps, project_path=None, workers=1
@@ -2550,52 +2544,18 @@ class TestParallelExecution:
         )
         return pdb
 
-    def test_effective_workers_global(self):
-        """Global workers used when block has no override."""
-        config = WorkflowConfig(
-            input="input.pdb",
-            workers=4,
-            steps=[WorkflowStep(operation="idealize")],
-        )
-        wf = Workflow(config)
-        assert wf._effective_workers(None) == 4
-
-    def test_effective_workers_block_override(self):
-        """Block-level workers overrides global."""
-        config = WorkflowConfig(
-            input="input.pdb",
-            workers=4,
-            steps=[WorkflowStep(operation="idealize")],
-        )
-        wf = Workflow(config)
-        assert wf._effective_workers(8) == 8
-
-    def test_has_nested_blocks(self):
-        """Detect nested blocks in step list."""
-        simple = [WorkflowStep(operation="design")]
-        assert not Workflow._has_nested_blocks(simple)
-
-        nested = [
-            WorkflowStep(operation="design"),
-            IterateBlock(
-                steps=[WorkflowStep(operation="relax")],
-                n=3,
-            ),
-        ]
-        assert Workflow._has_nested_blocks(nested)
-
     @patch("boundry.workflow.Workflow._run_operation")
     def test_workers_one_uses_no_pool(
         self, mock_op, tmp_path
     ):
-        """workers=1 should never create a process pool."""
+        """workers=1 should not create an active WorkPool."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
         scores = [5.0, 1.0, 3.0, 2.0]
         call_idx = {"i": 0}
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             i = call_idx["i"]
             call_idx["i"] += 1
             return Structure(
@@ -2605,45 +2565,43 @@ class TestParallelExecution:
 
         mock_op.side_effect = _dispatch
 
-        with patch(
-            "boundry._parallel.get_pool"
-        ) as mock_pool:
-            wf = self._make_workflow(
-                tmp_path,
-                [
-                    {
-                        "beam": {
-                            "width": 2,
-                            "rounds": 1,
-                            "expand": 4,
-                            "metric": "dG",
-                            "direction": "min",
-                            "steps": [
-                                {
-                                    "operation": (
-                                        "analyze_interface"
-                                    )
-                                }
-                            ],
-                        }
+        wf = self._make_workflow(
+            tmp_path,
+            [
+                {
+                    "beam": {
+                        "width": 2,
+                        "rounds": 1,
+                        "expand": 4,
+                        "metric": "dG",
+                        "direction": "min",
+                        "steps": [
+                            {
+                                "operation": (
+                                    "analyze_interface"
+                                )
+                            }
+                        ],
                     }
-                ],
-                workers=1,
-            )
-            wf.run()
-            mock_pool.assert_not_called()
+                }
+            ],
+            workers=1,
+        )
+        wf.run()
+        # Pool should not be active (workers=1)
+        assert self._pool_is_inactive(wf)
 
     @patch("boundry.workflow.Workflow._run_operation")
-    def test_nested_blocks_fall_back_to_sequential(
+    def test_nested_iterate_in_beam_runs_sequentially(
         self, mock_op, tmp_path
     ):
-        """Beam with nested iterate falls back to sequential."""
+        """Beam with nested iterate runs iterate per-branch."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
         call_count = {"n": 0}
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             call_count["n"] += 1
             return Structure(
                 pdb_string=f"ATOM {call_count['n']}\nEND\n",
@@ -2652,9 +2610,10 @@ class TestParallelExecution:
 
         mock_op.side_effect = _dispatch
 
-        with patch(
-            "boundry._parallel.get_pool"
-        ) as mock_pool:
+        import warnings
+
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
             wf = self._make_workflow(
                 tmp_path,
                 [
@@ -2663,7 +2622,6 @@ class TestParallelExecution:
                             "width": 1,
                             "rounds": 1,
                             "metric": "dG",
-                            "workers": 4,
                             "steps": [
                                 {
                                     "iterate": {
@@ -2686,55 +2644,32 @@ class TestParallelExecution:
                         }
                     }
                 ],
-                workers=4,
+                workers=1,
             )
-            wf.run()
-            mock_pool.assert_not_called()
+        wf.run()
+        # Should have run: 2 relax ops (iterate n=2) +
+        # 1 analyze_interface per branch
+        assert call_count["n"] >= 3
 
-    @patch(
-        "boundry.workflow.Workflow._expand_beam_parallel"
-    )
     @patch("boundry.workflow.Workflow._run_operation")
-    def test_beam_parallel_dispatched_when_workers_gt_1(
-        self, mock_op, mock_parallel, tmp_path
+    def test_beam_step_level_execution(
+        self, mock_op, tmp_path
     ):
-        """Beam with workers > 1 and simple steps uses parallel."""
+        """Beam executes steps across all branches."""
         from boundry.operations import Structure
 
         self._make_input(tmp_path)
-
-        scores = [3.0, 1.0]
         call_idx = {"i": 0}
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             i = call_idx["i"]
             call_idx["i"] += 1
             return Structure(
                 pdb_string=f"ATOM {i}\nEND\n",
-                metadata={"dG": scores[i % len(scores)]},
+                metadata={"dG": float(-i)},
             )
 
         mock_op.side_effect = _dispatch
-
-        # Mock _expand_beam_parallel to return 2 candidates
-        from boundry.workflow import _StepSnapshot
-
-        mock_parallel.return_value = [
-            (
-                Structure(
-                    pdb_string="ATOM a\nEND\n",
-                    metadata={"dG": 1.0},
-                ),
-                [],
-            ),
-            (
-                Structure(
-                    pdb_string="ATOM b\nEND\n",
-                    metadata={"dG": 2.0},
-                ),
-                [],
-            ),
-        ]
 
         wf = self._make_workflow(
             tmp_path,
@@ -2747,15 +2682,22 @@ class TestParallelExecution:
                         "metric": "dG",
                         "direction": "min",
                         "steps": [
-                            {"operation": "analyze_interface"}
+                            {"operation": "minimize"}
                         ],
                     }
                 }
             ],
-            workers=4,
+            workers=1,
         )
         wf.run_population()
-        mock_parallel.assert_called_once()
+        # 1 candidate × expand_per=max(2, ceil(2/1))=2 → 2 branches,
+        # 1 step each → 2 operation calls
+        assert call_idx["i"] == 2
+
+    @staticmethod
+    def _pool_is_inactive(wf):
+        """Check pool is not active after run completes."""
+        return wf._pool is None or not wf._pool.active
 
 
 # ------------------------------------------------------------------
@@ -3000,7 +2942,7 @@ class TestCheckpointCompareExecution:
         self._make_input(tmp_path)
         call_count = {"n": 0}
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return Structure(
@@ -3062,7 +3004,7 @@ class TestCheckpointCompareExecution:
         self._make_input(tmp_path)
         call_count = {"n": 0}
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return Structure(
@@ -3106,7 +3048,7 @@ class TestCheckpointCompareExecution:
         self._make_input(tmp_path)
         call_count = {"n": 0}
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return Structure(
@@ -3209,7 +3151,7 @@ class TestCheckpointCompareExecution:
         self._make_input(tmp_path)
         call_count = {"n": 0}
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return Structure(
@@ -3251,7 +3193,7 @@ class TestCheckpointCompareExecution:
         # dG values: ref=-10, then -12, -14, -16
         dg_values = [-10.0, -12.0, -14.0, -16.0]
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             call_count["n"] += 1
             idx = min(call_count["n"] - 1, len(dg_values) - 1)
             return Structure(
@@ -3300,7 +3242,7 @@ class TestCheckpointCompareExecution:
         self._make_input(tmp_path)
         call_count = {"n": 0}
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             call_count["n"] += 1
             return Structure(
                 pdb_string=f"ATOM iter {call_count['n']}\n"
@@ -3340,7 +3282,7 @@ class TestCheckpointCompareExecution:
         self._make_input(tmp_path)
         call_count = {"n": 0}
 
-        def _dispatch(name, structure, params):
+        def _dispatch(name, structure, params, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return Structure(

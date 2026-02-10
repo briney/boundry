@@ -979,6 +979,7 @@ def analyze_interface(
     config: Optional[InterfaceConfig] = None,
     relaxer: Optional[Relaxer] = None,
     designer: Optional[Designer] = None,
+    pool: Optional[Any] = None,
 ) -> InterfaceAnalysisResult:
     """Analyse protein-protein interface properties.
 
@@ -994,6 +995,8 @@ def analyze_interface(
             calculation).
         designer: Designer instance (required if ``relax_separated``
             is enabled or per-position scans use relaxation).
+        pool: Optional :class:`~boundry._parallel.WorkPool` for
+            parallel per-position scan dispatch.
 
     Returns:
         InterfaceAnalysisResult with interface properties.
@@ -1101,6 +1104,7 @@ def analyze_interface(
             show_progress=config.show_progress,
             quiet=config.quiet,
             workers=config.workers,
+            pool=pool,
         )
         result.per_position = energetics.per_position
         result.alanine_scan = energetics.alanine_scan
