@@ -93,6 +93,29 @@ class SelectPositionsConfig:
 
 
 @dataclass
+class OptimizeConfig:
+    """Configuration for the optimize command."""
+
+    chain_pairs: List[Tuple[str, str]]  # REQUIRED, no default
+    scan_chains: Optional[List[str]] = None
+    n_campaigns: int = 1
+    relax_iterations: int = 10
+    design_cycles: int = 10
+    beam_width: int = 4
+    beam_expansion: int = 25
+    ddg_threshold: float = 1.0
+    design: "DesignConfig" = field(default_factory=lambda: DesignConfig())
+    relax: "RelaxConfig" = field(default_factory=lambda: RelaxConfig())
+    idealize: "IdealizeConfig" = field(
+        default_factory=lambda: IdealizeConfig(enabled=True)
+    )
+    seed: Optional[int] = None
+    workers: int = 1
+    show_progress: bool = False
+    quiet: bool = True
+
+
+@dataclass
 class PipelineConfig:
     """Configuration for composite operations (relax, design).
 

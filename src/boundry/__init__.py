@@ -34,6 +34,9 @@ from boundry.operations import (
     select_positions,
 )
 
+# Optimize
+from boundry.optimize import OptimizeResult, optimize
+
 # Workflow system
 from boundry.workflow import Workflow
 
@@ -44,6 +47,7 @@ from boundry.config import (
     IdealizeConfig,
     InterfaceConfig,
     IterateBlock,
+    OptimizeConfig,
     PipelineConfig,
     RelaxConfig,
     SelectPositionsConfig,
@@ -73,6 +77,10 @@ __all__ = [
     # Data classes
     "Structure",
     "InterfaceAnalysisResult",
+    # Optimize
+    "optimize",
+    "OptimizeResult",
+    "OptimizeConfig",
     # Workflow
     "Workflow",
     # Configuration

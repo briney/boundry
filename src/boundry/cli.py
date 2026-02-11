@@ -969,6 +969,187 @@ def analyze_interface(
             typer.echo(f"Alanine scan CSV: {outputs.alanine_scan_csv}")
 
 
+def _parse_chain_pairs_strict(chain_string: str) -> list:
+    """Parse ``'H:L,H:A'`` into ``[('H', 'L'), ('H', 'A')]``.
+
+    Raises :class:`typer.BadParameter` on malformed input (missing ``:``
+    separator, empty chain IDs, or no valid pairs).
+    """
+    pairs = []
+    for token in chain_string.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if ":" not in token:
+            raise typer.BadParameter(
+                f"Invalid chain pair '{token}': "
+                f"expected 'CHAIN1:CHAIN2' format"
+            )
+        parts = token.split(":")
+        if len(parts) != 2:
+            raise typer.BadParameter(
+                f"Invalid chain pair '{token}': "
+                f"expected exactly one ':' separator"
+            )
+        a, b = parts[0].strip(), parts[1].strip()
+        if not a or not b:
+            raise typer.BadParameter(
+                f"Invalid chain pair '{token}': "
+                f"chain IDs must not be empty"
+            )
+        pairs.append((a, b))
+    if not pairs:
+        raise typer.BadParameter(
+            "No valid chain pairs found. "
+            "Expected format: 'H:L' or 'H:L,H:A'"
+        )
+    return pairs
+
+
+@app.command()
+def optimize(
+    input_file: Path = typer.Argument(
+        ..., metavar="INPUT", help="Input structure file (PDB or CIF)"
+    ),
+    output_dir: Path = typer.Argument(
+        ..., metavar="OUTPUT_DIR", help="Output directory for results"
+    ),
+    interface: str = typer.Option(
+        ...,
+        "--interface",
+        "-i",
+        help="Chain pairs defining the interface, e.g. 'H:L,H:A'",
+    ),
+    beam_width: int = typer.Option(
+        4, "--beam-width", help="Number of top candidates to keep per cycle"
+    ),
+    beam_expansion: int = typer.Option(
+        25,
+        "--beam-expansion",
+        help="Number of design expansions per cycle",
+    ),
+    design_cycles: int = typer.Option(
+        10, "--design-cycles", help="Number of design cycles"
+    ),
+    campaigns: int = typer.Option(
+        1, "--campaigns", help="Number of independent optimization campaigns"
+    ),
+    ddg_threshold: float = typer.Option(
+        1.0,
+        "--ddg-threshold",
+        help="Alanine scan ddG threshold for bad positions (kcal/mol)",
+    ),
+    relax_iterations: int = typer.Option(
+        10,
+        "--relax-iterations",
+        help="Number of relax iterations before design",
+    ),
+    scan_chains: Optional[str] = typer.Option(
+        None,
+        "--scan-chains",
+        help="Restrict alanine scan to these chains "
+        "(comma-separated, e.g. 'H,L')",
+    ),
+    temperature: float = typer.Option(
+        0.1, "--temperature", help="LigandMPNN sampling temperature"
+    ),
+    model_type: str = typer.Option(
+        "ligand_mpnn",
+        "--model-type",
+        help="Model variant: protein_mpnn, ligand_mpnn, soluble_mpnn",
+    ),
+    constrained: bool = typer.Option(
+        False,
+        "--constrained",
+        help="Use constrained minimization with position restraints",
+    ),
+    seed: Optional[int] = typer.Option(
+        None, "--seed", help="Random seed for reproducibility"
+    ),
+    workers: int = typer.Option(
+        1, "--workers", "-j", help="Number of parallel worker processes"
+    ),
+    no_progress: bool = typer.Option(
+        False, "--no-progress", help="Suppress progress bars"
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable detailed logging from all components",
+    ),
+):
+    """Beam-search interface optimization.
+
+    Iteratively identifies destabilising interface positions via alanine
+    scanning, then designs improvements using parallel beam expansion.
+    Requires --interface to specify which chain pairs define the interface.
+    """
+    _setup_logging(verbose)
+    _validate_input(input_file)
+
+    try:
+        chain_pairs = _parse_chain_pairs_strict(interface)
+    except typer.BadParameter as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    parsed_scan_chains = None
+    if scan_chains:
+        parsed_scan_chains = [
+            c.strip() for c in scan_chains.split(",") if c.strip()
+        ]
+
+    from boundry.config import (
+        DesignConfig,
+        IdealizeConfig,
+        OptimizeConfig,
+        RelaxConfig,
+    )
+    from boundry.optimize import optimize as _optimize
+    from boundry.weights import ensure_weights
+
+    ensure_weights(verbose=verbose)
+
+    config = OptimizeConfig(
+        chain_pairs=chain_pairs,
+        scan_chains=parsed_scan_chains,
+        n_campaigns=campaigns,
+        relax_iterations=relax_iterations,
+        design_cycles=design_cycles,
+        beam_width=beam_width,
+        beam_expansion=beam_expansion,
+        ddg_threshold=ddg_threshold,
+        design=DesignConfig(
+            model_type=model_type,
+            temperature=temperature,
+        ),
+        relax=RelaxConfig(constrained=constrained),
+        idealize=IdealizeConfig(enabled=True),
+        seed=seed,
+        workers=workers,
+        show_progress=not no_progress and not verbose,
+        quiet=not verbose,
+    )
+
+    with _quiet_context(verbose):
+        result = _optimize(
+            input_file,
+            config=config,
+            output_dir=output_dir,
+        )
+
+    # Print summary
+    if result.initial_dG is not None and result.final_dG is not None:
+        typer.echo(
+            f"Optimization complete: "
+            f"dG {result.initial_dG:.2f} -> {result.final_dG:.2f} "
+            f"(delta={result.delta_dG:.2f} kcal/mol)"
+        )
+    typer.echo(f"Best structure: {output_dir}/final.pdb")
+    typer.echo(f"Summary: {output_dir}/summary.json")
+
+
 def _resolve_workflow(name_or_path: str) -> Path:
     """Resolve a workflow file path or built-in name."""
     path = Path(name_or_path)
