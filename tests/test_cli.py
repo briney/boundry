@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
-from boundry.cli import app
+from boundry.cli import app, main
 
 runner = CliRunner()
 
@@ -377,3 +377,14 @@ class TestHelpers:
                 f"--verbose missing from {cmd}"
             )
             assert "-v" in result.output, f"-v missing from {cmd}"
+
+
+class TestMainEntryPoint:
+    """Tests for the main() entry point."""
+
+    @patch("boundry.cli.app", side_effect=KeyboardInterrupt)
+    def test_main_keyboard_interrupt(self, mock_app):
+        """main() catches KeyboardInterrupt and exits with code 130."""
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 130

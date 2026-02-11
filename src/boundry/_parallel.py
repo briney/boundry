@@ -91,6 +91,10 @@ class WorkPool:
                         f"Parallel task {idx + 1}/{total} "
                         f"failed: {type(exc).__name__}: {exc}"
                     ) from exc
+        except KeyboardInterrupt:
+            for f in future_to_idx:
+                f.cancel()
+            raise
         except WorkflowError:
             raise
         except Exception as exc:
@@ -121,10 +125,28 @@ class WorkPool:
             )
         return self
 
-    def __exit__(self, *exc: Any) -> None:
+    def __exit__(self, exc_type: Any, *exc: Any) -> None:
         if self._pool is not None:
-            self._pool.shutdown(wait=True)
-            self._pool = None
+            if exc_type is KeyboardInterrupt:
+                self._force_shutdown()
+            else:
+                self._pool.shutdown(wait=True)
+                self._pool = None
+
+    def _force_shutdown(self) -> None:
+        """Immediately tear down the pool, killing worker processes."""
+        if self._pool is None:
+            return
+        self._pool.shutdown(wait=False, cancel_futures=True)
+        # Kill any still-running worker processes
+        processes = getattr(self._pool, "_processes", None)
+        if processes is not None:
+            for proc in processes.values():
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+        self._pool = None
 
 
 # ------------------------------------------------------------------

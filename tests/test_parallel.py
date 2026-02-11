@@ -18,6 +18,11 @@ def _double(x):
     return x * 2
 
 
+def _raise_keyboard_interrupt(x):
+    """Top-level function that raises KeyboardInterrupt."""
+    raise KeyboardInterrupt
+
+
 # ------------------------------------------------------------------
 # Task / Result dataclasses
 # ------------------------------------------------------------------
@@ -113,6 +118,46 @@ class TestWorkPool:
         with WorkPool(1) as pool:
             with pytest.raises(RuntimeError, match="not active"):
                 pool.submit(lambda: None)
+
+    def test_force_shutdown(self):
+        """_force_shutdown() tears down the pool immediately."""
+        pool = WorkPool(2)
+        pool.__enter__()
+        assert pool.active
+        pool._force_shutdown()
+        assert not pool.active
+        assert pool._pool is None
+
+    def test_force_shutdown_noop_when_no_pool(self):
+        """_force_shutdown() is safe to call when pool is None."""
+        pool = WorkPool(1)
+        pool.__enter__()
+        assert not pool.active
+        pool._force_shutdown()  # should not raise
+        assert pool._pool is None
+
+    def test_exit_on_keyboard_interrupt(self):
+        """__exit__ calls _force_shutdown on KeyboardInterrupt."""
+        pool = WorkPool(2)
+        pool.__enter__()
+        assert pool.active
+        pool.__exit__(KeyboardInterrupt, None, None)
+        assert not pool.active
+
+    def test_exit_normal_waits(self):
+        """__exit__ with no exception calls shutdown(wait=True)."""
+        pool = WorkPool(2)
+        pool.__enter__()
+        assert pool.active
+        pool.__exit__(None, None, None)
+        assert not pool.active
+
+    def test_map_keyboard_interrupt_propagates(self):
+        """KeyboardInterrupt from a worker task propagates."""
+        with WorkPool(1) as pool:
+            # Sequential fallback — KeyboardInterrupt propagates directly
+            with pytest.raises(KeyboardInterrupt):
+                pool.map(_raise_keyboard_interrupt, [1])
 
 
 # ------------------------------------------------------------------

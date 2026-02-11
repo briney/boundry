@@ -651,7 +651,10 @@ class _OptimizeProgress:
 
     def __exit__(self, *exc):
         if self._progress is not None:
-            self._progress.__exit__(*exc)
+            try:
+                self._progress.__exit__(*exc)
+            except Exception:
+                pass
 
     def advance_campaign(self):
         if self._progress and self._campaign_task is not None:

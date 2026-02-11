@@ -76,7 +76,10 @@ class WorkflowProgress:
 
     def __exit__(self, *args) -> None:
         if self._progress is not None:
-            self._progress.stop()
+            try:
+                self._progress.stop()
+            except Exception:
+                pass
             self._progress = None
 
     @staticmethod

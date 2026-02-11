@@ -1282,7 +1282,11 @@ def run(
 
 def main():
     """CLI entry point (called by ``boundry`` console script)."""
-    app()
+    try:
+        app()
+    except KeyboardInterrupt:
+        typer.echo("\nInterrupted.", err=True)
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":
