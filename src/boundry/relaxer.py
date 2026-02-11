@@ -436,6 +436,16 @@ class Relaxer:
             # before OpenMM processing -- AMBER can't parameterize them
             pdb_string = filter_protein_only(pdb_string)
 
+            # Split chains at internal gaps so PDBFixer doesn't create
+            # corrupt bond topologies across missing residues
+            if self.config.split_chains_at_gaps:
+                gaps = detect_chain_gaps(pdb_string)
+                if gaps:
+                    logger.info(get_gap_summary(gaps))
+                    pdb_string, _ = split_chains_at_gaps(
+                        pdb_string, gaps
+                    )
+
             # Use pdbfixer to handle missing atoms/H
             fixer = PDBFixer(pdbfile=io.StringIO(pdb_string))
             fixer.findMissingResidues()

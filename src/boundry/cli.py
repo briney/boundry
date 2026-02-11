@@ -1149,7 +1149,7 @@ def optimize(
             temperature=temperature,
         ),
         relax=RelaxConfig(constrained=constrained),
-        idealize=IdealizeConfig(enabled=True),
+        idealize=IdealizeConfig(enabled=True, add_missing_residues=False),
         seed=seed,
         workers=workers,
         show_progress=not no_progress and not verbose,

@@ -110,7 +110,9 @@ class OptimizeConfig:
     design: "DesignConfig" = field(default_factory=lambda: DesignConfig())
     relax: "RelaxConfig" = field(default_factory=lambda: RelaxConfig())
     idealize: "IdealizeConfig" = field(
-        default_factory=lambda: IdealizeConfig(enabled=True)
+        default_factory=lambda: IdealizeConfig(
+            enabled=True, add_missing_residues=False
+        )
     )
     seed: Optional[int] = None
     workers: int = 1
