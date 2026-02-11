@@ -327,6 +327,10 @@ def _write_cycle_output(
     cycle_dir: Path,
     scored_results: List[Tuple[_BeamExpansionResult, int]],
     beam_width: int,
+    *,
+    cycle_num: int,
+    dG_before: float,
+    n_bad_positions: int,
 ) -> None:
     """Write cycle output: top beam_width PDBs + others + summary JSON."""
     cycle_dir.mkdir(parents=True, exist_ok=True)
@@ -355,6 +359,7 @@ def _write_cycle_output(
             {
                 "rank": rank,
                 "dG": result.dG,
+                "delta_dG": result.dG - dG_before,
                 "position": position_str,
                 "file": (
                     filename
@@ -365,8 +370,15 @@ def _write_cycle_output(
         )
 
     # Write cycle_summary.json
-    dG_best = scored_results[0][0].dG if scored_results else None
+    dG_after = scored_results[0][0].dG if scored_results else None
     summary = {
+        "cycle": cycle_num,
+        "dG_before": dG_before,
+        "dG_after": dG_after,
+        "delta_dG": (
+            (dG_after - dG_before) if dG_after is not None else None
+        ),
+        "n_bad_positions": n_bad_positions,
         "rankings": rankings,
     }
     (cycle_dir / "cycle_summary.json").write_text(
@@ -727,7 +739,12 @@ def optimize(
                 if campaign_dir is not None:
                     cycle_dir = campaign_dir / f"cycle_{cycle_num:02d}"
                     _write_cycle_output(
-                        cycle_dir, valid_results, config.beam_width
+                        cycle_dir,
+                        valid_results,
+                        config.beam_width,
+                        cycle_num=cycle_num,
+                        dG_before=dG_before,
+                        n_bad_positions=len(bad_positions),
                     )
 
                 # Keep the best structure for next cycle

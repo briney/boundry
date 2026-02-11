@@ -599,7 +599,15 @@ class TestWriteCycleOutput:
             results.append((r, i))
 
         cycle_dir = tmp_path / "cycle_01"
-        _write_cycle_output(cycle_dir, results, beam_width=3)
+        dG_before = -10.0
+        _write_cycle_output(
+            cycle_dir,
+            results,
+            beam_width=3,
+            cycle_num=1,
+            dG_before=dG_before,
+            n_bad_positions=4,
+        )
 
         # Top 3 in cycle dir
         assert (cycle_dir / "rank_01.pdb").exists()
@@ -614,8 +622,14 @@ class TestWriteCycleOutput:
         summary = json.loads(
             (cycle_dir / "cycle_summary.json").read_text()
         )
+        assert summary["cycle"] == 1
+        assert summary["dG_before"] == dG_before
+        assert summary["dG_after"] == -15.0
+        assert summary["delta_dG"] == -15.0 - dG_before
+        assert summary["n_bad_positions"] == 4
         assert len(summary["rankings"]) == 5
         assert summary["rankings"][0]["rank"] == 1
+        assert summary["rankings"][0]["delta_dG"] == -15.0 - dG_before
 
 
 class TestWriteSummaryJson:
