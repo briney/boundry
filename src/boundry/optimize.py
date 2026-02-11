@@ -529,7 +529,13 @@ def optimize(
     """
     from boundry._parallel import WorkPool
     from boundry.config import OptimizeConfig, RelaxConfig
-    from boundry.operations import Structure, _resolve_input, idealize
+    from boundry.operations import (
+        Structure,
+        _resolve_input,
+        _translate_chain_list,
+        _translate_chain_pairs,
+        idealize,
+    )
     from boundry.relaxer import Relaxer
     from boundry.weights import ensure_weights
 
@@ -541,7 +547,28 @@ def optimize(
     ensure_weights(verbose=not config.quiet)
 
     # Resolve input
-    pdb_string, source_path = _resolve_input(structure)
+    pdb_string, source_path, input_meta = _resolve_input(structure)
+    chain_id_mapping = input_meta.get("chain_id_mapping")
+
+    # Translate CIF chain IDs to PDB IDs for internal processing
+    if chain_id_mapping and config.chain_pairs:
+        from dataclasses import replace
+
+        config = replace(
+            config,
+            chain_pairs=_translate_chain_pairs(
+                config.chain_pairs, chain_id_mapping
+            ),
+        )
+    if chain_id_mapping and config.scan_chains:
+        from dataclasses import replace
+
+        config = replace(
+            config,
+            scan_chains=_translate_chain_list(
+                config.scan_chains, chain_id_mapping
+            ),
+        )
 
     # Idealize
     if config.idealize.enabled:
@@ -802,9 +829,14 @@ def optimize(
     if out_dir is not None:
         (out_dir / "final.pdb").write_text(global_best_pdb)
 
+    result_metadata = {}
+    if chain_id_mapping:
+        result_metadata["chain_id_mapping"] = chain_id_mapping
+
     result = OptimizeResult(
         structure=Structure(
             pdb_string=global_best_pdb,
+            metadata=result_metadata,
             source_path=source_path,
         ),
         campaigns=all_campaigns,

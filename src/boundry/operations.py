@@ -61,7 +61,9 @@ class Structure:
 
         Format is auto-detected from the file extension. PDB strings
         are converted to CIF when writing to ``.cif`` or ``.mmcif``
-        files.
+        files.  If the structure was loaded from a CIF with
+        multi-character chain IDs, the original IDs are restored in
+        CIF output.
         """
         from boundry.structure_io import (
             StructureFormat,
@@ -78,7 +80,10 @@ class Structure:
 
         content = self.pdb_string
         if target_format != StructureFormat.PDB:
-            content = convert_to_format(content, target_format)
+            mapping = self.metadata.get("chain_id_mapping")
+            content = convert_to_format(
+                content, target_format, chain_id_mapping=mapping
+            )
 
         write_structure(content, path, target_format)
 
@@ -87,6 +92,8 @@ class Structure:
         """Load structure from a PDB or CIF file.
 
         CIF files are converted to PDB format internally.
+        Multi-character chain IDs are remapped and stored in
+        metadata for later restoration.
         """
         from boundry.structure_io import (
             ensure_pdb_format,
@@ -95,8 +102,15 @@ class Structure:
 
         path = Path(path)
         content = read_structure(path)
-        pdb_string = ensure_pdb_format(content, path)
-        return cls(pdb_string=pdb_string, source_path=str(path))
+        pdb_string, chain_id_mapping = ensure_pdb_format(content, path)
+        metadata: Dict[str, Any] = {}
+        if chain_id_mapping:
+            metadata["chain_id_mapping"] = chain_id_mapping
+        return cls(
+            pdb_string=pdb_string,
+            metadata=metadata,
+            source_path=str(path),
+        )
 
 
 @dataclass
@@ -172,8 +186,8 @@ class InterfaceAnalysisResult:
 
 def _resolve_input(
     structure: StructureInput,
-) -> Tuple[str, Optional[str]]:
-    """Resolve flexible structure input to *(pdb_string, source_path)*.
+) -> Tuple[str, Optional[str], Dict[str, Any]]:
+    """Resolve flexible structure input to *(pdb_string, source_path, metadata)*.
 
     Accepts:
     * :class:`Structure` -- uses its ``pdb_string`` directly.
@@ -182,10 +196,10 @@ def _resolve_input(
       assumed to be a PDB-format string.
     """
     if isinstance(structure, Structure):
-        return structure.pdb_string, structure.source_path
+        return structure.pdb_string, structure.source_path, structure.metadata
     if isinstance(structure, Path):
         s = Structure.from_file(structure)
-        return s.pdb_string, str(structure)
+        return s.pdb_string, str(structure), s.metadata
     if isinstance(structure, str):
         # Strings containing newlines are PDB content, not file paths
         if "\n" not in structure:
@@ -193,10 +207,10 @@ def _resolve_input(
                 p = Path(structure)
                 if p.exists() and p.is_file():
                     s = Structure.from_file(p)
-                    return s.pdb_string, structure
+                    return s.pdb_string, structure, s.metadata
             except OSError:
                 pass
-        return structure, None
+        return structure, None, {}
     raise TypeError(f"Expected str, Path, or Structure, got {type(structure)}")
 
 
@@ -237,6 +251,97 @@ def _maybe_restore(
     return restore_numbering(pdb_string, mapping)
 
 
+def _propagate_chain_mapping(
+    metadata: Dict[str, Any],
+    input_meta: Dict[str, Any],
+) -> None:
+    """Copy ``chain_id_mapping`` from input metadata if present."""
+    chain_id_mapping = input_meta.get("chain_id_mapping")
+    if chain_id_mapping:
+        metadata["chain_id_mapping"] = chain_id_mapping
+
+
+def _translate_chain_pairs(
+    chain_pairs: list,
+    mapping: Optional[Dict[str, str]],
+) -> list:
+    """Convert CIF chain IDs in *chain_pairs* to PDB IDs via *mapping*.
+
+    *mapping* is ``{pdb_id: cif_id}``.  Returns the pairs unchanged
+    when *mapping* is empty or ``None``.
+    """
+    if not mapping:
+        return chain_pairs
+    reverse = {cif: pdb for pdb, cif in mapping.items()}
+    return [
+        (reverse.get(a, a), reverse.get(b, b)) for a, b in chain_pairs
+    ]
+
+
+def _translate_chain_list(
+    chain_list: list,
+    mapping: Optional[Dict[str, str]],
+) -> list:
+    """Convert CIF chain IDs in *chain_list* to PDB IDs via *mapping*."""
+    if not mapping:
+        return chain_list
+    reverse = {cif: pdb for pdb, cif in mapping.items()}
+    return [reverse.get(c, c) for c in chain_list]
+
+
+def _restore_chain_ids_in_result(
+    result: "InterfaceAnalysisResult",
+    mapping: Dict[str, str],
+) -> "InterfaceAnalysisResult":
+    """Replace PDB chain IDs with original CIF IDs throughout *result*.
+
+    *mapping* is ``{pdb_id: cif_id}``.  Mutates in-place and returns
+    the same object.
+    """
+
+    def _tr(chain_id: str) -> str:
+        return mapping.get(chain_id, chain_id)
+
+    def _tr_key(key: str) -> str:
+        """Translate chain IDs in a ``"A+B"``-style key."""
+        parts = key.split("+")
+        return "+".join(_tr(p) for p in parts)
+
+    # interface_info
+    if result.interface_info is not None:
+        for res in result.interface_info.interface_residues:
+            res.chain_id = _tr(res.chain_id)
+            res.partner_chain = _tr(res.partner_chain)
+        result.interface_info.chain_pairs = [
+            (_tr(a), _tr(b))
+            for a, b in result.interface_info.chain_pairs
+        ]
+
+    # binding_energy
+    if result.binding_energy is not None:
+        be = result.binding_energy
+        be.separated_energies = {
+            _tr_key(k): v for k, v in be.separated_energies.items()
+        }
+        be.energy_breakdown = {
+            _tr_key(k): v for k, v in be.energy_breakdown.items()
+        }
+        for res in be.interface_residues:
+            res.chain_id = _tr(res.chain_id)
+            res.partner_chain = _tr(res.partner_chain)
+
+    # per_position / alanine_scan
+    for scan in (result.per_position, result.alanine_scan):
+        if scan is not None:
+            scan.chain_pairs = [
+                (_tr(a), _tr(b)) for a, b in scan.chain_pairs
+            ]
+            for row in scan.rows:
+                row.chain_id = _tr(row.chain_id)
+
+    return result
+
+
 # -------------------------------------------------------------------
 # Operations
 # -------------------------------------------------------------------
@@ -267,7 +372,7 @@ def idealize(
     if config is None:
         config = IdealizeConfig(enabled=True)
 
-    pdb_string, source_path = _resolve_input(structure)
+    pdb_string, source_path, input_meta = _resolve_input(structure)
     pdb_string, renumber_mapping = _auto_renumber(pdb_string)
     idealized_pdb, gaps = idealize_structure(pdb_string, config)
     idealized_pdb = _maybe_restore(idealized_pdb, renumber_mapping)
@@ -278,6 +383,7 @@ def idealize(
     }
     if renumber_mapping is not None:
         metadata["renumber_mapping"] = renumber_mapping
+    _propagate_chain_mapping(metadata, input_meta)
 
     return Structure(
         pdb_string=idealized_pdb,
@@ -314,7 +420,7 @@ def minimize(
     if config is None:
         config = RelaxConfig()
 
-    pdb_string, source_path = _resolve_input(structure)
+    pdb_string, source_path, input_meta = _resolve_input(structure)
     pdb_string, renumber_mapping = _auto_renumber(pdb_string)
 
     if pre_idealize:
@@ -336,6 +442,7 @@ def minimize(
     }
     if renumber_mapping is not None:
         metadata["renumber_mapping"] = renumber_mapping
+    _propagate_chain_mapping(metadata, input_meta)
 
     return Structure(
         pdb_string=relaxed_pdb,
@@ -379,7 +486,7 @@ def repack(
     if config is None:
         config = DesignConfig()
 
-    pdb_string, source_path = _resolve_input(structure)
+    pdb_string, source_path, input_meta = _resolve_input(structure)
 
     if pre_idealize:
         pre = idealize(
@@ -402,14 +509,17 @@ def repack(
     finally:
         pdb_path.unlink(missing_ok=True)
 
+    metadata: Dict[str, Any] = {
+        "sequence": repack_result["sequence"],
+        "native_sequence": repack_result["native_sequence"],
+        "ligandmpnn_loss": float(repack_result["loss"][0]),
+        "operation": "repack",
+    }
+    _propagate_chain_mapping(metadata, input_meta)
+
     return Structure(
         pdb_string=repacked_pdb,
-        metadata={
-            "sequence": repack_result["sequence"],
-            "native_sequence": repack_result["native_sequence"],
-            "ligandmpnn_loss": float(repack_result["loss"][0]),
-            "operation": "repack",
-        },
+        metadata=metadata,
         source_path=source_path,
     )
 
@@ -451,7 +561,7 @@ def relax(
     if config is None:
         config = PipelineConfig()
 
-    pdb_string, source_path = _resolve_input(structure)
+    pdb_string, source_path, input_meta = _resolve_input(structure)
     pdb_string, renumber_mapping = _auto_renumber(pdb_string)
 
     if pre_idealize:
@@ -535,6 +645,7 @@ def relax(
     }
     if renumber_mapping is not None:
         metadata["renumber_mapping"] = renumber_mapping
+    _propagate_chain_mapping(metadata, input_meta)
 
     return Structure(
         pdb_string=current_pdb,
@@ -581,7 +692,7 @@ def mpnn(
     if config is None:
         config = DesignConfig()
 
-    pdb_string, source_path = _resolve_input(structure)
+    pdb_string, source_path, input_meta = _resolve_input(structure)
 
     if pre_idealize:
         pre = idealize(
@@ -615,14 +726,17 @@ def mpnn(
     )
     logger.info(f"Sequence design result:\n{alignment}")
 
+    metadata: Dict[str, Any] = {
+        "sequence": design_result["sequence"],
+        "native_sequence": design_result["native_sequence"],
+        "ligandmpnn_loss": float(design_result["loss"][0]),
+        "operation": "mpnn",
+    }
+    _propagate_chain_mapping(metadata, input_meta)
+
     return Structure(
         pdb_string=designed_pdb,
-        metadata={
-            "sequence": design_result["sequence"],
-            "native_sequence": design_result["native_sequence"],
-            "ligandmpnn_loss": float(design_result["loss"][0]),
-            "operation": "mpnn",
-        },
+        metadata=metadata,
         source_path=source_path,
     )
 
@@ -665,7 +779,7 @@ def design(
     if config is None:
         config = PipelineConfig()
 
-    pdb_string, source_path = _resolve_input(structure)
+    pdb_string, source_path, input_meta = _resolve_input(structure)
     pdb_string, renumber_mapping = _auto_renumber(pdb_string)
 
     if pre_idealize:
@@ -772,6 +886,7 @@ def design(
     }
     if renumber_mapping is not None:
         metadata["renumber_mapping"] = renumber_mapping
+    _propagate_chain_mapping(metadata, input_meta)
 
     return Structure(
         pdb_string=current_pdb,
@@ -798,15 +913,18 @@ def renumber(structure: StructureInput) -> Structure:
     """
     from boundry.renumber import renumber_pdb
 
-    pdb_string, source_path = _resolve_input(structure)
+    pdb_string, source_path, input_meta = _resolve_input(structure)
     renumbered_pdb, mapping = renumber_pdb(pdb_string)
+
+    metadata: Dict[str, Any] = {
+        "renumber_mapping": mapping,
+        "operation": "renumber",
+    }
+    _propagate_chain_mapping(metadata, input_meta)
 
     return Structure(
         pdb_string=renumbered_pdb,
-        metadata={
-            "renumber_mapping": mapping,
-            "operation": "renumber",
-        },
+        metadata=metadata,
         source_path=source_path,
     )
 
@@ -844,7 +962,7 @@ def select_positions(
     if config is None:
         config = SelectPositionsConfig()
 
-    pdb_string, source_path = _resolve_input(structure)
+    pdb_string, source_path, input_meta = _resolve_input(structure)
 
     # Extract existing metadata
     input_metadata: Dict[str, Any] = {}
@@ -966,6 +1084,7 @@ def select_positions(
         "selection_top_k": config.top_k,
         "selection_order": config.order,
     }
+    _propagate_chain_mapping(metadata, input_meta)
 
     return Structure(
         pdb_string=pdb_string,
@@ -1012,7 +1131,28 @@ def analyze_interface(
     if config is None:
         config = InterfaceConfig(enabled=True)
 
-    pdb_string, _ = _resolve_input(structure)
+    pdb_string, _, input_meta = _resolve_input(structure)
+    chain_id_mapping = input_meta.get("chain_id_mapping")
+
+    # Translate user-provided CIF chain IDs to PDB IDs
+    if chain_id_mapping and config.chain_pairs:
+        from dataclasses import replace
+
+        config = replace(
+            config,
+            chain_pairs=_translate_chain_pairs(
+                config.chain_pairs, chain_id_mapping
+            ),
+        )
+    if chain_id_mapping and config.scan_chains:
+        from dataclasses import replace
+
+        config = replace(
+            config,
+            scan_chains=_translate_chain_list(
+                config.scan_chains, chain_id_mapping
+            ),
+        )
 
     result = InterfaceAnalysisResult()
 
@@ -1108,5 +1248,9 @@ def analyze_interface(
         )
         result.per_position = energetics.per_position
         result.alanine_scan = energetics.alanine_scan
+
+    # Restore original CIF chain IDs in result
+    if chain_id_mapping:
+        _restore_chain_ids_in_result(result, chain_id_mapping)
 
     return result

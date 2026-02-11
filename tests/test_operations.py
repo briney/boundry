@@ -13,7 +13,11 @@ import pytest
 from boundry.operations import (
     InterfaceAnalysisResult,
     Structure,
+    _propagate_chain_mapping,
     _resolve_input,
+    _restore_chain_ids_in_result,
+    _translate_chain_list,
+    _translate_chain_pairs,
     _write_temp_pdb,
 )
 
@@ -248,34 +252,39 @@ class TestResolveInput:
         s = Structure(
             pdb_string="ATOM\nEND\n",
             source_path="/input.pdb",
+            metadata={"key": "val"},
         )
-        pdb_string, source_path = _resolve_input(s)
+        pdb_string, source_path, meta = _resolve_input(s)
         assert pdb_string == "ATOM\nEND\n"
         assert source_path == "/input.pdb"
+        assert meta == {"key": "val"}
 
     def test_path_object(self, tmp_path):
         """Test resolving a Path to an existing file."""
         pdb_path = tmp_path / "test.pdb"
         pdb_path.write_text(SINGLE_CHAIN_PDB)
 
-        pdb_string, source_path = _resolve_input(pdb_path)
+        pdb_string, source_path, meta = _resolve_input(pdb_path)
         assert "ATOM" in pdb_string
         assert source_path == str(pdb_path)
+        assert isinstance(meta, dict)
 
     def test_str_file_path(self, tmp_path):
         """Test resolving a string file path."""
         pdb_path = tmp_path / "test.pdb"
         pdb_path.write_text(SINGLE_CHAIN_PDB)
 
-        pdb_string, source_path = _resolve_input(str(pdb_path))
+        pdb_string, source_path, meta = _resolve_input(str(pdb_path))
         assert "ATOM" in pdb_string
         assert source_path == str(pdb_path)
+        assert isinstance(meta, dict)
 
     def test_str_pdb_string(self):
         """Test resolving a PDB string (no file on disk)."""
-        pdb_string, source_path = _resolve_input(SINGLE_CHAIN_PDB)
+        pdb_string, source_path, meta = _resolve_input(SINGLE_CHAIN_PDB)
         assert pdb_string == SINGLE_CHAIN_PDB
         assert source_path is None
+        assert meta == {}
 
     def test_invalid_type_raises(self):
         """Test that invalid types raise TypeError."""
@@ -1766,3 +1775,189 @@ class TestNoneEnergyHandling:
                     mock_relaxer,
                     chain_pairs=[("A", "B")],
                 )
+
+
+# ------------------------------------------------------------------
+# Chain ID mapping helpers
+# ------------------------------------------------------------------
+
+
+class TestTranslateChainPairs:
+    """Tests for _translate_chain_pairs helper."""
+
+    def test_translates_cif_to_pdb(self):
+        """CIF chain IDs are converted to PDB IDs via reverse mapping."""
+        mapping = {"C": "AA", "D": "AB"}
+        pairs = [("AA", "AB")]
+        result = _translate_chain_pairs(pairs, mapping)
+        assert result == [("C", "D")]
+
+    def test_passthrough_no_mapping(self):
+        """Pairs pass through when mapping is None or empty."""
+        pairs = [("H", "L")]
+        assert _translate_chain_pairs(pairs, None) == pairs
+        assert _translate_chain_pairs(pairs, {}) == pairs
+
+    def test_partial_translation(self):
+        """Chains not in mapping pass through unchanged."""
+        mapping = {"C": "AA"}
+        pairs = [("AA", "B")]
+        result = _translate_chain_pairs(pairs, mapping)
+        assert result == [("C", "B")]
+
+
+class TestTranslateChainList:
+    """Tests for _translate_chain_list helper."""
+
+    def test_translates_cif_to_pdb(self):
+        mapping = {"C": "AA", "D": "AB"}
+        result = _translate_chain_list(["AA", "AB"], mapping)
+        assert result == ["C", "D"]
+
+    def test_passthrough_no_mapping(self):
+        chains = ["H", "L"]
+        assert _translate_chain_list(chains, None) == chains
+        assert _translate_chain_list(chains, {}) == chains
+
+
+class TestRestoreChainIdsInResult:
+    """Tests for _restore_chain_ids_in_result helper."""
+
+    def test_restores_interface_info_chain_ids(self):
+        from boundry.interface import InterfaceInfo, InterfaceResidue
+
+        info = InterfaceInfo(
+            interface_residues=[
+                InterfaceResidue(
+                    chain_id="C",
+                    residue_number=1,
+                    residue_name="ALA",
+                    insertion_code="",
+                    partner_chain="D",
+                    min_distance=3.0,
+                    num_contacts=5,
+                ),
+            ],
+            chain_pairs=[("C", "D")],
+        )
+        result = InterfaceAnalysisResult(interface_info=info)
+        mapping = {"C": "AA", "D": "AB"}
+
+        _restore_chain_ids_in_result(result, mapping)
+
+        assert result.interface_info.interface_residues[0].chain_id == "AA"
+        assert (
+            result.interface_info.interface_residues[0].partner_chain == "AB"
+        )
+        assert result.interface_info.chain_pairs == [("AA", "AB")]
+
+    def test_restores_binding_energy_keys(self):
+        from boundry.binding_energy import BindingEnergyResult
+
+        be = BindingEnergyResult(
+            binding_energy=-10.0,
+            separated_energies={"C+D": -5.0},
+            energy_breakdown={"C+D": -3.0},
+            interface_residues=[],
+        )
+        result = InterfaceAnalysisResult(binding_energy=be)
+        mapping = {"C": "AA", "D": "AB"}
+
+        _restore_chain_ids_in_result(result, mapping)
+
+        assert "AA+AB" in result.binding_energy.separated_energies
+        assert "AA+AB" in result.binding_energy.energy_breakdown
+
+    def test_restores_position_rows(self):
+        from boundry.interface_position_energetics import (
+            PositionResult,
+            PositionRow,
+        )
+
+        row = PositionRow(
+            chain_id="C",
+            residue_number=10,
+            insertion_code="",
+            wt_resname="ALA",
+            partner_chain="D",
+            min_distance=3.0,
+            num_contacts=5,
+        )
+        scan = PositionResult(
+            rows=[row], chain_pairs=[("C", "D")]
+        )
+        result = InterfaceAnalysisResult(per_position=scan)
+        mapping = {"C": "AA", "D": "AB"}
+
+        _restore_chain_ids_in_result(result, mapping)
+
+        assert result.per_position.rows[0].chain_id == "AA"
+        assert result.per_position.chain_pairs == [("AA", "AB")]
+
+
+class TestPropagateChainMapping:
+    """Tests for _propagate_chain_mapping helper."""
+
+    def test_copies_mapping(self):
+        metadata = {"operation": "test"}
+        input_meta = {"chain_id_mapping": {"C": "AA"}}
+        _propagate_chain_mapping(metadata, input_meta)
+        assert metadata["chain_id_mapping"] == {"C": "AA"}
+
+    def test_no_mapping_no_change(self):
+        metadata = {"operation": "test"}
+        _propagate_chain_mapping(metadata, {})
+        assert "chain_id_mapping" not in metadata
+
+
+class TestStructureChainMapping:
+    """Tests for chain mapping through Structure.from_file / write."""
+
+    def test_from_file_stores_mapping_for_multi_char(self, tmp_path):
+        """CIF with multi-char chains populates chain_id_mapping."""
+        import io as _io
+
+        from Bio.PDB import MMCIFIO
+        from Bio.PDB.Atom import Atom
+        from Bio.PDB.Chain import Chain
+        from Bio.PDB.Model import Model
+        from Bio.PDB.Residue import Residue
+        from Bio.PDB.Structure import Structure as BioStructure
+
+        structure = BioStructure("test")
+        model = Model(0)
+        structure.add(model)
+        for cid in ["A", "AA"]:
+            chain = Chain(cid)
+            model.add(chain)
+            res = Residue((" ", 1, " "), "ALA", " ")
+            chain.add(res)
+            atom = Atom(
+                "CA",
+                [0.0, 0.0, 0.0],
+                1.0,
+                1.0,
+                " ",
+                "CA",
+                1,
+                element="C",
+            )
+            res.add(atom)
+
+        cif_io = MMCIFIO()
+        cif_io.set_structure(structure)
+        buf = _io.StringIO()
+        cif_io.save(buf)
+        cif_path = tmp_path / "multi.cif"
+        cif_path.write_text(buf.getvalue())
+
+        s = Structure.from_file(cif_path)
+        assert "chain_id_mapping" in s.metadata
+        assert "AA" in s.metadata["chain_id_mapping"].values()
+
+    def test_from_file_no_mapping_for_single_char(
+        self, small_peptide_cif
+    ):
+        """CIF with only single-char chains has no chain_id_mapping."""
+        s = Structure.from_file(small_peptide_cif)
+        assert "chain_id_mapping" not in s.metadata

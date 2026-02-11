@@ -325,6 +325,54 @@ def ubiquitin_cif(tmp_path_factory):
     return cif_path
 
 
+@pytest.fixture
+def multi_chain_cif_string():
+    """A synthetic CIF string with chains A, B, AA, AB."""
+    import io
+
+    from Bio.PDB import MMCIFIO
+    from Bio.PDB.Atom import Atom
+    from Bio.PDB.Chain import Chain
+    from Bio.PDB.Model import Model
+    from Bio.PDB.Residue import Residue
+    from Bio.PDB.Structure import Structure
+
+    structure = Structure("test")
+    model = Model(0)
+    structure.add(model)
+
+    for cid in ["A", "B", "AA", "AB"]:
+        chain = Chain(cid)
+        model.add(chain)
+        res = Residue((" ", 1, " "), "ALA", " ")
+        chain.add(res)
+        atom = Atom(
+            "CA",
+            [0.0, 0.0, 0.0],
+            1.0,
+            1.0,
+            " ",
+            "CA",
+            1,
+            element="C",
+        )
+        res.add(atom)
+
+    cif_io = MMCIFIO()
+    cif_io.set_structure(structure)
+    output = io.StringIO()
+    cif_io.save(output)
+    return output.getvalue()
+
+
+@pytest.fixture
+def multi_chain_cif(tmp_path, multi_chain_cif_string):
+    """Write multi-chain CIF to a temp file."""
+    path = tmp_path / "multi_chain.cif"
+    path.write_text(multi_chain_cif_string)
+    return path
+
+
 @pytest.fixture(scope="session")
 def heme_protein_pdb(tmp_path_factory):
     """

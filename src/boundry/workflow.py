@@ -2235,9 +2235,19 @@ class Workflow:
             InterfaceConfig,
             RelaxConfig,
         )
-        from boundry.operations import Structure, analyze_interface
+        from boundry.operations import (
+            Structure,
+            _translate_chain_list,
+            _translate_chain_pairs,
+            analyze_interface,
+        )
 
         constrained = params.pop("constrained", False)
+
+        # Extract chain_id_mapping for CIF→PDB chain translation
+        chain_id_mapping = getattr(
+            structure, "metadata", {}
+        ).get("chain_id_mapping")
 
         # Support chain_pairs as "H:A,L:A" or [["H","A"],["L","A"]]
         chain_pairs = params.pop("chain_pairs", None)
@@ -2251,6 +2261,12 @@ class Workflow:
         elif isinstance(chain_pairs, list):
             chain_pairs = [tuple(p) for p in chain_pairs]
 
+        # Translate CIF chain IDs to PDB IDs
+        if chain_pairs is not None and chain_id_mapping:
+            chain_pairs = _translate_chain_pairs(
+                chain_pairs, chain_id_mapping
+            )
+
         if chain_pairs is not None:
             params["chain_pairs"] = chain_pairs
 
@@ -2262,6 +2278,13 @@ class Workflow:
                 for c in scan_chains.split(",")
                 if c.strip()
             ]
+
+        # Translate CIF chain IDs to PDB IDs
+        if scan_chains is not None and chain_id_mapping:
+            scan_chains = _translate_chain_list(
+                scan_chains, chain_id_mapping
+            )
+
         if scan_chains is not None:
             params["scan_chains"] = scan_chains
 
