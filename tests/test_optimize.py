@@ -2,6 +2,7 @@
 
 import json
 import pickle
+import random
 from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
@@ -21,9 +22,11 @@ from boundry.optimize import (
     OptimizeResult,
     _BeamExpansionResult,
     _BeamExpansionTask,
+    _PositionInfo,
     _compose_seed,
     _filter_sequences,
     _get_aa_at_position,
+    _softmax_sample,
 )
 
 runner = CliRunner()
@@ -321,7 +324,7 @@ class TestOptimize:
     @patch("boundry.relaxer.Relaxer")
     @patch("boundry.weights.ensure_weights")
     @patch("boundry.optimize._score_interface")
-    @patch("boundry.optimize._analyze_and_find_bad")
+    @patch("boundry.optimize._analyze_and_find_positions")
     @patch("boundry.operations.relax")
     @patch("boundry.operations.idealize")
     @patch("boundry._parallel.WorkPool")
@@ -352,10 +355,10 @@ class TestOptimize:
         # Mock score_interface: initial=-10, final=-15
         mock_score.side_effect = [-10.0, -15.0]
 
-        # Mock analyze: 1 bad position per cycle, then no bad
+        # Mock analyze: 1 position per cycle, then none
         mock_analyze.side_effect = [
-            (-10.0, [("H", 52, "")]),
-            (-12.0, []),  # no bad -> skip
+            (-10.0, [_PositionInfo("H", 52, "", 2.5)]),
+            (-12.0, []),  # no positions -> skip
         ]
 
         # Mock pool
@@ -414,7 +417,7 @@ class TestOptimize:
     @patch("boundry.relaxer.Relaxer")
     @patch("boundry.weights.ensure_weights")
     @patch("boundry.optimize._score_interface")
-    @patch("boundry.optimize._analyze_and_find_bad")
+    @patch("boundry.optimize._analyze_and_find_positions")
     @patch("boundry.operations.relax")
     @patch("boundry.operations.idealize")
     @patch("boundry._parallel.WorkPool")
@@ -439,7 +442,7 @@ class TestOptimize:
         # Two campaigns, each with 1 cycle
         # score calls: initial_c1, final_c1, initial_c2, final_c2
         mock_score.side_effect = [-10.0, -14.0, -10.0, -16.0]
-        # Each campaign: 1 cycle with no bad positions (skip)
+        # Each campaign: 1 cycle with no positions (skip)
         mock_analyze.side_effect = [
             (-10.0, []),
             (-10.0, []),
@@ -809,7 +812,7 @@ class TestSamplingWithoutReplacement:
     @patch("boundry.relaxer.Relaxer")
     @patch("boundry.weights.ensure_weights")
     @patch("boundry.optimize._score_interface")
-    @patch("boundry.optimize._analyze_and_find_bad")
+    @patch("boundry.optimize._analyze_and_find_positions")
     @patch("boundry.operations.relax")
     @patch("boundry.operations.idealize")
     @patch("boundry._parallel.WorkPool")
@@ -824,7 +827,7 @@ class TestSamplingWithoutReplacement:
         mock_relaxer_cls,
         tmp_path,
     ):
-        """With beam_expansion=10 and 3 bad positions, only 3 tasks
+        """With beam_expansion=10 and 3 positions, only 3 tasks
         should be submitted, each targeting a unique position."""
         from boundry.operations import Structure
         from boundry.optimize import optimize
@@ -837,11 +840,15 @@ class TestSamplingWithoutReplacement:
         # score: initial, final
         mock_score.side_effect = [-10.0, -15.0]
 
-        # 3 bad positions, then no bad (to end after 1 active cycle)
+        # 3 positions, then none (to end after 1 active cycle)
         mock_analyze.side_effect = [
             (
                 -10.0,
-                [("H", 50, ""), ("H", 51, ""), ("H", 52, "")],
+                [
+                    _PositionInfo("H", 50, "", 3.0),
+                    _PositionInfo("H", 51, "", 2.0),
+                    _PositionInfo("H", 52, "", 1.5),
+                ],
             ),
             (-12.0, []),
         ]
@@ -897,3 +904,389 @@ class TestSamplingWithoutReplacement:
         # CycleResult records actual task count, not beam_expansion
         active_cycle = result.campaigns[0].cycles[0]
         assert active_cycle.n_expansions == 3
+
+
+# ------------------------------------------------------------------
+# OptimizeConfig validation (new fields)
+# ------------------------------------------------------------------
+
+
+class TestOptimizeConfigValidation:
+    """Tests for the new OptimizeConfig fields and validation."""
+
+    def test_position_sampling_default(self):
+        cfg = OptimizeConfig(chain_pairs=[("H", "L")])
+        assert cfg.position_sampling == "weighted"
+        assert cfg.sampling_temperature == 1.0
+        assert cfg.regression_tolerance == 0.0
+
+    def test_position_sampling_invalid(self):
+        with pytest.raises(ValueError, match="position_sampling"):
+            OptimizeConfig(
+                chain_pairs=[("H", "L")],
+                position_sampling="invalid",
+            )
+
+    def test_sampling_temperature_invalid(self):
+        with pytest.raises(ValueError, match="sampling_temperature"):
+            OptimizeConfig(
+                chain_pairs=[("H", "L")],
+                sampling_temperature=0.0,
+            )
+        with pytest.raises(ValueError, match="sampling_temperature"):
+            OptimizeConfig(
+                chain_pairs=[("H", "L")],
+                sampling_temperature=-1.0,
+            )
+
+    def test_threshold_mode_compat(self):
+        cfg = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            position_sampling="threshold",
+            ddg_threshold=2.0,
+        )
+        assert cfg.position_sampling == "threshold"
+        assert cfg.ddg_threshold == 2.0
+
+
+# ------------------------------------------------------------------
+# _softmax_sample
+# ------------------------------------------------------------------
+
+
+class TestSoftmaxSample:
+    """Tests for softmax-weighted sampling."""
+
+    def _positions(self):
+        return [
+            _PositionInfo("H", 50, "", 5.0),
+            _PositionInfo("H", 51, "", 3.0),
+            _PositionInfo("H", 52, "", 1.0),
+            _PositionInfo("H", 53, "", 0.5),
+            _PositionInfo("H", 54, "", 0.1),
+        ]
+
+    def test_returns_k_positions(self):
+        rng = random.Random(42)
+        result = _softmax_sample(self._positions(), 3, 1.0, rng)
+        assert len(result) == 3
+
+    def test_no_duplicates(self):
+        rng = random.Random(42)
+        result = _softmax_sample(self._positions(), 4, 1.0, rng)
+        keys = [(p.chain_id, p.resnum) for p in result]
+        assert len(set(keys)) == len(keys)
+
+    def test_returns_all_when_k_ge_n(self):
+        rng = random.Random(42)
+        positions = self._positions()
+        result = _softmax_sample(positions, 10, 1.0, rng)
+        assert len(result) == len(positions)
+
+    def test_deterministic_with_same_seed(self):
+        positions = self._positions()
+        r1 = _softmax_sample(positions, 3, 1.0, random.Random(99))
+        r2 = _softmax_sample(positions, 3, 1.0, random.Random(99))
+        assert r1 == r2
+
+    def test_low_temperature_biases_high_ddg(self):
+        """Very low temperature should almost always pick the
+        highest-ddG position first."""
+        positions = self._positions()
+        result = _softmax_sample(
+            positions, 1, 0.01, random.Random(42)
+        )
+        assert result[0].ddG == 5.0  # highest ddG
+
+    def test_high_temperature_approaches_uniform(self):
+        """At very high temperature, no single position should
+        dominate across many trials."""
+        positions = self._positions()
+        counts = {p.resnum: 0 for p in positions}
+        for seed in range(300):
+            result = _softmax_sample(
+                positions, 1, 1000.0, random.Random(seed)
+            )
+            counts[result[0].resnum] += 1
+        # Each position should be picked at least once in 300 trials
+        for resnum, count in counts.items():
+            assert count > 0, (
+                f"Position {resnum} never sampled at T=1000"
+            )
+
+
+# ------------------------------------------------------------------
+# _analyze_and_find_positions
+# ------------------------------------------------------------------
+
+
+class TestAnalyzeAndFindPositions:
+    """Tests for the position collection function."""
+
+    def _mock_scan_result(self, rows_data):
+        """Build a mock interface analysis result.
+
+        rows_data: list of (chain, resnum, icode, ddG, skipped)
+        """
+        mock_be = MagicMock()
+        mock_be.binding_energy = -15.0
+
+        rows = []
+        for chain, resnum, icode, ddG, skipped in rows_data:
+            row = MagicMock()
+            row.scan_skipped = skipped
+            row.ddG = ddG
+            row.chain_id = chain
+            row.residue_number = resnum
+            row.insertion_code = icode
+            rows.append(row)
+        mock_ala = MagicMock()
+        mock_ala.rows = rows
+
+        mock_result = MagicMock()
+        mock_result.binding_energy = mock_be
+        mock_result.alanine_scan = mock_ala
+        return mock_result
+
+    def test_weighted_returns_all_non_skipped(self):
+        from boundry.optimize import _analyze_and_find_positions
+
+        mock_result = self._mock_scan_result([
+            ("H", 50, "", 3.0, False),  # high ddG
+            ("H", 51, "", 0.3, False),  # low ddG
+        ])
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            position_sampling="weighted",
+        )
+
+        with patch(
+            "boundry.operations.analyze_interface",
+            return_value=mock_result,
+        ):
+            dG, positions = _analyze_and_find_positions(
+                "ATOM...", config, MagicMock()
+            )
+
+        assert dG == -15.0
+        assert len(positions) == 2
+
+    def test_threshold_filters_by_ddg(self):
+        from boundry.optimize import _analyze_and_find_positions
+
+        mock_result = self._mock_scan_result([
+            ("H", 50, "", 3.0, False),
+            ("H", 51, "", 0.3, False),
+        ])
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            position_sampling="threshold",
+            ddg_threshold=1.0,
+        )
+
+        with patch(
+            "boundry.operations.analyze_interface",
+            return_value=mock_result,
+        ):
+            dG, positions = _analyze_and_find_positions(
+                "ATOM...", config, MagicMock()
+            )
+
+        assert len(positions) == 1
+        assert positions[0].resnum == 50
+
+    def test_skipped_excluded_from_both_modes(self):
+        from boundry.optimize import _analyze_and_find_positions
+
+        mock_result = self._mock_scan_result([
+            ("H", 50, "", 3.0, False),
+            ("H", 51, "", 5.0, True),  # skipped
+        ])
+
+        for mode in ("weighted", "threshold"):
+            config = OptimizeConfig(
+                chain_pairs=[("H", "L")],
+                position_sampling=mode,
+            )
+            with patch(
+                "boundry.operations.analyze_interface",
+                return_value=mock_result,
+            ):
+                _, positions = _analyze_and_find_positions(
+                    "ATOM...", config, MagicMock()
+                )
+            assert len(positions) == 1
+            assert positions[0].resnum == 50
+
+
+# ------------------------------------------------------------------
+# Regression guard
+# ------------------------------------------------------------------
+
+
+class TestRegressionGuard:
+    """Tests for the regression guard in the optimize loop."""
+
+    @patch("boundry.relaxer.Relaxer")
+    @patch("boundry.weights.ensure_weights")
+    @patch("boundry.optimize._score_interface")
+    @patch("boundry.optimize._analyze_and_find_positions")
+    @patch("boundry.operations.relax")
+    @patch("boundry.operations.idealize")
+    @patch("boundry._parallel.WorkPool")
+    def test_rejects_worse_design(
+        self,
+        mock_pool_cls,
+        mock_idealize,
+        mock_relax,
+        mock_analyze,
+        mock_score,
+        mock_ensure_weights,
+        mock_relaxer_cls,
+        tmp_path,
+    ):
+        """If the best expansion is worse than the parent, the parent
+        structure should be kept."""
+        from boundry.operations import Structure
+        from boundry.optimize import optimize
+
+        pdb = "ATOM mock pdb\nEND\n"
+        mock_idealize.return_value = Structure(pdb_string=pdb)
+        mock_relax.return_value = Structure(pdb_string=pdb)
+
+        # score: initial, final
+        mock_score.side_effect = [-10.0, -10.0]
+
+        # 1 position, then none
+        mock_analyze.side_effect = [
+            (-10.0, [_PositionInfo("H", 52, "", 2.0)]),
+            (-10.0, []),
+        ]
+
+        # Expansion result is WORSE: dG=-8 vs parent dG=-10
+        expansion_result = _BeamExpansionResult(
+            pdb_string="ATOM worse\nEND\n",
+            metadata={
+                "sequence": "BAD",
+                "old_aa": "G",
+                "new_aa": "D",
+                "sequences": {"H": "XXX"},
+            },
+            dG=-8.0,
+            target_chain="H",
+            target_resnum=52,
+        )
+
+        mock_pool = MagicMock()
+        mock_pool.__enter__ = MagicMock(return_value=mock_pool)
+        mock_pool.__exit__ = MagicMock(return_value=False)
+        mock_pool.map.return_value = [expansion_result]
+        mock_pool_cls.return_value = mock_pool
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            design_cycles=2,
+            beam_expansion=1,
+            beam_width=1,
+            seed=42,
+            regression_tolerance=0.0,
+        )
+
+        result = optimize(pdb, config=config, output_dir=tmp_path)
+
+        # Parent should be kept: dG_after == dG_before
+        cycle = result.campaigns[0].cycles[0]
+        assert cycle.dG_after == -10.0
+        assert cycle.selected_position is None
+        assert cycle.sequence is None
+
+    @patch("boundry.relaxer.Relaxer")
+    @patch("boundry.weights.ensure_weights")
+    @patch("boundry.optimize._score_interface")
+    @patch("boundry.optimize._analyze_and_find_positions")
+    @patch("boundry.operations.relax")
+    @patch("boundry.operations.idealize")
+    @patch("boundry._parallel.WorkPool")
+    def test_tolerance_allows_small_regression(
+        self,
+        mock_pool_cls,
+        mock_idealize,
+        mock_relax,
+        mock_analyze,
+        mock_score,
+        mock_ensure_weights,
+        mock_relaxer_cls,
+        tmp_path,
+    ):
+        """With regression_tolerance=1.0, a small regression should
+        be accepted."""
+        from boundry.operations import Structure
+        from boundry.optimize import optimize
+
+        pdb = "ATOM mock pdb\nEND\n"
+        mock_idealize.return_value = Structure(pdb_string=pdb)
+        mock_relax.return_value = Structure(pdb_string=pdb)
+
+        # score: initial, final
+        mock_score.side_effect = [-10.0, -9.5]
+
+        # 1 position, then none
+        mock_analyze.side_effect = [
+            (-10.0, [_PositionInfo("H", 52, "", 2.0)]),
+            (-9.5, []),
+        ]
+
+        # Expansion is slightly worse: dG=-9.5 vs parent dG=-10.0
+        expansion_result = _BeamExpansionResult(
+            pdb_string="ATOM slightly worse\nEND\n",
+            metadata={
+                "sequence": "OK",
+                "old_aa": "G",
+                "new_aa": "S",
+                "sequences": {"H": "YYY"},
+            },
+            dG=-9.5,
+            target_chain="H",
+            target_resnum=52,
+        )
+
+        mock_pool = MagicMock()
+        mock_pool.__enter__ = MagicMock(return_value=mock_pool)
+        mock_pool.__exit__ = MagicMock(return_value=False)
+        mock_pool.map.return_value = [expansion_result]
+        mock_pool_cls.return_value = mock_pool
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            design_cycles=2,
+            beam_expansion=1,
+            beam_width=1,
+            seed=42,
+            regression_tolerance=1.0,
+        )
+
+        result = optimize(pdb, config=config, output_dir=tmp_path)
+
+        # Accepted: 0.5 increase < 1.0 tolerance
+        cycle = result.campaigns[0].cycles[0]
+        assert cycle.dG_after == -9.5
+        assert cycle.selected_position is not None
+        assert cycle.sequence == "OK"
+
+
+# ------------------------------------------------------------------
+# CLI new flags
+# ------------------------------------------------------------------
+
+
+class TestCLIOptimizeNewFlags:
+    """Tests that new CLI flags appear in help output."""
+
+    def test_new_flags_in_help(self):
+        result = runner.invoke(app, ["optimize", "--help"])
+        assert result.exit_code == 0
+        assert "--position-sampling" in result.output
+        assert "--sampling-temperature" in result.output
+        assert "--regression-tolerance" in result.output

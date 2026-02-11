@@ -104,6 +104,9 @@ class OptimizeConfig:
     beam_width: int = 4
     beam_expansion: int = 25
     ddg_threshold: float = 1.0
+    position_sampling: str = "weighted"  # "weighted" | "threshold"
+    sampling_temperature: float = 1.0  # softmax temperature (> 0)
+    regression_tolerance: float = 0.0  # max dG increase allowed
     design: "DesignConfig" = field(default_factory=lambda: DesignConfig())
     relax: "RelaxConfig" = field(default_factory=lambda: RelaxConfig())
     idealize: "IdealizeConfig" = field(
@@ -113,6 +116,19 @@ class OptimizeConfig:
     workers: int = 1
     show_progress: bool = False
     quiet: bool = True
+
+    def __post_init__(self):
+        valid_sampling = ("weighted", "threshold")
+        if self.position_sampling not in valid_sampling:
+            raise ValueError(
+                f"position_sampling must be one of {valid_sampling}, "
+                f"got {self.position_sampling!r}"
+            )
+        if self.sampling_temperature <= 0:
+            raise ValueError(
+                f"sampling_temperature must be > 0, "
+                f"got {self.sampling_temperature}"
+            )
 
 
 @dataclass

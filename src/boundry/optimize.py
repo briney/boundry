@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import random
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -25,6 +26,7 @@ from typing import (
     Any,
     Dict,
     List,
+    NamedTuple,
     Optional,
     Tuple,
     Union,
@@ -38,6 +40,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 StructureInput = Union[str, Path, "Structure"]
+
+
+class _PositionInfo(NamedTuple):
+    chain_id: str
+    resnum: int
+    icode: str
+    ddG: float
 
 
 # ------------------------------------------------------------------
@@ -342,16 +351,19 @@ def _score_interface(
     return result.binding_energy
 
 
-def _analyze_and_find_bad(
+def _analyze_and_find_positions(
     pdb_string: str,
     config: OptimizeConfig,
     relaxer: Relaxer,
     pool: Optional[WorkPool] = None,
-) -> Tuple[float, List[Tuple[str, int, str]]]:
-    """Run alanine scan and find destabilising positions.
+) -> Tuple[float, List[_PositionInfo]]:
+    """Run alanine scan and collect candidate positions.
 
-    Returns ``(dG_wt, bad_positions)`` where *bad_positions* is a list
-    of ``(chain_id, resnum, icode)`` tuples with ddG >= threshold.
+    Returns ``(dG_wt, positions)`` where *positions* is a list of
+    :class:`_PositionInfo` tuples.  When ``config.position_sampling``
+    is ``"weighted"``, all non-skipped positions with a valid ddG are
+    returned.  When ``"threshold"``, only positions with
+    ddG >= ``config.ddg_threshold`` are returned.
     """
     from boundry.config import InterfaceConfig
     from boundry.operations import analyze_interface
@@ -374,22 +386,95 @@ def _analyze_and_find_bad(
     )
 
     # Extract dG
-    if result.binding_energy is None or result.binding_energy.binding_energy is None:
+    if (
+        result.binding_energy is None
+        or result.binding_energy.binding_energy is None
+    ):
         raise RuntimeError("Failed to compute wild-type binding energy")
     dG_wt = result.binding_energy.binding_energy
 
-    # Filter bad positions
-    bad_positions: List[Tuple[str, int, str]] = []
+    # Collect positions
+    positions: List[_PositionInfo] = []
     if result.alanine_scan is not None:
         for row in result.alanine_scan.rows:
             if row.scan_skipped:
                 continue
-            if row.ddG is not None and row.ddG >= config.ddg_threshold:
-                bad_positions.append(
-                    (row.chain_id, row.residue_number, row.insertion_code)
+            if row.ddG is None:
+                continue
+            if (
+                config.position_sampling == "threshold"
+                and row.ddG < config.ddg_threshold
+            ):
+                continue
+            positions.append(
+                _PositionInfo(
+                    row.chain_id,
+                    row.residue_number,
+                    row.insertion_code,
+                    row.ddG,
                 )
+            )
 
-    return dG_wt, bad_positions
+    return dG_wt, positions
+
+
+def _analyze_and_find_bad(
+    pdb_string: str,
+    config: OptimizeConfig,
+    relaxer: Relaxer,
+    pool: Optional[WorkPool] = None,
+) -> Tuple[float, List[Tuple[str, int, str]]]:
+    """Backwards-compatible wrapper around :func:`_analyze_and_find_positions`.
+
+    Forces threshold mode and strips ddG from the result tuples.
+    """
+    from dataclasses import replace
+
+    compat_config = replace(config, position_sampling="threshold")
+    dG_wt, positions = _analyze_and_find_positions(
+        pdb_string, compat_config, relaxer, pool
+    )
+    return dG_wt, [
+        (p.chain_id, p.resnum, p.icode) for p in positions
+    ]
+
+
+def _softmax_sample(
+    positions: List[_PositionInfo],
+    k: int,
+    temperature: float,
+    rng: random.Random,
+) -> List[_PositionInfo]:
+    """Sample *k* positions without replacement using softmax weights.
+
+    Weights are derived from ``ddG / temperature`` via the softmax
+    function (numerically stabilised).  Uses *rng* for deterministic
+    reproducibility.
+    """
+    if k >= len(positions):
+        return list(positions)
+
+    scaled = [p.ddG / temperature for p in positions]
+    max_scaled = max(scaled)
+    weights = [math.exp(s - max_scaled) for s in scaled]
+
+    remaining = list(range(len(positions)))
+    remaining_weights = list(weights)
+    sampled: List[_PositionInfo] = []
+
+    for _ in range(k):
+        total = sum(remaining_weights)
+        r = rng.random() * total
+        cumulative = 0.0
+        for j, w in enumerate(remaining_weights):
+            cumulative += w
+            if cumulative >= r:
+                sampled.append(positions[remaining[j]])
+                remaining.pop(j)
+                remaining_weights.pop(j)
+                break
+
+    return sampled
 
 
 def _write_cycle_output(
@@ -502,6 +587,9 @@ def _write_summary_json(
         "beam_width": config.beam_width,
         "beam_expansion": config.beam_expansion,
         "ddg_threshold": config.ddg_threshold,
+        "position_sampling": config.position_sampling,
+        "sampling_temperature": config.sampling_temperature,
+        "regression_tolerance": config.regression_tolerance,
         "campaigns": campaigns_data,
     }
     path.write_text(json.dumps(summary, indent=2))
@@ -752,15 +840,21 @@ def optimize(
                     f"cycle {cycle_num}/{config.design_cycles}"
                 )
 
-                # Alanine scan to find bad positions
-                dG_before, bad_positions = _analyze_and_find_bad(
+                # Alanine scan to find candidate positions
+                dG_before, positions = _analyze_and_find_positions(
                     current_pdb, config, relaxer, pool
                 )
 
-                if not bad_positions:
+                if not positions:
+                    if config.position_sampling == "threshold":
+                        msg = (
+                            f"no positions with "
+                            f"ddG >= {config.ddg_threshold}"
+                        )
+                    else:
+                        msg = "no interface positions found"
                     logger.info(
-                        f"Cycle {cycle_num}: no bad positions "
-                        f"(ddG >= {config.ddg_threshold}), skipping"
+                        f"Cycle {cycle_num}: {msg}, skipping"
                     )
                     campaign_cycles.append(
                         CycleResult(
@@ -790,15 +884,26 @@ def optimize(
                 )
 
                 # Build beam expansion tasks (sample without replacement)
-                n_tasks = min(config.beam_expansion, len(bad_positions))
+                n_tasks = min(config.beam_expansion, len(positions))
                 if n_tasks < config.beam_expansion:
                     logger.info(
-                        f"Cycle {cycle_num}: {len(bad_positions)} bad "
+                        f"Cycle {cycle_num}: {len(positions)} "
                         f"positions < beam_expansion "
                         f"({config.beam_expansion}), "
                         f"running {n_tasks} expansions"
                     )
-                sampled_positions = rng.sample(bad_positions, k=n_tasks)
+                if config.position_sampling == "weighted":
+                    sampled = _softmax_sample(
+                        positions,
+                        n_tasks,
+                        config.sampling_temperature,
+                        rng,
+                    )
+                else:
+                    sampled = rng.sample(positions, k=n_tasks)
+                sampled_positions = [
+                    (p.chain_id, p.resnum, p.icode) for p in sampled
+                ]
                 tasks = []
                 for exp_idx, pos in enumerate(sampled_positions):
                     exp_seed = _compose_seed(cycle_seed, exp_idx)
@@ -843,7 +948,7 @@ def optimize(
                             dG_after=dG_before,
                             delta_dG=0.0,
                             n_expansions=len(tasks),
-                            n_bad_positions=len(bad_positions),
+                            n_bad_positions=len(positions),
                             selected_position=None,
                         )
                     )
@@ -860,7 +965,7 @@ def optimize(
                     f"{best.target_icode}".rstrip()
                 )
 
-                # Write cycle output
+                # Write cycle output (always, so user can inspect)
                 if campaign_dir is not None:
                     cycle_dir = campaign_dir / f"cycle_{cycle_num:02d}"
                     _write_cycle_output(
@@ -869,13 +974,26 @@ def optimize(
                         config.beam_width,
                         cycle_num=cycle_num,
                         dG_before=dG_before,
-                        n_bad_positions=len(bad_positions),
+                        n_bad_positions=len(positions),
                         sequences_before=sequences_before,
                         scan_chains=config.scan_chains,
                     )
 
-                # Keep the best structure for next cycle
-                current_pdb = best.pdb_string
+                # Regression guard: reject if worse than parent
+                accepted = (
+                    dG_after
+                    <= dG_before + config.regression_tolerance
+                )
+                if accepted:
+                    current_pdb = best.pdb_string
+                else:
+                    logger.info(
+                        f"Cycle {cycle_num}: best expansion "
+                        f"(dG={dG_after:.2f}) worse than parent "
+                        f"(dG={dG_before:.2f}), keeping parent"
+                    )
+                    dG_after = dG_before
+                    best_pos = None
 
                 delta = dG_after - dG_before
                 logger.info(
@@ -891,9 +1009,13 @@ def optimize(
                         dG_after=dG_after,
                         delta_dG=delta,
                         n_expansions=len(tasks),
-                        n_bad_positions=len(bad_positions),
+                        n_bad_positions=len(positions),
                         selected_position=best_pos,
-                        sequence=best.metadata.get("sequence"),
+                        sequence=(
+                            best.metadata.get("sequence")
+                            if accepted
+                            else None
+                        ),
                     )
                 )
                 progress.advance_cycle(dG_after)

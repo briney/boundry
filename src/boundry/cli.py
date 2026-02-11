@@ -1039,6 +1039,27 @@ def optimize(
         "--ddg-threshold",
         help="Alanine scan ddG threshold for bad positions (kcal/mol)",
     ),
+    position_sampling: str = typer.Option(
+        "weighted",
+        "--position-sampling",
+        help=(
+            "'weighted' (softmax over ddG) or 'threshold' "
+            "(uniform from positions above ddg-threshold)"
+        ),
+    ),
+    sampling_temperature: float = typer.Option(
+        1.0,
+        "--sampling-temperature",
+        help="Softmax temperature for weighted sampling",
+    ),
+    regression_tolerance: float = typer.Option(
+        0.0,
+        "--regression-tolerance",
+        help=(
+            "Maximum allowed dG increase (kcal/mol) "
+            "when accepting designs"
+        ),
+    ),
     relax_iterations: int = typer.Option(
         10,
         "--relax-iterations",
@@ -1120,6 +1141,9 @@ def optimize(
         beam_width=beam_width,
         beam_expansion=beam_expansion,
         ddg_threshold=ddg_threshold,
+        position_sampling=position_sampling,
+        sampling_temperature=sampling_temperature,
+        regression_tolerance=regression_tolerance,
         design=DesignConfig(
             model_type=model_type,
             temperature=temperature,
