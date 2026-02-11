@@ -123,6 +123,47 @@ class _BeamExpansionResult:
 _optimize_worker_cache: Dict[str, Any] = {}
 
 
+def _get_aa_at_position(
+    pdb_string: str,
+    chain: str,
+    resnum: int,
+    icode: str,
+) -> str:
+    """Return 1-letter AA at a specific position by scanning CA ATOM lines.
+
+    Returns ``"X"`` if the position is not found.
+    """
+    from boundry.workflow_metadata import _RESTYPE_3TO1
+
+    target_icode = icode.strip()
+    for line in pdb_string.splitlines():
+        if not line.startswith("ATOM"):
+            continue
+        if line[12:16].strip() != "CA":
+            continue
+        if line[21] != chain:
+            continue
+        try:
+            line_resnum = int(line[22:26].strip())
+        except ValueError:
+            continue
+        line_icode = (line[26] if len(line) > 26 else " ").strip()
+        if line_resnum == resnum and line_icode == target_icode:
+            resname = line[17:20].strip()
+            return _RESTYPE_3TO1.get(resname, "X")
+    return "X"
+
+
+def _filter_sequences(
+    sequences: Dict[str, str],
+    scan_chains: Optional[List[str]],
+) -> Dict[str, str]:
+    """Filter sequences dict to *scan_chains* (passthrough when ``None``)."""
+    if scan_chains is None:
+        return sequences
+    return {ch: seq for ch, seq in sequences.items() if ch in scan_chains}
+
+
 def _execute_beam_expansion(task: _BeamExpansionTask) -> _BeamExpansionResult:
     """Execute a single beam expansion in a worker process.
 
@@ -221,9 +262,37 @@ def _execute_beam_expansion(task: _BeamExpansionTask) -> _BeamExpansionResult:
         dG = be_result.binding_energy
         sequence = design_result.get("sequence", "")
 
+        # Extract AA change and chain sequences
+        old_aa = _get_aa_at_position(
+            task.parent_pdb_string,
+            task.target_chain,
+            task.target_resnum,
+            task.target_icode,
+        )
+        new_aa = _get_aa_at_position(
+            current_pdb,
+            task.target_chain,
+            task.target_resnum,
+            task.target_icode,
+        )
+
+        from boundry.workflow_metadata import (
+            _residue_map_to_sequences,
+            extract_residue_map,
+        )
+
+        sequences = _residue_map_to_sequences(
+            extract_residue_map(current_pdb)
+        )
+
         return _BeamExpansionResult(
             pdb_string=current_pdb,
-            metadata={"sequence": sequence},
+            metadata={
+                "sequence": sequence,
+                "old_aa": old_aa,
+                "new_aa": new_aa,
+                "sequences": sequences,
+            },
             dG=dG,
             target_chain=task.target_chain,
             target_resnum=task.target_resnum,
@@ -331,6 +400,8 @@ def _write_cycle_output(
     cycle_num: int,
     dG_before: float,
     n_bad_positions: int,
+    sequences_before: Optional[Dict[str, str]] = None,
+    scan_chains: Optional[List[str]] = None,
 ) -> None:
     """Write cycle output: top beam_width PDBs + others + summary JSON."""
     cycle_dir.mkdir(parents=True, exist_ok=True)
@@ -355,23 +426,28 @@ def _write_cycle_output(
 
         filepath.write_text(result.pdb_string)
 
-        rankings.append(
-            {
-                "rank": rank,
-                "dG": result.dG,
-                "delta_dG": result.dG - dG_before,
-                "position": position_str,
-                "file": (
-                    filename
-                    if rank <= beam_width
-                    else f"other/{filename}"
-                ),
-            }
-        )
+        entry: Dict[str, Any] = {
+            "rank": rank,
+            "dG": result.dG,
+            "delta_dG": result.dG - dG_before,
+            "position": position_str,
+            "old_aa": result.metadata.get("old_aa"),
+            "new_aa": result.metadata.get("new_aa"),
+            "sequences_after": _filter_sequences(
+                result.metadata.get("sequences", {}),
+                scan_chains,
+            ),
+            "file": (
+                filename
+                if rank <= beam_width
+                else f"other/{filename}"
+            ),
+        }
+        rankings.append(entry)
 
     # Write cycle_summary.json
     dG_after = scored_results[0][0].dG if scored_results else None
-    summary = {
+    summary: Dict[str, Any] = {
         "cycle": cycle_num,
         "dG_before": dG_before,
         "dG_after": dG_after,
@@ -379,6 +455,7 @@ def _write_cycle_output(
             (dG_after - dG_before) if dG_after is not None else None
         ),
         "n_bad_positions": n_bad_positions,
+        "sequences_before": sequences_before,
         "rankings": rankings,
     }
     (cycle_dir / "cycle_summary.json").write_text(
@@ -699,6 +776,19 @@ def optimize(
                     progress.advance_cycle(dG_before)
                     continue
 
+                # Compute sequences before design for this cycle
+                from boundry.workflow_metadata import (
+                    _residue_map_to_sequences,
+                    extract_residue_map,
+                )
+
+                all_sequences = _residue_map_to_sequences(
+                    extract_residue_map(current_pdb)
+                )
+                sequences_before = _filter_sequences(
+                    all_sequences, config.scan_chains
+                )
+
                 # Build beam expansion tasks
                 tasks = []
                 for exp_idx in range(config.beam_expansion):
@@ -772,6 +862,8 @@ def optimize(
                         cycle_num=cycle_num,
                         dG_before=dG_before,
                         n_bad_positions=len(bad_positions),
+                        sequences_before=sequences_before,
+                        scan_chains=config.scan_chains,
                     )
 
                 # Keep the best structure for next cycle

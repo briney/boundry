@@ -22,6 +22,8 @@ from boundry.optimize import (
     _BeamExpansionResult,
     _BeamExpansionTask,
     _compose_seed,
+    _filter_sequences,
+    _get_aa_at_position,
 )
 
 runner = CliRunner()
@@ -363,7 +365,12 @@ class TestOptimize:
 
         expansion_result = _BeamExpansionResult(
             pdb_string=pdb,
-            metadata={"sequence": "AAA"},
+            metadata={
+                "sequence": "AAA",
+                "old_aa": "G",
+                "new_aa": "S",
+                "sequences": {"H": "MKTLV", "L": "DIQMT"},
+            },
             dG=-12.0,
             target_chain="H",
             target_resnum=52,
@@ -595,11 +602,17 @@ class TestWriteCycleOutput:
                 dG=-15.0 + i,
                 target_chain="H",
                 target_resnum=50 + i,
+                metadata={
+                    "old_aa": "G",
+                    "new_aa": chr(ord("A") + i),
+                    "sequences": {"H": f"SEQ{i}", "L": "DIQMT"},
+                },
             )
             results.append((r, i))
 
         cycle_dir = tmp_path / "cycle_01"
         dG_before = -10.0
+        seq_before = {"H": "BEFORE", "L": "DIQMT"}
         _write_cycle_output(
             cycle_dir,
             results,
@@ -607,6 +620,7 @@ class TestWriteCycleOutput:
             cycle_num=1,
             dG_before=dG_before,
             n_bad_positions=4,
+            sequences_before=seq_before,
         )
 
         # Top 3 in cycle dir
@@ -627,9 +641,16 @@ class TestWriteCycleOutput:
         assert summary["dG_after"] == -15.0
         assert summary["delta_dG"] == -15.0 - dG_before
         assert summary["n_bad_positions"] == 4
+        assert summary["sequences_before"] == seq_before
         assert len(summary["rankings"]) == 5
         assert summary["rankings"][0]["rank"] == 1
         assert summary["rankings"][0]["delta_dG"] == -15.0 - dG_before
+        assert summary["rankings"][0]["old_aa"] == "G"
+        assert summary["rankings"][0]["new_aa"] == "A"
+        assert summary["rankings"][0]["sequences_after"] == {
+            "H": "SEQ0",
+            "L": "DIQMT",
+        }
 
 
 class TestWriteSummaryJson:
@@ -672,3 +693,106 @@ class TestWriteSummaryJson:
         assert data["delta_dG"] == -5.0
         assert len(data["campaigns"]) == 1
         assert len(data["campaigns"][0]["cycles"]) == 1
+
+
+# ------------------------------------------------------------------
+# _get_aa_at_position
+# ------------------------------------------------------------------
+
+
+class TestGetAaAtPosition:
+    """Tests for the per-position AA lookup helper."""
+
+    PDB = (
+        "ATOM      1  N   ALA H  10       0.0  0.0  0.0  1.00  0.00\n"
+        "ATOM      2  CA  ALA H  10       1.0  0.0  0.0  1.00  0.00\n"
+        "ATOM      3  N   GLY H  11       2.0  0.0  0.0  1.00  0.00\n"
+        "ATOM      4  CA  GLY H  11       3.0  0.0  0.0  1.00  0.00\n"
+        "ATOM      5  CA  SER L  20       4.0  0.0  0.0  1.00  0.00\n"
+        "END\n"
+    )
+
+    def test_finds_residue(self):
+        assert _get_aa_at_position(self.PDB, "H", 10, "") == "A"
+        assert _get_aa_at_position(self.PDB, "H", 11, "") == "G"
+        assert _get_aa_at_position(self.PDB, "L", 20, "") == "S"
+
+    def test_missing_returns_x(self):
+        assert _get_aa_at_position(self.PDB, "H", 99, "") == "X"
+        assert _get_aa_at_position(self.PDB, "Z", 10, "") == "X"
+
+    def test_icode_matching(self):
+        pdb_icode = (
+            "ATOM      1  CA  ALA H  10A      0.0  0.0  0.0  1.00  0.00\n"
+            "ATOM      2  CA  GLY H  10       1.0  0.0  0.0  1.00  0.00\n"
+        )
+        assert _get_aa_at_position(pdb_icode, "H", 10, "A") == "A"
+        assert _get_aa_at_position(pdb_icode, "H", 10, "") == "G"
+
+
+# ------------------------------------------------------------------
+# _filter_sequences
+# ------------------------------------------------------------------
+
+
+class TestFilterSequences:
+    """Tests for the scan_chains filtering helper."""
+
+    def test_none_passthrough(self):
+        seqs = {"H": "AAA", "L": "BBB", "A": "CCC"}
+        assert _filter_sequences(seqs, None) == seqs
+
+    def test_filters_to_scan_chains(self):
+        seqs = {"H": "AAA", "L": "BBB", "A": "CCC"}
+        assert _filter_sequences(seqs, ["H", "L"]) == {
+            "H": "AAA",
+            "L": "BBB",
+        }
+
+    def test_missing_chain_ignored(self):
+        seqs = {"H": "AAA"}
+        assert _filter_sequences(seqs, ["H", "L"]) == {"H": "AAA"}
+
+
+# ------------------------------------------------------------------
+# scan_chains filtering in _write_cycle_output
+# ------------------------------------------------------------------
+
+
+class TestWriteCycleOutputScanChains:
+    """Tests that scan_chains filters sequences_after."""
+
+    def test_sequences_after_filtered(self, tmp_path):
+        from boundry.optimize import _write_cycle_output
+
+        r = _BeamExpansionResult(
+            pdb_string="ATOM 0\nEND\n",
+            dG=-15.0,
+            target_chain="H",
+            target_resnum=50,
+            metadata={
+                "old_aa": "G",
+                "new_aa": "S",
+                "sequences": {"H": "AAA", "L": "BBB", "A": "CCC"},
+            },
+        )
+
+        cycle_dir = tmp_path / "cycle_filtered"
+        _write_cycle_output(
+            cycle_dir,
+            [(r, 0)],
+            beam_width=1,
+            cycle_num=1,
+            dG_before=-10.0,
+            n_bad_positions=1,
+            sequences_before={"H": "OLD", "L": "OLD2"},
+            scan_chains=["H", "L"],
+        )
+
+        summary = json.loads(
+            (cycle_dir / "cycle_summary.json").read_text()
+        )
+        after = summary["rankings"][0]["sequences_after"]
+        assert "H" in after
+        assert "L" in after
+        assert "A" not in after
