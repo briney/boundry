@@ -209,6 +209,12 @@ class Relaxer:
         # Use pdbfixer to add missing atoms and terminal groups
         fixer = PDBFixer(pdbfile=io.StringIO(pdb_string))
         fixer.findMissingResidues()
+        # Clear missing residues — we only want to add missing atoms
+        # to existing residues, not rebuild entire loop segments.
+        # Rebuilding missing residues into chain gaps causes OpenMM
+        # template errors ("missing 1 C atom") because the inserted
+        # residues create malformed bond topologies at gap boundaries.
+        fixer.missingResidues = {}
         fixer.findMissingAtoms()
         fixer.addMissingAtoms()
 
@@ -433,6 +439,9 @@ class Relaxer:
             # Use pdbfixer to handle missing atoms/H
             fixer = PDBFixer(pdbfile=io.StringIO(pdb_string))
             fixer.findMissingResidues()
+            # Don't rebuild missing loop residues — only fix atoms
+            # on existing residues (same rationale as _relax_unconstrained)
+            fixer.missingResidues = {}
             fixer.findMissingAtoms()
             fixer.addMissingAtoms()
 
