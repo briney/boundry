@@ -5,7 +5,7 @@ CLI subcommand for iterative interface design using alanine-scan-guided
 beam search.  Each cycle:
 
 1. Runs an alanine scan to identify destabilising ("bad") positions.
-2. Assigns random bad positions to *beam_expansion* parallel design tasks.
+2. Samples unique bad positions (up to *beam_expansion*) for parallel design tasks.
 3. Designs + relaxes each task in the shared worker pool.
 4. Scores results via binding energy and keeps the top *beam_width*.
 
@@ -789,10 +789,18 @@ def optimize(
                     all_sequences, config.scan_chains
                 )
 
-                # Build beam expansion tasks
+                # Build beam expansion tasks (sample without replacement)
+                n_tasks = min(config.beam_expansion, len(bad_positions))
+                if n_tasks < config.beam_expansion:
+                    logger.info(
+                        f"Cycle {cycle_num}: {len(bad_positions)} bad "
+                        f"positions < beam_expansion "
+                        f"({config.beam_expansion}), "
+                        f"running {n_tasks} expansions"
+                    )
+                sampled_positions = rng.sample(bad_positions, k=n_tasks)
                 tasks = []
-                for exp_idx in range(config.beam_expansion):
-                    pos = rng.choice(bad_positions)
+                for exp_idx, pos in enumerate(sampled_positions):
                     exp_seed = _compose_seed(cycle_seed, exp_idx)
                     tasks.append(
                         _BeamExpansionTask(
@@ -834,7 +842,7 @@ def optimize(
                             dG_before=dG_before,
                             dG_after=dG_before,
                             delta_dG=0.0,
-                            n_expansions=config.beam_expansion,
+                            n_expansions=len(tasks),
                             n_bad_positions=len(bad_positions),
                             selected_position=None,
                         )
@@ -882,7 +890,7 @@ def optimize(
                         dG_before=dG_before,
                         dG_after=dG_after,
                         delta_dG=delta,
-                        n_expansions=config.beam_expansion,
+                        n_expansions=len(tasks),
                         n_bad_positions=len(bad_positions),
                         selected_position=best_pos,
                         sequence=best.metadata.get("sequence"),

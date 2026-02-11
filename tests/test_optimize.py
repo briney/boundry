@@ -796,3 +796,104 @@ class TestWriteCycleOutputScanChains:
         assert "H" in after
         assert "L" in after
         assert "A" not in after
+
+
+# ------------------------------------------------------------------
+# Sampling without replacement
+# ------------------------------------------------------------------
+
+
+class TestSamplingWithoutReplacement:
+    """Tests that beam expansion samples positions without replacement."""
+
+    @patch("boundry.relaxer.Relaxer")
+    @patch("boundry.weights.ensure_weights")
+    @patch("boundry.optimize._score_interface")
+    @patch("boundry.optimize._analyze_and_find_bad")
+    @patch("boundry.operations.relax")
+    @patch("boundry.operations.idealize")
+    @patch("boundry._parallel.WorkPool")
+    def test_caps_tasks_at_bad_positions_count(
+        self,
+        mock_pool_cls,
+        mock_idealize,
+        mock_relax,
+        mock_analyze,
+        mock_score,
+        mock_ensure_weights,
+        mock_relaxer_cls,
+        tmp_path,
+    ):
+        """With beam_expansion=10 and 3 bad positions, only 3 tasks
+        should be submitted, each targeting a unique position."""
+        from boundry.operations import Structure
+        from boundry.optimize import optimize
+
+        pdb = "ATOM mock pdb\nEND\n"
+
+        mock_idealize.return_value = Structure(pdb_string=pdb)
+        mock_relax.return_value = Structure(pdb_string=pdb)
+
+        # score: initial, final
+        mock_score.side_effect = [-10.0, -15.0]
+
+        # 3 bad positions, then no bad (to end after 1 active cycle)
+        mock_analyze.side_effect = [
+            (
+                -10.0,
+                [("H", 50, ""), ("H", 51, ""), ("H", 52, "")],
+            ),
+            (-12.0, []),
+        ]
+
+        # Capture tasks submitted to pool.map
+        captured_tasks = []
+
+        def capture_map(fn, tasks):
+            captured_tasks.extend(tasks)
+            return [
+                _BeamExpansionResult(
+                    pdb_string=pdb,
+                    metadata={
+                        "sequence": "AAA",
+                        "old_aa": "G",
+                        "new_aa": "S",
+                        "sequences": {"H": "MKTLV"},
+                    },
+                    dG=-12.0,
+                    target_chain=t.target_chain,
+                    target_resnum=t.target_resnum,
+                    target_icode=t.target_icode,
+                )
+                for t in tasks
+            ]
+
+        mock_pool = MagicMock()
+        mock_pool.__enter__ = MagicMock(return_value=mock_pool)
+        mock_pool.__exit__ = MagicMock(return_value=False)
+        mock_pool.map.side_effect = capture_map
+        mock_pool_cls.return_value = mock_pool
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            design_cycles=2,
+            beam_expansion=10,
+            beam_width=1,
+            seed=42,
+        )
+
+        result = optimize(pdb, config=config, output_dir=tmp_path)
+
+        # Only 3 tasks (capped by number of bad positions)
+        assert len(captured_tasks) == 3
+
+        # All target positions are unique
+        positions = [
+            (t.target_chain, t.target_resnum, t.target_icode)
+            for t in captured_tasks
+        ]
+        assert len(set(positions)) == 3
+
+        # CycleResult records actual task count, not beam_expansion
+        active_cycle = result.campaigns[0].cycles[0]
+        assert active_cycle.n_expansions == 3
