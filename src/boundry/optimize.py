@@ -126,6 +126,7 @@ class _BeamExpansionResult:
     target_resnum: int = 0
     target_icode: str = ""
     error: Optional[str] = None
+    parent_rank: int = 0
 
 
 # Module-level cache for worker-process reuse
@@ -513,6 +514,11 @@ def _write_cycle_output(
 
         entry: Dict[str, Any] = {
             "rank": rank,
+            "prior_rank": (
+                result.parent_rank
+                if result.parent_rank > 0
+                else None
+            ),
             "dG": result.dG,
             "delta_dG": result.dG - dG_before,
             "position": position_str,
@@ -799,7 +805,6 @@ def optimize(
             progress.reset_cycles()
 
             # Relax the starting structure
-            current_pdb = pdb_string
             logger.info(
                 f"Campaign {campaign_num}/{config.n_campaigns}: "
                 f"relaxing ({config.relax_iterations} iterations)"
@@ -814,14 +819,14 @@ def optimize(
                 show_progress=False,
             )
             relaxed = _relax(
-                current_pdb,
+                pdb_string,
                 config=relax_pipeline,
                 n_iterations=config.relax_iterations,
             )
-            current_pdb = relaxed.pdb_string
+            parents = [relaxed.pdb_string]
 
             # Score initial dG
-            initial_dG = _score_interface(current_pdb, config, relaxer)
+            initial_dG = _score_interface(parents[0], config, relaxer)
             logger.info(
                 f"Campaign {campaign_num}: initial dG = {initial_dG:.2f}"
             )
@@ -842,7 +847,7 @@ def optimize(
 
                 # Alanine scan to find candidate positions
                 dG_before, positions = _analyze_and_find_positions(
-                    current_pdb, config, relaxer, pool
+                    parents[0], config, relaxer, pool
                 )
 
                 if not positions:
@@ -877,49 +882,62 @@ def optimize(
                 )
 
                 all_sequences = _residue_map_to_sequences(
-                    extract_residue_map(current_pdb)
+                    extract_residue_map(parents[0])
                 )
                 sequences_before = _filter_sequences(
                     all_sequences, config.scan_chains
                 )
 
                 # Build beam expansion tasks (sample without replacement)
-                n_tasks = min(config.beam_expansion, len(positions))
-                if n_tasks < config.beam_expansion:
+                n_tasks_per_parent = min(
+                    config.beam_expansion, len(positions)
+                )
+                if n_tasks_per_parent < config.beam_expansion:
                     logger.info(
                         f"Cycle {cycle_num}: {len(positions)} "
                         f"positions < beam_expansion "
                         f"({config.beam_expansion}), "
-                        f"running {n_tasks} expansions"
+                        f"running {n_tasks_per_parent} expansions "
+                        f"per parent"
                     )
-                if config.position_sampling == "weighted":
-                    sampled = _softmax_sample(
-                        positions,
-                        n_tasks,
-                        config.sampling_temperature,
-                        rng,
-                    )
-                else:
-                    sampled = rng.sample(positions, k=n_tasks)
-                sampled_positions = [
-                    (p.chain_id, p.resnum, p.icode) for p in sampled
-                ]
                 tasks = []
-                for exp_idx, pos in enumerate(sampled_positions):
-                    exp_seed = _compose_seed(cycle_seed, exp_idx)
-                    tasks.append(
-                        _BeamExpansionTask(
-                            parent_pdb_string=current_pdb,
-                            target_chain=pos[0],
-                            target_resnum=pos[1],
-                            target_icode=pos[2],
-                            relax_config_dict=relax_config_dict,
-                            design_config_dict=design_config_dict,
-                            chain_pairs=config.chain_pairs,
-                            seed=exp_seed,
-                            quiet=config.quiet,
-                        )
+                task_parent_ranks: List[int] = []
+                flat_idx = 0
+                for parent_idx, parent_pdb in enumerate(parents):
+                    # 0 means "no prior cycle" (cycle 1)
+                    parent_rank = (
+                        parent_idx + 1 if cycle_idx > 0 else 0
                     )
+                    if config.position_sampling == "weighted":
+                        sampled = _softmax_sample(
+                            positions,
+                            n_tasks_per_parent,
+                            config.sampling_temperature,
+                            rng,
+                        )
+                    else:
+                        sampled = rng.sample(
+                            positions, k=n_tasks_per_parent
+                        )
+                    for pos in sampled:
+                        exp_seed = _compose_seed(
+                            cycle_seed, flat_idx
+                        )
+                        tasks.append(
+                            _BeamExpansionTask(
+                                parent_pdb_string=parent_pdb,
+                                target_chain=pos.chain_id,
+                                target_resnum=pos.resnum,
+                                target_icode=pos.icode,
+                                relax_config_dict=relax_config_dict,
+                                design_config_dict=design_config_dict,
+                                chain_pairs=config.chain_pairs,
+                                seed=exp_seed,
+                                quiet=config.quiet,
+                            )
+                        )
+                        task_parent_ranks.append(parent_rank)
+                        flat_idx += 1
 
                 # Execute expansions in parallel
                 results = pool.map(_execute_beam_expansion, tasks)
@@ -935,6 +953,7 @@ def optimize(
                         )
                         continue
                     if r.dG is not None:
+                        r.parent_rank = task_parent_ranks[idx]
                         valid_results.append((r, idx))
 
                 if not valid_results:
@@ -985,7 +1004,12 @@ def optimize(
                     <= dG_before + config.regression_tolerance
                 )
                 if accepted:
-                    current_pdb = best.pdb_string
+                    parents = [
+                        r.pdb_string
+                        for r, _ in valid_results[
+                            : config.beam_width
+                        ]
+                    ]
                 else:
                     logger.info(
                         f"Cycle {cycle_num}: best expansion "
@@ -1022,7 +1046,7 @@ def optimize(
 
             # Campaign result
             final_campaign_dG = _score_interface(
-                current_pdb, config, relaxer
+                parents[0], config, relaxer
             )
             campaign_result = CampaignResult(
                 campaign=campaign_num,
@@ -1034,12 +1058,12 @@ def optimize(
 
             # Write campaign final PDB
             if campaign_dir is not None and multi_campaign:
-                (campaign_dir / "final.pdb").write_text(current_pdb)
+                (campaign_dir / "final.pdb").write_text(parents[0])
 
             # Track global best
             if global_best_dG is None or final_campaign_dG < global_best_dG:
                 global_best_dG = final_campaign_dG
-                global_best_pdb = current_pdb
+                global_best_pdb = parents[0]
 
             progress.advance_campaign()
             logger.info(

@@ -654,6 +654,47 @@ class TestWriteCycleOutput:
             "H": "SEQ0",
             "L": "DIQMT",
         }
+        # Cycle 1 (no parent_rank set) -> prior_rank is null
+        for entry in summary["rankings"]:
+            assert entry["prior_rank"] is None
+
+    def test_prior_rank_in_cycle_summary(self, tmp_path):
+        """Results with parent_rank set should produce integer prior_rank."""
+        from boundry.optimize import _write_cycle_output
+
+        results = []
+        for i, prank in enumerate([1, 1, 2, 2]):
+            r = _BeamExpansionResult(
+                pdb_string=f"ATOM {i}\nEND\n",
+                dG=-15.0 + i,
+                target_chain="H",
+                target_resnum=50 + i,
+                metadata={
+                    "old_aa": "G",
+                    "new_aa": "S",
+                    "sequences": {"H": f"SEQ{i}"},
+                },
+                parent_rank=prank,
+            )
+            results.append((r, i))
+
+        cycle_dir = tmp_path / "cycle_02"
+        _write_cycle_output(
+            cycle_dir,
+            results,
+            beam_width=2,
+            cycle_num=2,
+            dG_before=-10.0,
+            n_bad_positions=3,
+        )
+
+        summary = json.loads(
+            (cycle_dir / "cycle_summary.json").read_text()
+        )
+        prior_ranks = [e["prior_rank"] for e in summary["rankings"]]
+        # All should be integers (not None)
+        assert all(isinstance(pr, int) for pr in prior_ranks)
+        assert set(prior_ranks) == {1, 2}
 
 
 class TestWriteSummaryJson:
@@ -1290,3 +1331,327 @@ class TestCLIOptimizeNewFlags:
         assert "--position-sampling" in result.output
         assert "--sampling-temperature" in result.output
         assert "--regression-tolerance" in result.output
+
+
+# ------------------------------------------------------------------
+# Multi-parent beam expansion
+# ------------------------------------------------------------------
+
+
+class TestMultiParentExpansion:
+    """Tests for multi-parent beam search expansion."""
+
+    @patch("boundry.relaxer.Relaxer")
+    @patch("boundry.weights.ensure_weights")
+    @patch("boundry.optimize._score_interface")
+    @patch("boundry.optimize._analyze_and_find_positions")
+    @patch("boundry.operations.relax")
+    @patch("boundry.operations.idealize")
+    @patch("boundry._parallel.WorkPool")
+    def test_multi_parent_expansion_count(
+        self,
+        mock_pool_cls,
+        mock_idealize,
+        mock_relax,
+        mock_analyze,
+        mock_score,
+        mock_ensure_weights,
+        mock_relaxer_cls,
+        tmp_path,
+    ):
+        """With beam_width=2, beam_expansion=3, cycle 2 should create
+        6 tasks (2 parents x 3 expansions each)."""
+        from boundry.operations import Structure
+        from boundry.optimize import optimize
+
+        pdb = "ATOM mock pdb\nEND\n"
+        pdb_a = "ATOM parent A\nEND\n"
+        pdb_b = "ATOM parent B\nEND\n"
+
+        mock_idealize.return_value = Structure(pdb_string=pdb)
+        mock_relax.return_value = Structure(pdb_string=pdb)
+
+        # score: initial, final
+        mock_score.side_effect = [-10.0, -18.0]
+
+        # Cycle 1: 5 positions, cycle 2: 5 positions
+        positions = [
+            _PositionInfo("H", 50, "", 3.0),
+            _PositionInfo("H", 51, "", 2.5),
+            _PositionInfo("H", 52, "", 2.0),
+            _PositionInfo("H", 53, "", 1.5),
+            _PositionInfo("H", 54, "", 1.0),
+        ]
+        mock_analyze.side_effect = [
+            (-10.0, list(positions)),
+            (-14.0, list(positions)),
+        ]
+
+        captured_tasks_per_cycle = []
+
+        def capture_map(fn, tasks):
+            tasks = list(tasks)
+            captured_tasks_per_cycle.append(tasks)
+            # Return 2 good results so beam_width=2 keeps 2 parents
+            results = []
+            for i, t in enumerate(tasks):
+                results.append(
+                    _BeamExpansionResult(
+                        pdb_string=(
+                            pdb_a if i % 2 == 0 else pdb_b
+                        ),
+                        metadata={
+                            "sequence": f"SEQ{i}",
+                            "old_aa": "G",
+                            "new_aa": "S",
+                            "sequences": {"H": f"MKTLV{i}"},
+                        },
+                        dG=-14.0 - i * 0.1,
+                        target_chain=t.target_chain,
+                        target_resnum=t.target_resnum,
+                        target_icode=t.target_icode,
+                    )
+                )
+            return results
+
+        mock_pool = MagicMock()
+        mock_pool.__enter__ = MagicMock(return_value=mock_pool)
+        mock_pool.__exit__ = MagicMock(return_value=False)
+        mock_pool.map.side_effect = capture_map
+        mock_pool_cls.return_value = mock_pool
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            design_cycles=2,
+            beam_expansion=3,
+            beam_width=2,
+            seed=42,
+        )
+
+        optimize(pdb, config=config, output_dir=tmp_path)
+
+        # Cycle 1: 1 parent x 3 = 3 tasks
+        assert len(captured_tasks_per_cycle[0]) == 3
+        # All tasks share same parent PDB
+        parent_pdbs_c1 = set(
+            t.parent_pdb_string
+            for t in captured_tasks_per_cycle[0]
+        )
+        assert len(parent_pdbs_c1) == 1
+
+        # Cycle 2: 2 parents x 3 = 6 tasks
+        assert len(captured_tasks_per_cycle[1]) == 6
+        # Tasks should have 2 distinct parent PDB strings
+        parent_pdbs_c2 = set(
+            t.parent_pdb_string
+            for t in captured_tasks_per_cycle[1]
+        )
+        assert len(parent_pdbs_c2) == 2
+
+    @patch("boundry.relaxer.Relaxer")
+    @patch("boundry.weights.ensure_weights")
+    @patch("boundry.optimize._score_interface")
+    @patch("boundry.optimize._analyze_and_find_positions")
+    @patch("boundry.operations.relax")
+    @patch("boundry.operations.idealize")
+    @patch("boundry._parallel.WorkPool")
+    def test_prior_rank_in_cycle_summary_json(
+        self,
+        mock_pool_cls,
+        mock_idealize,
+        mock_relax,
+        mock_analyze,
+        mock_score,
+        mock_ensure_weights,
+        mock_relaxer_cls,
+        tmp_path,
+    ):
+        """Cycle 1 rankings have prior_rank: null, cycle 2 have
+        integer prior_rank values."""
+        from boundry.operations import Structure
+        from boundry.optimize import optimize
+
+        pdb = "ATOM mock pdb\nEND\n"
+
+        mock_idealize.return_value = Structure(pdb_string=pdb)
+        mock_relax.return_value = Structure(pdb_string=pdb)
+
+        mock_score.side_effect = [-10.0, -18.0]
+
+        positions = [
+            _PositionInfo("H", 50, "", 3.0),
+            _PositionInfo("H", 51, "", 2.5),
+            _PositionInfo("H", 52, "", 2.0),
+        ]
+        mock_analyze.side_effect = [
+            (-10.0, list(positions)),
+            (-14.0, list(positions)),
+        ]
+
+        call_count = [0]
+
+        def capture_map(fn, tasks):
+            tasks = list(tasks)
+            call_count[0] += 1
+            results = []
+            for i, t in enumerate(tasks):
+                results.append(
+                    _BeamExpansionResult(
+                        pdb_string=f"ATOM result {call_count[0]}_{i}\nEND\n",
+                        metadata={
+                            "sequence": f"SEQ{i}",
+                            "old_aa": "G",
+                            "new_aa": "S",
+                            "sequences": {"H": f"MKTLV{i}"},
+                        },
+                        dG=-14.0 - i * 0.1,
+                        target_chain=t.target_chain,
+                        target_resnum=t.target_resnum,
+                        target_icode=t.target_icode,
+                    )
+                )
+            return results
+
+        mock_pool = MagicMock()
+        mock_pool.__enter__ = MagicMock(return_value=mock_pool)
+        mock_pool.__exit__ = MagicMock(return_value=False)
+        mock_pool.map.side_effect = capture_map
+        mock_pool_cls.return_value = mock_pool
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            design_cycles=2,
+            beam_expansion=2,
+            beam_width=2,
+            seed=42,
+        )
+
+        optimize(pdb, config=config, output_dir=tmp_path)
+
+        # Cycle 1: prior_rank should be null (parent_rank=0)
+        c1_summary = json.loads(
+            (tmp_path / "cycle_01" / "cycle_summary.json").read_text()
+        )
+        for entry in c1_summary["rankings"]:
+            assert entry["prior_rank"] is None
+
+        # Cycle 2: prior_rank should be integers
+        c2_summary = json.loads(
+            (tmp_path / "cycle_02" / "cycle_summary.json").read_text()
+        )
+        for entry in c2_summary["rankings"]:
+            assert isinstance(entry["prior_rank"], int)
+            assert entry["prior_rank"] >= 1
+
+    @patch("boundry.relaxer.Relaxer")
+    @patch("boundry.weights.ensure_weights")
+    @patch("boundry.optimize._score_interface")
+    @patch("boundry.optimize._analyze_and_find_positions")
+    @patch("boundry.operations.relax")
+    @patch("boundry.operations.idealize")
+    @patch("boundry._parallel.WorkPool")
+    def test_regression_guard_preserves_all_parents(
+        self,
+        mock_pool_cls,
+        mock_idealize,
+        mock_relax,
+        mock_analyze,
+        mock_score,
+        mock_ensure_weights,
+        mock_relaxer_cls,
+        tmp_path,
+    ):
+        """When a cycle is rejected, all parents should be preserved
+        for the next cycle."""
+        from boundry.operations import Structure
+        from boundry.optimize import optimize
+
+        pdb = "ATOM mock pdb\nEND\n"
+        pdb_a = "ATOM parent A\nEND\n"
+        pdb_b = "ATOM parent B\nEND\n"
+
+        mock_idealize.return_value = Structure(pdb_string=pdb)
+        mock_relax.return_value = Structure(pdb_string=pdb)
+
+        mock_score.side_effect = [-10.0, -14.0]
+
+        positions = [
+            _PositionInfo("H", 50, "", 3.0),
+            _PositionInfo("H", 51, "", 2.5),
+            _PositionInfo("H", 52, "", 2.0),
+        ]
+        mock_analyze.side_effect = [
+            (-10.0, list(positions)),
+            (-14.0, list(positions)),  # cycle 2 (rejected)
+            (-14.0, list(positions)),  # cycle 3
+        ]
+
+        captured_tasks_per_cycle = []
+        call_count = [0]
+
+        def capture_map(fn, tasks):
+            tasks = list(tasks)
+            captured_tasks_per_cycle.append(tasks)
+            call_count[0] += 1
+            results = []
+            for i, t in enumerate(tasks):
+                if call_count[0] == 1:
+                    # Cycle 1: good results (accepted)
+                    dG = -14.0 - i * 0.1
+                    pdb_out = pdb_a if i % 2 == 0 else pdb_b
+                elif call_count[0] == 2:
+                    # Cycle 2: worse results (rejected)
+                    dG = -5.0
+                    pdb_out = f"ATOM worse {i}\nEND\n"
+                else:
+                    # Cycle 3: good results
+                    dG = -16.0 - i * 0.1
+                    pdb_out = f"ATOM better {i}\nEND\n"
+                results.append(
+                    _BeamExpansionResult(
+                        pdb_string=pdb_out,
+                        metadata={
+                            "sequence": f"SEQ{i}",
+                            "old_aa": "G",
+                            "new_aa": "S",
+                            "sequences": {"H": f"MKTLV{i}"},
+                        },
+                        dG=dG,
+                        target_chain=t.target_chain,
+                        target_resnum=t.target_resnum,
+                        target_icode=t.target_icode,
+                    )
+                )
+            return results
+
+        mock_pool = MagicMock()
+        mock_pool.__enter__ = MagicMock(return_value=mock_pool)
+        mock_pool.__exit__ = MagicMock(return_value=False)
+        mock_pool.map.side_effect = capture_map
+        mock_pool_cls.return_value = mock_pool
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            design_cycles=3,
+            beam_expansion=2,
+            beam_width=2,
+            seed=42,
+            regression_tolerance=0.0,
+        )
+
+        optimize(pdb, config=config, output_dir=tmp_path)
+
+        # Cycle 1: 1 parent x 2 = 2 tasks
+        assert len(captured_tasks_per_cycle[0]) == 2
+
+        # Cycle 2: 2 parents x 2 = 4 tasks (parents from cycle 1)
+        assert len(captured_tasks_per_cycle[1]) == 4
+
+        # Cycle 3: still 2 parents x 2 = 4 tasks
+        # (cycle 2 was rejected, so original 2 parents preserved)
+        assert len(captured_tasks_per_cycle[2]) == 4
+        parent_pdbs_c3 = set(
+            t.parent_pdb_string
+            for t in captured_tasks_per_cycle[2]
+        )
+        assert len(parent_pdbs_c3) == 2
