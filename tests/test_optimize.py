@@ -24,6 +24,7 @@ from boundry.optimize import (
     _BeamExpansionTask,
     _PositionInfo,
     _compose_seed,
+    _cycle_to_dict,
     _filter_sequences,
     _get_aa_at_position,
     _softmax_sample,
@@ -403,10 +404,33 @@ class TestOptimize:
         # Check output files
         assert (tmp_path / "final.pdb").exists()
         assert (tmp_path / "summary.json").exists()
+        assert (tmp_path / "campaign_summary.json").exists()
 
         summary = json.loads((tmp_path / "summary.json").read_text())
         assert summary["initial_dG"] == -10.0
         assert summary["final_dG"] == -15.0
+
+        # Verify summary has new fields
+        camp = summary["campaigns"][0]
+        assert "delta_dG" in camp
+        assert "sequences_before" in camp
+        assert "sequences_after" in camp
+        cycle = camp["cycles"][0]
+        assert "old_aa" in cycle
+        assert "new_aa" in cycle
+        assert "sequences_after" in cycle
+
+        # Verify campaign_summary.json
+        cs = json.loads(
+            (tmp_path / "campaign_summary.json").read_text()
+        )
+        assert cs["campaign"] == 1
+        assert cs["initial_dG"] == -10.0
+        assert cs["final_dG"] == -15.0
+        assert "delta_dG" in cs
+        assert "sequences_before" in cs
+        assert "sequences_after" in cs
+        assert len(cs["cycles"]) == 2
 
     def test_requires_config(self):
         from boundry.optimize import optimize
@@ -472,6 +496,19 @@ class TestOptimize:
         assert (tmp_path / "campaign_01").is_dir()
         assert (tmp_path / "campaign_02").is_dir()
         assert (tmp_path / "final.pdb").exists()
+
+        # Each campaign directory should have campaign_summary.json
+        for camp_dir in ["campaign_01", "campaign_02"]:
+            cs_path = tmp_path / camp_dir / "campaign_summary.json"
+            assert cs_path.exists()
+            cs = json.loads(cs_path.read_text())
+            assert "campaign" in cs
+            assert "initial_dG" in cs
+            assert "final_dG" in cs
+            assert "delta_dG" in cs
+            assert "sequences_before" in cs
+            assert "sequences_after" in cs
+            assert "cycles" in cs
 
 
 # ------------------------------------------------------------------
@@ -719,8 +756,23 @@ class TestWriteSummaryJson:
                             n_expansions=25,
                             n_bad_positions=5,
                             selected_position="H:52",
+                            old_aa="G",
+                            new_aa="S",
+                            sequence="MKTLV",
+                            sequences_after={
+                                "H": "MKTLV",
+                                "L": "DIQMT",
+                            },
                         ),
                     ],
+                    sequences_before={
+                        "H": "BEFORE",
+                        "L": "DIQMT",
+                    },
+                    sequences_after={
+                        "H": "MKTLV",
+                        "L": "DIQMT",
+                    },
                 ),
             ],
             initial_dG=-10.0,
@@ -736,7 +788,246 @@ class TestWriteSummaryJson:
         assert data["final_dG"] == -15.0
         assert data["delta_dG"] == -5.0
         assert len(data["campaigns"]) == 1
-        assert len(data["campaigns"][0]["cycles"]) == 1
+
+        camp = data["campaigns"][0]
+        assert camp["delta_dG"] == -5.0
+        assert camp["sequences_before"] == {
+            "H": "BEFORE",
+            "L": "DIQMT",
+        }
+        assert camp["sequences_after"] == {
+            "H": "MKTLV",
+            "L": "DIQMT",
+        }
+
+        cycle = camp["cycles"][0]
+        assert cycle["old_aa"] == "G"
+        assert cycle["new_aa"] == "S"
+        assert cycle["sequence"] == "MKTLV"
+        assert cycle["sequences_after"] == {
+            "H": "MKTLV",
+            "L": "DIQMT",
+        }
+
+    def test_skipped_cycle_has_null_fields(self, tmp_path):
+        from boundry.optimize import _write_summary_json
+
+        result = OptimizeResult(
+            structure=MagicMock(),
+            campaigns=[
+                CampaignResult(
+                    campaign=1,
+                    initial_dG=-10.0,
+                    final_dG=-10.0,
+                    cycles=[
+                        CycleResult(
+                            cycle=1,
+                            dG_before=-10.0,
+                            dG_after=-10.0,
+                            delta_dG=0.0,
+                            n_expansions=0,
+                            n_bad_positions=0,
+                            selected_position=None,
+                        ),
+                    ],
+                ),
+            ],
+            initial_dG=-10.0,
+            final_dG=-10.0,
+        )
+
+        config = OptimizeConfig(chain_pairs=[("H", "L")])
+        path = tmp_path / "summary.json"
+        _write_summary_json(path, result, config)
+
+        data = json.loads(path.read_text())
+        cycle = data["campaigns"][0]["cycles"][0]
+        assert cycle["old_aa"] is None
+        assert cycle["new_aa"] is None
+        assert cycle["sequence"] is None
+        assert cycle["sequences_after"] is None
+
+
+# ------------------------------------------------------------------
+# _write_campaign_summary
+# ------------------------------------------------------------------
+
+
+class TestWriteCampaignSummary:
+    """Tests for per-campaign summary writing."""
+
+    def test_writes_valid_json(self, tmp_path):
+        from boundry.optimize import _write_campaign_summary
+
+        cr = CampaignResult(
+            campaign=1,
+            initial_dG=-10.0,
+            final_dG=-15.0,
+            cycles=[
+                CycleResult(
+                    cycle=1,
+                    dG_before=-10.0,
+                    dG_after=-12.0,
+                    delta_dG=-2.0,
+                    n_expansions=25,
+                    n_bad_positions=5,
+                    selected_position="H:52",
+                    old_aa="G",
+                    new_aa="S",
+                    sequence="MKTLV",
+                    sequences_after={"H": "MKTLV", "L": "DIQMT"},
+                ),
+            ],
+            sequences_before={"H": "BEFORE", "L": "DIQMT"},
+            sequences_after={"H": "MKTLV", "L": "DIQMT"},
+        )
+
+        path = tmp_path / "campaign_summary.json"
+        _write_campaign_summary(path, cr)
+
+        data = json.loads(path.read_text())
+        assert data["campaign"] == 1
+        assert data["initial_dG"] == -10.0
+        assert data["final_dG"] == -15.0
+        assert data["delta_dG"] == -5.0
+        assert data["sequences_before"] == {
+            "H": "BEFORE",
+            "L": "DIQMT",
+        }
+        assert data["sequences_after"] == {
+            "H": "MKTLV",
+            "L": "DIQMT",
+        }
+        assert len(data["cycles"]) == 1
+
+        cycle = data["cycles"][0]
+        assert cycle["old_aa"] == "G"
+        assert cycle["new_aa"] == "S"
+        assert cycle["sequence"] == "MKTLV"
+        assert cycle["sequences_after"] == {
+            "H": "MKTLV",
+            "L": "DIQMT",
+        }
+
+    def test_skipped_cycle_has_null_fields(self, tmp_path):
+        from boundry.optimize import _write_campaign_summary
+
+        cr = CampaignResult(
+            campaign=1,
+            initial_dG=-10.0,
+            final_dG=-10.0,
+            cycles=[
+                CycleResult(
+                    cycle=1,
+                    dG_before=-10.0,
+                    dG_after=-10.0,
+                    delta_dG=0.0,
+                    n_expansions=0,
+                    n_bad_positions=0,
+                    selected_position=None,
+                ),
+            ],
+        )
+
+        path = tmp_path / "campaign_summary.json"
+        _write_campaign_summary(path, cr)
+
+        data = json.loads(path.read_text())
+        cycle = data["cycles"][0]
+        assert cycle["old_aa"] is None
+        assert cycle["new_aa"] is None
+        assert cycle["sequence"] is None
+        assert cycle["sequences_after"] is None
+        assert data["sequences_before"] is None
+        assert data["sequences_after"] is None
+
+
+# ------------------------------------------------------------------
+# _cycle_to_dict
+# ------------------------------------------------------------------
+
+
+class TestCycleToDict:
+    """Tests for the cycle serialization helper."""
+
+    def test_all_fields_present(self):
+        cy = CycleResult(
+            cycle=1,
+            dG_before=-10.0,
+            dG_after=-12.0,
+            delta_dG=-2.0,
+            n_expansions=25,
+            n_bad_positions=5,
+            selected_position="H:52",
+            old_aa="G",
+            new_aa="S",
+            sequence="MKTLV",
+            sequences_after={"H": "MKTLV"},
+        )
+        d = _cycle_to_dict(cy)
+        assert d["cycle"] == 1
+        assert d["dG_before"] == -10.0
+        assert d["dG_after"] == -12.0
+        assert d["delta_dG"] == -2.0
+        assert d["n_expansions"] == 25
+        assert d["n_bad_positions"] == 5
+        assert d["selected_position"] == "H:52"
+        assert d["old_aa"] == "G"
+        assert d["new_aa"] == "S"
+        assert d["sequence"] == "MKTLV"
+        assert d["sequences_after"] == {"H": "MKTLV"}
+
+    def test_none_fields(self):
+        cy = CycleResult(
+            cycle=1,
+            dG_before=-10.0,
+            dG_after=-10.0,
+            delta_dG=0.0,
+            n_expansions=0,
+            n_bad_positions=0,
+            selected_position=None,
+        )
+        d = _cycle_to_dict(cy)
+        assert d["old_aa"] is None
+        assert d["new_aa"] is None
+        assert d["sequence"] is None
+        assert d["sequences_after"] is None
+
+
+# ------------------------------------------------------------------
+# Dataclass defaults
+# ------------------------------------------------------------------
+
+
+class TestCycleResultDefaults:
+    """Verify backward compatibility of new CycleResult fields."""
+
+    def test_new_fields_default_to_none(self):
+        cy = CycleResult(
+            cycle=1,
+            dG_before=-10.0,
+            dG_after=-10.0,
+            delta_dG=0.0,
+            n_expansions=0,
+            n_bad_positions=0,
+            selected_position=None,
+        )
+        assert cy.old_aa is None
+        assert cy.new_aa is None
+        assert cy.sequences_after is None
+
+
+class TestCampaignResultDefaults:
+    """Verify backward compatibility of new CampaignResult fields."""
+
+    def test_new_fields_default_to_none(self):
+        cr = CampaignResult(
+            campaign=1,
+            initial_dG=-10.0,
+            final_dG=-15.0,
+        )
+        assert cr.sequences_before is None
+        assert cr.sequences_after is None
 
 
 # ------------------------------------------------------------------

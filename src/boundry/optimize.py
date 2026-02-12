@@ -66,6 +66,9 @@ class CycleResult:
     n_bad_positions: int
     selected_position: Optional[str]
     sequence: Optional[str] = None
+    old_aa: Optional[str] = None
+    new_aa: Optional[str] = None
+    sequences_after: Optional[Dict[str, str]] = None
 
 
 @dataclass
@@ -76,6 +79,8 @@ class CampaignResult:
     initial_dG: float
     final_dG: float
     cycles: List[CycleResult] = field(default_factory=list)
+    sequences_before: Optional[Dict[str, str]] = None
+    sequences_after: Optional[Dict[str, str]] = None
 
 
 @dataclass
@@ -577,6 +582,23 @@ def _write_cycle_output(
     )
 
 
+def _cycle_to_dict(cy: CycleResult) -> Dict[str, Any]:
+    """Serialize a CycleResult to a dict for JSON output."""
+    return {
+        "cycle": cy.cycle,
+        "dG_before": cy.dG_before,
+        "dG_after": cy.dG_after,
+        "delta_dG": cy.delta_dG,
+        "n_expansions": cy.n_expansions,
+        "n_bad_positions": cy.n_bad_positions,
+        "selected_position": cy.selected_position,
+        "old_aa": cy.old_aa,
+        "new_aa": cy.new_aa,
+        "sequence": cy.sequence,
+        "sequences_after": cy.sequences_after,
+    }
+
+
 def _write_summary_json(
     path: Path,
     result: OptimizeResult,
@@ -585,24 +607,16 @@ def _write_summary_json(
     """Write aggregate summary JSON."""
     campaigns_data = []
     for cr in result.campaigns:
-        cycles_data = []
-        for cy in cr.cycles:
-            cycles_data.append(
-                {
-                    "cycle": cy.cycle,
-                    "dG_before": cy.dG_before,
-                    "dG_after": cy.dG_after,
-                    "delta_dG": cy.delta_dG,
-                    "n_expansions": cy.n_expansions,
-                    "n_bad_positions": cy.n_bad_positions,
-                    "selected_position": cy.selected_position,
-                }
-            )
+        cycles_data = [_cycle_to_dict(cy) for cy in cr.cycles]
+        campaign_delta = cr.final_dG - cr.initial_dG
         campaigns_data.append(
             {
                 "campaign": cr.campaign,
                 "initial_dG": cr.initial_dG,
                 "final_dG": cr.final_dG,
+                "delta_dG": campaign_delta,
+                "sequences_before": cr.sequences_before,
+                "sequences_after": cr.sequences_after,
                 "cycles": cycles_data,
             }
         )
@@ -621,6 +635,27 @@ def _write_summary_json(
         "regression_tolerance": config.regression_tolerance,
         "exclude_native": config.exclude_native,
         "campaigns": campaigns_data,
+    }
+    path.write_text(json.dumps(summary, indent=2))
+
+
+def _write_campaign_summary(
+    path: Path,
+    campaign_result: CampaignResult,
+) -> None:
+    """Write per-campaign summary JSON."""
+    summary = {
+        "campaign": campaign_result.campaign,
+        "initial_dG": campaign_result.initial_dG,
+        "final_dG": campaign_result.final_dG,
+        "delta_dG": (
+            campaign_result.final_dG - campaign_result.initial_dG
+        ),
+        "sequences_before": campaign_result.sequences_before,
+        "sequences_after": campaign_result.sequences_after,
+        "cycles": [
+            _cycle_to_dict(cy) for cy in campaign_result.cycles
+        ],
     }
     path.write_text(json.dumps(summary, indent=2))
 
@@ -860,6 +895,19 @@ def optimize(
             if overall_initial_dG is None:
                 overall_initial_dG = initial_dG
 
+            # Capture campaign-level sequences before design
+            from boundry.workflow_metadata import (
+                _residue_map_to_sequences,
+                extract_residue_map,
+            )
+
+            campaign_sequences_before = _filter_sequences(
+                _residue_map_to_sequences(
+                    extract_residue_map(parents[0])
+                ),
+                config.scan_chains,
+            )
+
             campaign_cycles: List[CycleResult] = []
 
             for cycle_idx in range(config.design_cycles):
@@ -1068,6 +1116,24 @@ def optimize(
                             if accepted
                             else None
                         ),
+                        old_aa=(
+                            best.metadata.get("old_aa")
+                            if accepted
+                            else None
+                        ),
+                        new_aa=(
+                            best.metadata.get("new_aa")
+                            if accepted
+                            else None
+                        ),
+                        sequences_after=(
+                            _filter_sequences(
+                                best.metadata.get("sequences", {}),
+                                config.scan_chains,
+                            )
+                            if accepted
+                            else None
+                        ),
                     )
                 )
                 progress.advance_cycle(dG_after)
@@ -1076,17 +1142,30 @@ def optimize(
             final_campaign_dG = _score_interface(
                 parents[0], config, relaxer
             )
+            campaign_sequences_after = _filter_sequences(
+                _residue_map_to_sequences(
+                    extract_residue_map(parents[0])
+                ),
+                config.scan_chains,
+            )
             campaign_result = CampaignResult(
                 campaign=campaign_num,
                 initial_dG=initial_dG,
                 final_dG=final_campaign_dG,
                 cycles=campaign_cycles,
+                sequences_before=campaign_sequences_before,
+                sequences_after=campaign_sequences_after,
             )
             all_campaigns.append(campaign_result)
 
-            # Write campaign final PDB
-            if campaign_dir is not None and multi_campaign:
-                (campaign_dir / "final.pdb").write_text(parents[0])
+            # Write campaign outputs
+            if campaign_dir is not None:
+                if multi_campaign:
+                    (campaign_dir / "final.pdb").write_text(parents[0])
+                _write_campaign_summary(
+                    campaign_dir / "campaign_summary.json",
+                    campaign_result,
+                )
 
             # Track global best
             if global_best_dG is None or final_campaign_dG < global_best_dG:
