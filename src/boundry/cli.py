@@ -1093,6 +1093,11 @@ def optimize(
     no_progress: bool = typer.Option(
         False, "--no-progress", help="Suppress progress bars"
     ),
+    exclude_native: bool = typer.Option(
+        False,
+        "--exclude-native",
+        help="Exclude the native amino acid at each design position",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -1144,6 +1149,7 @@ def optimize(
         position_sampling=position_sampling,
         sampling_temperature=sampling_temperature,
         regression_tolerance=regression_tolerance,
+        exclude_native=exclude_native,
         design=DesignConfig(
             model_type=model_type,
             temperature=temperature,

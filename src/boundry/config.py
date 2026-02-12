@@ -107,6 +107,7 @@ class OptimizeConfig:
     position_sampling: str = "weighted"  # "weighted" | "threshold"
     sampling_temperature: float = 1.0  # softmax temperature (> 0)
     regression_tolerance: float = 0.0  # max dG increase allowed
+    exclude_native: bool = False
     design: "DesignConfig" = field(default_factory=lambda: DesignConfig())
     relax: "RelaxConfig" = field(default_factory=lambda: RelaxConfig())
     idealize: "IdealizeConfig" = field(

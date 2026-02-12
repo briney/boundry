@@ -1655,3 +1655,165 @@ class TestMultiParentExpansion:
             for t in captured_tasks_per_cycle[2]
         )
         assert len(parent_pdbs_c3) == 2
+
+
+# ------------------------------------------------------------------
+# exclude_native
+# ------------------------------------------------------------------
+
+
+class TestExcludeNative:
+    """Tests for the exclude_native feature."""
+
+    def test_config_default_false(self):
+        cfg = OptimizeConfig(chain_pairs=[("H", "L")])
+        assert cfg.exclude_native is False
+
+    def test_config_explicit_true(self):
+        cfg = OptimizeConfig(
+            chain_pairs=[("H", "L")], exclude_native=True
+        )
+        assert cfg.exclude_native is True
+
+    def test_task_default_false(self):
+        task = _BeamExpansionTask(
+            parent_pdb_string="ATOM...",
+            target_chain="H",
+            target_resnum=52,
+            target_icode="",
+            relax_config_dict={},
+            design_config_dict={},
+            chain_pairs=[("H", "L")],
+            seed=42,
+        )
+        assert task.exclude_native is False
+
+    def test_task_explicit_true(self):
+        task = _BeamExpansionTask(
+            parent_pdb_string="ATOM...",
+            target_chain="H",
+            target_resnum=52,
+            target_icode="",
+            relax_config_dict={},
+            design_config_dict={},
+            chain_pairs=[("H", "L")],
+            seed=42,
+            exclude_native=True,
+        )
+        assert task.exclude_native is True
+
+    def test_pickle_safe_with_exclude_native(self):
+        task = _BeamExpansionTask(
+            parent_pdb_string="ATOM...",
+            target_chain="H",
+            target_resnum=52,
+            target_icode="",
+            relax_config_dict={},
+            design_config_dict={},
+            chain_pairs=[("H", "L")],
+            seed=42,
+            exclude_native=True,
+        )
+        roundtripped = pickle.loads(pickle.dumps(task))
+        assert roundtripped.exclude_native is True
+
+    def test_summary_json_includes_field(self, tmp_path):
+        from boundry.optimize import _write_summary_json
+
+        result = OptimizeResult(
+            structure=MagicMock(),
+            campaigns=[],
+            initial_dG=-10.0,
+            final_dG=-15.0,
+        )
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")], exclude_native=True
+        )
+        path = tmp_path / "summary.json"
+        _write_summary_json(path, result, config)
+
+        data = json.loads(path.read_text())
+        assert data["exclude_native"] is True
+
+    def test_cli_help_includes_flag(self):
+        result = runner.invoke(app, ["optimize", "--help"])
+        assert result.exit_code == 0
+        assert "--exclude-native" in result.output
+
+    @patch("boundry.relaxer.Relaxer")
+    @patch("boundry.weights.ensure_weights")
+    @patch("boundry.optimize._score_interface")
+    @patch("boundry.optimize._analyze_and_find_positions")
+    @patch("boundry.operations.relax")
+    @patch("boundry.operations.idealize")
+    @patch("boundry._parallel.WorkPool")
+    def test_tasks_carry_exclude_native(
+        self,
+        mock_pool_cls,
+        mock_idealize,
+        mock_relax,
+        mock_analyze,
+        mock_score,
+        mock_ensure_weights,
+        mock_relaxer_cls,
+        tmp_path,
+    ):
+        """Tasks created by optimize() carry exclude_native from config."""
+        from boundry.operations import Structure
+        from boundry.optimize import optimize
+
+        pdb = "ATOM mock pdb\nEND\n"
+        mock_idealize.return_value = Structure(pdb_string=pdb)
+        mock_relax.return_value = Structure(pdb_string=pdb)
+
+        mock_score.side_effect = [-10.0, -18.0]
+
+        positions = [
+            _PositionInfo("H", 50, "", 3.0),
+            _PositionInfo("H", 51, "", 2.5),
+        ]
+        mock_analyze.return_value = (-10.0, list(positions))
+
+        captured_tasks = []
+
+        def capture_map(fn, tasks):
+            tasks = list(tasks)
+            captured_tasks.extend(tasks)
+            results = []
+            for i, t in enumerate(tasks):
+                results.append(
+                    _BeamExpansionResult(
+                        pdb_string=pdb,
+                        metadata={
+                            "sequence": f"SEQ{i}",
+                            "old_aa": "G",
+                            "new_aa": "S",
+                            "sequences": {"H": f"MKTLV{i}"},
+                        },
+                        dG=-14.0 - i * 0.1,
+                        target_chain=t.target_chain,
+                        target_resnum=t.target_resnum,
+                        target_icode=t.target_icode,
+                    )
+                )
+            return results
+
+        mock_pool = MagicMock()
+        mock_pool.__enter__ = MagicMock(return_value=mock_pool)
+        mock_pool.__exit__ = MagicMock(return_value=False)
+        mock_pool.map.side_effect = capture_map
+        mock_pool_cls.return_value = mock_pool
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            design_cycles=1,
+            beam_expansion=2,
+            seed=42,
+            exclude_native=True,
+        )
+
+        optimize(pdb, config=config, output_dir=tmp_path)
+
+        assert len(captured_tasks) > 0
+        for task in captured_tasks:
+            assert task.exclude_native is True

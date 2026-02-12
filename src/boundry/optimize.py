@@ -113,6 +113,7 @@ class _BeamExpansionTask:
     seed: int
     n_design_iterations: int = 1
     quiet: bool = True
+    exclude_native: bool = False
 
 
 @dataclass
@@ -222,15 +223,37 @@ def _execute_beam_expansion(task: _BeamExpansionTask) -> _BeamExpansionResult:
             f"{task.target_chain}{task.target_resnum}"
             f"{task.target_icode}"
         )
-        design_spec = DesignSpec(
-            residue_specs={
-                key: ResidueSpec(
+        if task.exclude_native:
+            native_aa = _get_aa_at_position(
+                task.parent_pdb_string,
+                task.target_chain,
+                task.target_resnum,
+                task.target_icode,
+            )
+            if native_aa != "X":
+                target_spec = ResidueSpec(
+                    chain=task.target_chain,
+                    resnum=task.target_resnum,
+                    icode=task.target_icode,
+                    mode=ResidueMode.NOTAA,
+                    allowed_aas={native_aa},
+                )
+            else:
+                target_spec = ResidueSpec(
                     chain=task.target_chain,
                     resnum=task.target_resnum,
                     icode=task.target_icode,
                     mode=ResidueMode.ALLAA,
-                ),
-            },
+                )
+        else:
+            target_spec = ResidueSpec(
+                chain=task.target_chain,
+                resnum=task.target_resnum,
+                icode=task.target_icode,
+                mode=ResidueMode.ALLAA,
+            )
+        design_spec = DesignSpec(
+            residue_specs={key: target_spec},
             default_mode=ResidueMode.NATAA,
         )
 
@@ -596,6 +619,7 @@ def _write_summary_json(
         "position_sampling": config.position_sampling,
         "sampling_temperature": config.sampling_temperature,
         "regression_tolerance": config.regression_tolerance,
+        "exclude_native": config.exclude_native,
         "campaigns": campaigns_data,
     }
     path.write_text(json.dumps(summary, indent=2))
@@ -937,6 +961,7 @@ def optimize(
                                 chain_pairs=config.chain_pairs,
                                 seed=exp_seed,
                                 quiet=config.quiet,
+                                exclude_native=config.exclude_native,
                             )
                         )
                         task_parent_ranks.append(parent_rank)
