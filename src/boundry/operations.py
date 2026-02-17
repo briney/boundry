@@ -12,11 +12,12 @@ import logging
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
     from boundry.binding_energy import BindingEnergyResult
     from boundry.config import (
+        DdGConfig,
         DesignConfig,
         IdealizeConfig,
         InterfaceConfig,
@@ -1085,6 +1086,105 @@ def select_positions(
         "selection_order": config.order,
     }
     _propagate_chain_mapping(metadata, input_meta)
+
+    return Structure(
+        pdb_string=pdb_string,
+        metadata=metadata,
+        source_path=source_path,
+    )
+
+
+def ddg(
+    structure: StructureInput,
+    mutations: Optional[List[Dict[str, str]]] = None,
+    mutation_string: Optional[str] = None,
+    config: Optional["DdGConfig"] = None,
+    output_path: Optional[Path] = None,
+) -> Structure:
+    """Compute ddG (mutation scoring) or dG (binding energy).
+
+    When *mutations* or *mutation_string* is provided, computes the ddG
+    of the specified mutations using an MD-ensemble four-state pipeline.
+    When neither is provided, computes the interface dG (binding energy)
+    without mutations.
+
+    Args:
+        structure: Input structure (file path, PDB string, or
+            Structure).
+        mutations: List of mutation dicts (see
+            :func:`boundry.ddg.parse_mutation_dict`).
+        mutation_string: Comma-separated mutation string (e.g.
+            ``"A:L5A,B:W10G"``).
+        config: ddG configuration.  Uses defaults if not provided.
+            Must have ``chain_pairs`` set.
+        output_path: Optional directory for writing ``ddg_results.json``.
+
+    Returns:
+        Structure with ddG/dG results in metadata.
+
+    Raises:
+        ValueError: If ``config.chain_pairs`` is ``None``.
+    """
+    import json
+
+    from boundry.config import DdGConfig
+    from boundry.ddg import (
+        compute_ddg,
+        compute_interface_dg,
+        parse_mutations,
+    )
+
+    if config is None:
+        config = DdGConfig()
+
+    if config.chain_pairs is None:
+        raise ValueError(
+            "chain_pairs is required for ddG computation. "
+            "Set config.chain_pairs or pass a DdGConfig with "
+            "chain_pairs specified."
+        )
+
+    pdb_string, source_path, input_meta = _resolve_input(structure)
+    chain_id_mapping = input_meta.get("chain_id_mapping")
+
+    # Translate CIF chain IDs to PDB IDs
+    if chain_id_mapping and config.chain_pairs:
+        from dataclasses import replace
+
+        config = replace(
+            config,
+            chain_pairs=_translate_chain_pairs(
+                config.chain_pairs, chain_id_mapping
+            ),
+        )
+
+    metadata: Dict[str, Any] = {"operation": "ddg"}
+
+    if mutations is not None or mutation_string is not None:
+        # Mutation mode: compute ddG
+        specs = parse_mutations(
+            mutations=mutations,
+            mutation_string=mutation_string,
+        )
+        result = compute_ddg(pdb_string, specs, config)
+        metadata["ddg"] = result.to_dict()
+        metadata["ddG"] = result.mean_ddG
+        metadata["std_ddG"] = result.std_ddG
+    else:
+        # Binding energy mode: compute dG
+        dG = compute_interface_dg(pdb_string, config)
+        metadata["ddg"] = {"dG": dG}
+        metadata["dG"] = dG
+
+    _propagate_chain_mapping(metadata, input_meta)
+
+    if output_path is not None:
+        out_dir = Path(output_path)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        results_file = out_dir / "ddg_results.json"
+        results_file.write_text(
+            json.dumps(metadata["ddg"], indent=2)
+        )
 
     return Structure(
         pdb_string=pdb_string,

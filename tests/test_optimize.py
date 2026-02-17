@@ -282,7 +282,10 @@ class TestScoreInterface:
         mock_be_result = MagicMock()
         mock_be_result.binding_energy = -12.5
 
-        config = OptimizeConfig(chain_pairs=[("H", "L")])
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            interface_scoring_backend="legacy",
+        )
 
         with patch(
             "boundry.binding_energy.calculate_binding_energy",
@@ -298,7 +301,10 @@ class TestScoreInterface:
         mock_be_result = MagicMock()
         mock_be_result.binding_energy = None
 
-        config = OptimizeConfig(chain_pairs=[("H", "L")])
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            interface_scoring_backend="legacy",
+        )
 
         with patch(
             "boundry.binding_energy.calculate_binding_energy",
@@ -401,6 +407,7 @@ class TestOptimize:
             beam_expansion=1,
             beam_width=1,
             seed=42,
+            interface_scoring_backend="legacy",
         )
 
         from boundry.optimize import optimize
@@ -495,6 +502,7 @@ class TestOptimize:
             n_campaigns=2,
             design_cycles=1,
             seed=42,
+            interface_scoring_backend="legacy",
         )
 
         from boundry.optimize import optimize
@@ -1232,6 +1240,7 @@ class TestSamplingWithoutReplacement:
             beam_expansion=10,
             beam_width=1,
             seed=42,
+            interface_scoring_backend="legacy",
         )
 
         result = optimize(pdb, config=config, output_dir=tmp_path)
@@ -1546,6 +1555,7 @@ class TestRegressionGuard:
             beam_width=1,
             seed=42,
             regression_tolerance=0.0,
+            interface_scoring_backend="legacy",
         )
 
         result = optimize(pdb, config=config, output_dir=tmp_path)
@@ -1619,6 +1629,7 @@ class TestRegressionGuard:
             beam_width=1,
             seed=42,
             regression_tolerance=1.0,
+            interface_scoring_backend="legacy",
         )
 
         result = optimize(pdb, config=config, output_dir=tmp_path)
@@ -1739,6 +1750,7 @@ class TestMultiParentExpansion:
             beam_expansion=3,
             beam_width=2,
             seed=42,
+            interface_scoring_backend="legacy",
         )
 
         optimize(pdb, config=config, output_dir=tmp_path)
@@ -1837,6 +1849,7 @@ class TestMultiParentExpansion:
             beam_expansion=2,
             beam_width=2,
             seed=42,
+            interface_scoring_backend="legacy",
         )
 
         optimize(pdb, config=config, output_dir=tmp_path)
@@ -1950,6 +1963,7 @@ class TestMultiParentExpansion:
             beam_width=2,
             seed=42,
             regression_tolerance=0.0,
+            interface_scoring_backend="legacy",
         )
 
         optimize(pdb, config=config, output_dir=tmp_path)
@@ -2123,6 +2137,7 @@ class TestExcludeNative:
             beam_expansion=2,
             seed=42,
             exclude_native=True,
+            interface_scoring_backend="legacy",
         )
 
         optimize(pdb, config=config, output_dir=tmp_path)
@@ -2130,3 +2145,137 @@ class TestExcludeNative:
         assert len(captured_tasks) > 0
         for task in captured_tasks:
             assert task.exclude_native is True
+
+
+# ------------------------------------------------------------------
+# ddG backend integration
+# ------------------------------------------------------------------
+
+
+class TestScoreInterfaceDdgBackend:
+    """Tests for _score_interface with ddG backend."""
+
+    def test_ddg_backend_calls_compute_interface_dg(self):
+        from boundry.optimize import _score_interface
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            interface_scoring_backend="ddg",
+            ddg=DdGConfig(chain_pairs=[("H", "L")]),
+        )
+
+        with patch(
+            "boundry.ddg.compute_interface_dg",
+            return_value=-18.5,
+        ):
+            dG = _score_interface("ATOM...", config, MagicMock())
+
+        assert dG == -18.5
+
+    def test_legacy_backend_uses_binding_energy(self):
+        from boundry.optimize import _score_interface
+
+        mock_be_result = MagicMock()
+        mock_be_result.binding_energy = -12.5
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            interface_scoring_backend="legacy",
+        )
+
+        with patch(
+            "boundry.binding_energy.calculate_binding_energy",
+            return_value=mock_be_result,
+        ):
+            dG = _score_interface("ATOM...", config, MagicMock())
+
+        assert dG == -12.5
+
+
+class TestBeamExpansionTaskDdgFields:
+    """Tests for the new ddG fields on _BeamExpansionTask."""
+
+    def test_default_fields(self):
+        task = _BeamExpansionTask(
+            parent_pdb_string="ATOM...",
+            target_chain="H",
+            target_resnum=52,
+            target_icode="",
+            relax_config_dict={},
+            design_config_dict={},
+            chain_pairs=[("H", "L")],
+            seed=42,
+        )
+        assert task.interface_scoring_backend == "legacy"
+        assert task.ddg_config_dict is None
+
+    def test_explicit_ddg_fields(self):
+        task = _BeamExpansionTask(
+            parent_pdb_string="ATOM...",
+            target_chain="H",
+            target_resnum=52,
+            target_icode="",
+            relax_config_dict={},
+            design_config_dict={},
+            chain_pairs=[("H", "L")],
+            seed=42,
+            interface_scoring_backend="ddg",
+            ddg_config_dict={"chain_pairs": [["H", "L"]]},
+        )
+        assert task.interface_scoring_backend == "ddg"
+        assert task.ddg_config_dict == {
+            "chain_pairs": [["H", "L"]]
+        }
+
+    def test_pickle_safe_with_ddg_fields(self):
+        task = _BeamExpansionTask(
+            parent_pdb_string="ATOM...",
+            target_chain="H",
+            target_resnum=52,
+            target_icode="",
+            relax_config_dict={},
+            design_config_dict={},
+            chain_pairs=[("H", "L")],
+            seed=42,
+            interface_scoring_backend="ddg",
+            ddg_config_dict={"n_ensemble": 10},
+        )
+        roundtripped = pickle.loads(pickle.dumps(task))
+        assert roundtripped.interface_scoring_backend == "ddg"
+        assert roundtripped.ddg_config_dict == {"n_ensemble": 10}
+
+
+class TestSerializeDdgConfig:
+    """Tests for the _serialize_ddg_config helper."""
+
+    def test_basic_serialization(self):
+        from boundry.optimize import _serialize_ddg_config
+
+        config = DdGConfig(
+            chain_pairs=[("H", "L")],
+            n_ensemble=20,
+            seed=42,
+        )
+        result = _serialize_ddg_config(config)
+
+        assert result["n_ensemble"] == 20
+        assert result["seed"] == 42
+        assert result["chain_pairs"] == [["H", "L"]]
+        assert result["paper_mode"] is False
+        assert result["cache_ensemble"] is False
+        assert result["ensemble_dir"] is None
+
+    def test_none_chain_pairs(self):
+        from boundry.optimize import _serialize_ddg_config
+
+        config = DdGConfig()
+        result = _serialize_ddg_config(config)
+        assert result["chain_pairs"] is None
+
+    def test_pickle_safe(self):
+        from boundry.optimize import _serialize_ddg_config
+
+        config = DdGConfig(chain_pairs=[("A", "B")])
+        result = _serialize_ddg_config(config)
+        roundtripped = pickle.loads(pickle.dumps(result))
+        assert roundtripped == result

@@ -1180,6 +1180,101 @@ def optimize(
     typer.echo(f"Summary: {output_dir}/summary.json")
 
 
+@app.command()
+def ddg(
+    input_file: Path = typer.Argument(
+        ..., metavar="INPUT", help="Input structure file (PDB or CIF)"
+    ),
+    interface: str = typer.Option(
+        ...,
+        "--interface",
+        "-i",
+        help="Chain pairs defining the interface, e.g. 'H:L,H:A'",
+    ),
+    mutations: Optional[str] = typer.Option(
+        None,
+        "--mutations",
+        help=(
+            "Comma-separated mutations, e.g. 'A:L5A,B:W10G'. "
+            "If omitted, computes interface dG (binding energy) only."
+        ),
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output directory for ddg_results.json",
+    ),
+    n_ensemble: int = typer.Option(
+        35, "--n-ensemble", help="Number of MD ensemble members"
+    ),
+    paper_mode: bool = typer.Option(
+        False,
+        "--paper-mode",
+        help="Use publication-quality settings (n_ensemble=50, longer MD)",
+    ),
+    workers: int = typer.Option(
+        1, "--workers", "-j", help="Number of parallel worker processes"
+    ),
+    seed: Optional[int] = typer.Option(
+        None, "--seed", help="Random seed for reproducibility"
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable detailed logging from all components",
+    ),
+):
+    """Compute ddG (mutation scoring) or dG (binding energy).
+
+    When --mutations is provided, computes the ddG of specified mutations
+    using an MD-ensemble four-state thermodynamic cycle.  When omitted,
+    computes the interface dG (binding energy) without mutations.
+    """
+    _setup_logging(verbose)
+    _validate_input(input_file)
+
+    try:
+        chain_pairs = _parse_chain_pairs_strict(interface)
+    except typer.BadParameter as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    from boundry.config import DdGConfig
+    from boundry.operations import ddg as _ddg
+
+    ddg_config = DdGConfig(
+        chain_pairs=chain_pairs,
+        n_ensemble=n_ensemble,
+        paper_mode=paper_mode,
+        workers=workers,
+        seed=seed,
+    )
+
+    with _quiet_context(verbose):
+        result = _ddg(
+            input_file,
+            mutation_string=mutations,
+            config=ddg_config,
+            output_path=output,
+        )
+
+    # Print summary
+    if "ddG" in result.metadata and result.metadata["ddG"] is not None:
+        ddG = result.metadata["ddG"]
+        std = result.metadata.get("std_ddG")
+        if std is not None:
+            typer.echo(f"ddG = {ddG:.2f} +/- {std:.2f} kcal/mol")
+        else:
+            typer.echo(f"ddG = {ddG:.2f} kcal/mol")
+    elif "dG" in result.metadata and result.metadata["dG"] is not None:
+        typer.echo(f"dG = {result.metadata['dG']:.2f} kcal/mol")
+
+    if output is not None:
+        typer.echo(f"Results: {output}/ddg_results.json")
+
+
 def _resolve_workflow(name_or_path: str) -> Path:
     """Resolve a workflow file path or built-in name."""
     path = Path(name_or_path)

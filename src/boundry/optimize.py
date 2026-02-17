@@ -119,6 +119,8 @@ class _BeamExpansionTask:
     n_design_iterations: int = 1
     quiet: bool = True
     exclude_native: bool = False
+    interface_scoring_backend: str = "legacy"
+    ddg_config_dict: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -289,15 +291,30 @@ def _execute_beam_expansion(task: _BeamExpansionTask) -> _BeamExpansionResult:
                 relaxed_pdb, _, _ = relaxer.relax(current_pdb)
                 current_pdb = relaxed_pdb
 
-            # Score: binding energy only
-            be_result = calculate_binding_energy(
-                current_pdb,
-                relaxer,
-                chain_pairs=task.chain_pairs,
-                distance_cutoff=8.0,
-            )
+            # Score: binding energy
+            if (
+                task.interface_scoring_backend == "ddg"
+                and task.ddg_config_dict is not None
+            ):
+                from boundry.config import DdGConfig
+                from boundry.ddg import compute_interface_dg
 
-        dG = be_result.binding_energy
+                ddg_cfg = DdGConfig(**task.ddg_config_dict)
+                dG = compute_interface_dg(
+                    current_pdb,
+                    ddg_cfg,
+                    relaxer=relaxer,
+                    designer=designer,
+                )
+            else:
+                be_result = calculate_binding_energy(
+                    current_pdb,
+                    relaxer,
+                    chain_pairs=task.chain_pairs,
+                    distance_cutoff=8.0,
+                )
+                dG = be_result.binding_energy
+
         sequence = design_result.get("sequence", "")
 
         # Extract AA change and chain sequences
@@ -356,6 +373,43 @@ def _compose_seed(seed_base: int, local_seed: int) -> int:
     return seed_base * 100000 + local_seed
 
 
+def _serialize_ddg_config(config: "DdGConfig") -> Dict[str, Any]:
+    """Convert a DdGConfig to a pickle-safe dict.
+
+    Converts Path objects to strings and Tuple to list for JSON/pickle
+    compatibility.
+    """
+    return {
+        "n_ensemble": config.n_ensemble,
+        "md_total_steps": config.md_total_steps,
+        "md_equilibration_steps": config.md_equilibration_steps,
+        "md_temperature": config.md_temperature,
+        "md_friction": config.md_friction,
+        "neighborhood_sampling_bias": config.neighborhood_sampling_bias,
+        "ca_cutoff": config.ca_cutoff,
+        "restraint_sd": config.restraint_sd,
+        "neighborhood_radius": config.neighborhood_radius,
+        "sequence_window": config.sequence_window,
+        "chain_pairs": (
+            [list(p) for p in config.chain_pairs]
+            if config.chain_pairs
+            else None
+        ),
+        "separation_distance": config.separation_distance,
+        "implicit_solvent": config.implicit_solvent,
+        "workers": config.workers,
+        "seed": config.seed,
+        "quiet": config.quiet,
+        "cache_ensemble": False,
+        "ensemble_dir": None,
+        "sort_members_by_wt_bound_energy": (
+            config.sort_members_by_wt_bound_energy
+        ),
+        "average_top_n": config.average_top_n,
+        "paper_mode": False,  # already applied via __post_init__
+    }
+
+
 def _score_interface(
     pdb_string: str,
     config: OptimizeConfig,
@@ -363,8 +417,19 @@ def _score_interface(
 ) -> float:
     """Compute binding energy (dG) for a structure.
 
+    Uses the ddG ensemble pipeline when
+    ``config.interface_scoring_backend == "ddg"``, otherwise the legacy
+    ``calculate_binding_energy`` path.
+
     Returns dG as a float. Raises RuntimeError if calculation fails.
     """
+    if config.interface_scoring_backend == "ddg":
+        from boundry.ddg import compute_interface_dg
+
+        return compute_interface_dg(
+            pdb_string, config.ddg, relaxer=relaxer
+        )
+
     from boundry.binding_energy import calculate_binding_energy
 
     result = calculate_binding_energy(
@@ -803,6 +868,17 @@ def optimize(
             ),
         )
 
+    # Sync chain_pairs into ddg sub-config
+    if config.interface_scoring_backend == "ddg":
+        from dataclasses import replace as _replace
+
+        config = _replace(
+            config,
+            ddg=_replace(
+                config.ddg, chain_pairs=config.chain_pairs
+            ),
+        )
+
     # Idealize
     if config.idealize.enabled:
         from boundry.operations import idealize as _idealize
@@ -839,6 +915,11 @@ def optimize(
         "sc_num_denoising_steps": config.design.sc_num_denoising_steps,
         "sc_num_samples": config.design.sc_num_samples,
     }
+    ddg_config_dict = (
+        _serialize_ddg_config(config.ddg)
+        if config.interface_scoring_backend == "ddg"
+        else None
+    )
 
     global_best_pdb = pdb_string
     global_best_dG: Optional[float] = None
@@ -921,9 +1002,23 @@ def optimize(
                 )
 
                 # Alanine scan to find candidate positions
-                dG_before, positions = _analyze_and_find_positions(
-                    parents[0], config, relaxer, pool
-                )
+                # When using the ddG backend, compute dG_before
+                # separately via the ensemble pipeline.  Position
+                # scanning stays on the legacy analyze_interface
+                # path (ddG ensemble is too expensive for ranking).
+                if config.interface_scoring_backend == "ddg":
+                    dG_before = _score_interface(
+                        parents[0], config, relaxer
+                    )
+                    _, positions = _analyze_and_find_positions(
+                        parents[0], config, relaxer, pool
+                    )
+                else:
+                    dG_before, positions = (
+                        _analyze_and_find_positions(
+                            parents[0], config, relaxer, pool
+                        )
+                    )
 
                 if not positions:
                     if config.position_sampling == "threshold":
@@ -1010,6 +1105,8 @@ def optimize(
                                 seed=exp_seed,
                                 quiet=config.quiet,
                                 exclude_native=config.exclude_native,
+                                interface_scoring_backend=config.interface_scoring_backend,
+                                ddg_config_dict=ddg_config_dict,
                             )
                         )
                         task_parent_ranks.append(parent_rank)
