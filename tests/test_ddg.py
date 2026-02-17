@@ -1,12 +1,27 @@
 """Tests for boundry.ddg module — mutation specification, parsing,
-and validation utilities.
+validation utilities, and ddG compute pipeline.
 """
+
+import pickle
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from boundry.ddg import (
+    DdGResult,
+    EnsembleMemberResult,
     MutationSpec,
+    _DdGMemberResult,
+    _DdGMemberTask,
+    _deserialize_design_spec,
+    _find_neighborhood_residues,
     _normalize_aa,
+    _process_ensemble_member,
+    _serialize_design_spec,
+    build_neighborhood_spec,
+    build_sampling_neighborhood,
+    compute_ddg,
+    compute_interface_dg,
     parse_mutation_dict,
     parse_mutation_string,
     parse_mutations,
@@ -298,3 +313,799 @@ class TestValidateMutations:
         spec = MutationSpec("H", 100, "SER", "ALA", "B")  # wrong icode
         with pytest.raises(ValueError, match="not found in structure"):
             validate_mutations(ICODE_PDB, [spec])
+
+
+# ==================================================================
+# Phase 5 tests — data classes, neighborhoods, pipeline
+# ==================================================================
+
+# ------------------------------------------------------------------
+# Test PDB with known coordinates for neighborhood tests
+# ------------------------------------------------------------------
+
+# Chain A: residues 1-4 along x-axis (CA at 0, 5, 10, 50 Å)
+# Chain B: residue 1 at x=3 (near A:1)
+# GLY A:3 has no CB, only CA.
+NEIGHBORHOOD_PDB = "\n".join(
+    [
+        "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C",
+        "ATOM      2  CB  ALA A   1       1.000   0.000   0.000  1.00  0.00           C",
+        "ATOM      3  CA  LEU A   2       5.000   0.000   0.000  1.00  0.00           C",
+        "ATOM      4  CB  LEU A   2       6.000   0.000   0.000  1.00  0.00           C",
+        "ATOM      5  CA  GLY A   3      10.000   0.000   0.000  1.00  0.00           C",
+        "ATOM      6  CA  VAL A   4      50.000   0.000   0.000  1.00  0.00           C",
+        "ATOM      7  CB  VAL A   4      51.000   0.000   0.000  1.00  0.00           C",
+        "TER",
+        "ATOM      8  CA  ALA B   1       3.000   0.000   0.000  1.00  0.00           C",
+        "ATOM      9  CB  ALA B   1       4.000   0.000   0.000  1.00  0.00           C",
+        "TER",
+        "END",
+    ]
+)
+
+# PDB with insertion code residues for neighborhood testing
+NEIGHBORHOOD_ICODE_PDB = "\n".join(
+    [
+        "ATOM      1  CA  ALA H 100       0.000   0.000   0.000  1.00  0.00           C",
+        "ATOM      2  CB  ALA H 100       1.000   0.000   0.000  1.00  0.00           C",
+        "ATOM      3  CA  SER H 100A      3.000   0.000   0.000  1.00  0.00           C",
+        "ATOM      4  CB  SER H 100A      4.000   0.000   0.000  1.00  0.00           C",
+        "ATOM      5  CA  LEU H 101      50.000   0.000   0.000  1.00  0.00           C",
+        "ATOM      6  CB  LEU H 101      51.000   0.000   0.000  1.00  0.00           C",
+        "END",
+    ]
+)
+
+
+# ------------------------------------------------------------------
+# EnsembleMemberResult
+# ------------------------------------------------------------------
+
+
+class TestEnsembleMemberResult:
+    def test_dG_wt(self):
+        r = EnsembleMemberResult(
+            member_index=0,
+            bound_wt_energy=-100.0,
+            unbound_wt_energy=-80.0,
+        )
+        assert r.dG_wt == pytest.approx(-20.0)
+
+    def test_dG_mut(self):
+        r = EnsembleMemberResult(
+            member_index=0,
+            bound_mut_energy=-90.0,
+            unbound_mut_energy=-75.0,
+        )
+        assert r.dG_mut == pytest.approx(-15.0)
+
+    def test_ddG(self):
+        r = EnsembleMemberResult(
+            member_index=0,
+            bound_wt_energy=-100.0,
+            unbound_wt_energy=-80.0,
+            bound_mut_energy=-90.0,
+            unbound_mut_energy=-75.0,
+        )
+        # dG_wt = -20, dG_mut = -15, ddG = -15 - (-20) = 5
+        assert r.ddG == pytest.approx(5.0)
+
+    def test_dG_wt_none_when_missing(self):
+        r = EnsembleMemberResult(member_index=0)
+        assert r.dG_wt is None
+        assert r.dG_mut is None
+        assert r.ddG is None
+
+    def test_ddG_none_when_partial(self):
+        r = EnsembleMemberResult(
+            member_index=0,
+            bound_wt_energy=-100.0,
+            unbound_wt_energy=-80.0,
+            # mut energies not set
+        )
+        assert r.dG_wt == pytest.approx(-20.0)
+        assert r.dG_mut is None
+        assert r.ddG is None
+
+    def test_all_none_defaults(self):
+        r = EnsembleMemberResult(member_index=0)
+        assert r.bound_wt_energy is None
+        assert r.unbound_wt_energy is None
+        assert r.bound_mut_energy is None
+        assert r.unbound_mut_energy is None
+        assert r.wt_bound_energy_rank is None
+
+    def test_mutable(self):
+        r = EnsembleMemberResult(member_index=0)
+        r.wt_bound_energy_rank = 3
+        assert r.wt_bound_energy_rank == 3
+
+
+# ------------------------------------------------------------------
+# DdGResult
+# ------------------------------------------------------------------
+
+
+class TestDdGResult:
+    def _make_result(self):
+        m1 = EnsembleMemberResult(
+            member_index=0,
+            bound_wt_energy=-100.0,
+            unbound_wt_energy=-80.0,
+            bound_mut_energy=-90.0,
+            unbound_mut_energy=-75.0,
+        )
+        m2 = EnsembleMemberResult(
+            member_index=1,
+            bound_wt_energy=-102.0,
+            unbound_wt_energy=-82.0,
+            bound_mut_energy=-91.0,
+            unbound_mut_energy=-76.0,
+        )
+        return DdGResult(
+            mutations=[MutationSpec("A", 1, "LEU", "ALA")],
+            member_results=[m1, m2],
+            mean_ddG=5.0,
+            std_ddG=0.1,
+            mean_dG_wt=-20.0,
+            mean_dG_mut=-15.0,
+            n_successful=2,
+            n_ensemble=2,
+            ensemble_ddGs=[5.0, 5.0],
+        )
+
+    def test_to_dict_keys(self):
+        result = self._make_result()
+        d = result.to_dict()
+        expected_keys = {
+            "mutations",
+            "mean_ddG",
+            "std_ddG",
+            "mean_dG_wt",
+            "mean_dG_mut",
+            "n_successful",
+            "n_ensemble",
+            "ensemble_ddGs",
+            "member_results",
+        }
+        assert set(d.keys()) == expected_keys
+
+    def test_to_dict_member_details(self):
+        result = self._make_result()
+        d = result.to_dict()
+        members = d["member_results"]
+        assert len(members) == 2
+        m0 = members[0]
+        assert m0["member_index"] == 0
+        assert m0["dG_wt"] == pytest.approx(-20.0)
+        assert m0["dG_mut"] == pytest.approx(-15.0)
+        assert m0["ddG"] == pytest.approx(5.0)
+
+    def test_to_dict_mutations_as_strings(self):
+        result = self._make_result()
+        d = result.to_dict()
+        assert d["mutations"] == ["A:L1A"]
+
+
+# ------------------------------------------------------------------
+# _find_neighborhood_residues
+# ------------------------------------------------------------------
+
+
+class TestFindNeighborhoodResidues:
+    def test_nearby_included(self):
+        # Mutation at A:1 (CB at 1,0,0). B:1 CB at 4,0,0 → dist=3 Å
+        neighbors = _find_neighborhood_residues(
+            NEIGHBORHOOD_PDB,
+            [("A", 1, "")],
+            neighborhood_radius=8.0,
+            sequence_window=0,
+        )
+        assert ("A", 1, "") in neighbors
+        assert ("A", 2, "") in neighbors  # CB at 6, dist=5
+        assert ("B", 1, "") in neighbors  # CB at 4, dist=3
+
+    def test_distant_excluded(self):
+        neighbors = _find_neighborhood_residues(
+            NEIGHBORHOOD_PDB,
+            [("A", 1, "")],
+            neighborhood_radius=8.0,
+            sequence_window=0,
+        )
+        # A:4 CB at 51, dist=50 → way outside 8 Å
+        assert ("A", 4, "") not in neighbors
+
+    def test_gly_uses_ca(self):
+        # A:3 is GLY with only CA at (10,0,0). Mutation at A:2 (CB=6).
+        # dist(6, 10) = 4 Å → within 8 Å
+        neighbors = _find_neighborhood_residues(
+            NEIGHBORHOOD_PDB,
+            [("A", 2, "")],
+            neighborhood_radius=8.0,
+            sequence_window=0,
+        )
+        assert ("A", 3, "") in neighbors
+
+    def test_sequence_window_expansion(self):
+        # Mutation at A:2, radius=3 Å → only A:2 itself (CB at 6)
+        # B:1 CB at 4 → dist=2, within 3 Å
+        # A:1 CB at 1 → dist=5, outside 3 Å
+        # With window=1, A:2 should expand to include A:1 and A:3
+        neighbors = _find_neighborhood_residues(
+            NEIGHBORHOOD_PDB,
+            [("A", 2, "")],
+            neighborhood_radius=3.0,
+            sequence_window=1,
+        )
+        assert ("A", 1, "") in neighbors  # window expand from A:2
+        assert ("A", 2, "") in neighbors
+        assert ("A", 3, "") in neighbors  # window expand from A:2
+
+    def test_insertion_codes(self):
+        # Mutation at H:100 (CB=1). H:100A CB at 4, dist=3 → in range
+        neighbors = _find_neighborhood_residues(
+            NEIGHBORHOOD_ICODE_PDB,
+            [("H", 100, "")],
+            neighborhood_radius=8.0,
+            sequence_window=0,
+        )
+        assert ("H", 100, "") in neighbors
+        assert ("H", 100, "A") in neighbors
+        assert ("H", 101, "") not in neighbors  # CB at 51
+
+    def test_empty_result_for_missing_site(self):
+        neighbors = _find_neighborhood_residues(
+            NEIGHBORHOOD_PDB,
+            [("Z", 999, "")],
+            neighborhood_radius=8.0,
+            sequence_window=0,
+        )
+        assert len(neighbors) == 0
+
+
+# ------------------------------------------------------------------
+# build_neighborhood_spec
+# ------------------------------------------------------------------
+
+
+class TestBuildNeighborhoodSpec:
+    def test_returns_design_spec(self):
+        from boundry.resfile import DesignSpec
+
+        spec = build_neighborhood_spec(
+            NEIGHBORHOOD_PDB,
+            [("A", 1, "")],
+            neighborhood_radius=8.0,
+        )
+        assert isinstance(spec, DesignSpec)
+
+    def test_nataa_for_neighbors(self):
+        from boundry.resfile import ResidueMode
+
+        spec = build_neighborhood_spec(
+            NEIGHBORHOOD_PDB,
+            [("A", 1, "")],
+            neighborhood_radius=8.0,
+        )
+        # A:1 should be NATAA (in neighborhood)
+        assert spec.residue_specs["A1"].mode == ResidueMode.NATAA
+
+    def test_natro_default(self):
+        from boundry.resfile import ResidueMode
+
+        spec = build_neighborhood_spec(
+            NEIGHBORHOOD_PDB,
+            [("A", 1, "")],
+            neighborhood_radius=8.0,
+        )
+        assert spec.default_mode == ResidueMode.NATRO
+
+
+# ------------------------------------------------------------------
+# build_sampling_neighborhood
+# ------------------------------------------------------------------
+
+
+class TestBuildSamplingNeighborhood:
+    def test_returns_chain_resnum_tuples(self):
+        result = build_sampling_neighborhood(
+            NEIGHBORHOOD_PDB,
+            [("A", 1, "")],
+            neighborhood_radius=8.0,
+        )
+        assert all(len(t) == 2 for t in result)
+        assert ("A", 1) in result
+
+    def test_sorted_output(self):
+        result = build_sampling_neighborhood(
+            NEIGHBORHOOD_PDB,
+            [("A", 1, "")],
+            neighborhood_radius=8.0,
+        )
+        assert result == sorted(result)
+
+
+# ------------------------------------------------------------------
+# DesignSpec serialization roundtrip
+# ------------------------------------------------------------------
+
+
+class TestDesignSpecSerialization:
+    def test_roundtrip(self):
+        from boundry.resfile import (
+            DesignSpec,
+            ResidueMode,
+            ResidueSpec,
+        )
+
+        spec = DesignSpec(
+            residue_specs={
+                "A1": ResidueSpec(
+                    "A", 1, mode=ResidueMode.NATAA
+                ),
+                "A2": ResidueSpec(
+                    "A",
+                    2,
+                    mode=ResidueMode.PIKAA,
+                    allowed_aas={"A", "G", "V"},
+                ),
+            },
+            default_mode=ResidueMode.NATRO,
+        )
+        d = _serialize_design_spec(spec)
+        restored = _deserialize_design_spec(d)
+        assert restored.default_mode == ResidueMode.NATRO
+        assert restored.residue_specs["A1"].mode == ResidueMode.NATAA
+        assert restored.residue_specs["A2"].allowed_aas == {
+            "A",
+            "G",
+            "V",
+        }
+
+    def test_none_allowed_aas_roundtrip(self):
+        from boundry.resfile import (
+            DesignSpec,
+            ResidueMode,
+            ResidueSpec,
+        )
+
+        spec = DesignSpec(
+            residue_specs={
+                "B5": ResidueSpec(
+                    "B", 5, mode=ResidueMode.NATRO
+                ),
+            },
+            default_mode=ResidueMode.NATAA,
+        )
+        d = _serialize_design_spec(spec)
+        restored = _deserialize_design_spec(d)
+        assert restored.residue_specs["B5"].allowed_aas is None
+
+
+# ------------------------------------------------------------------
+# _DdGMemberTask pickle safety
+# ------------------------------------------------------------------
+
+
+class TestDdGMemberTaskPickle:
+    def test_pickle_roundtrip(self):
+        task = _DdGMemberTask(
+            member_index=0,
+            member_pdb_string="ATOM...",
+            mutations=(MutationSpec("A", 1, "LEU", "ALA"),),
+            neighborhood_spec_dict={
+                "residue_specs": {},
+                "default_mode": "NATRO",
+            },
+            chain_groups=(("A",), ("B",)),
+            separation_distance=100.0,
+            relax_config_dict={"implicit_solvent": True},
+            design_config_dict={},
+            implicit_solvent=True,
+            ca_cutoff=9.0,
+            restraint_sd=0.5,
+            quiet=True,
+        )
+        data = pickle.dumps(task)
+        restored = pickle.loads(data)
+        assert restored.member_index == 0
+        assert restored.mutations == task.mutations
+        assert restored.chain_groups == (("A",), ("B",))
+
+
+# ------------------------------------------------------------------
+# _process_ensemble_member
+# ------------------------------------------------------------------
+
+
+class TestProcessEnsembleMember:
+    def _make_task(self, mutations=()):
+        return _DdGMemberTask(
+            member_index=0,
+            member_pdb_string="ATOM  mock PDB",
+            mutations=mutations,
+            neighborhood_spec_dict={
+                "residue_specs": {},
+                "default_mode": "NATRO",
+            },
+            chain_groups=(("A",), ("B",)),
+            separation_distance=100.0,
+            relax_config_dict={"implicit_solvent": True},
+            design_config_dict={},
+            implicit_solvent=True,
+            ca_cutoff=9.0,
+            restraint_sd=0.5,
+            quiet=True,
+        )
+
+    @patch("boundry.ddg._ddg_worker_cache", new_callable=dict)
+    @patch("boundry.ddg._repack_and_minimize")
+    @patch("boundry.relaxer.separate_interface_rigid_body")
+    def test_wt_only_no_mutations(
+        self, mock_separate, mock_repack_min, mock_cache
+    ):
+        mock_relaxer = MagicMock()
+        mock_designer = MagicMock()
+        # Keys must match _config_fingerprint(task.*_config_dict)
+        mock_cache["relax_key"] = "implicit_solvent=True"
+        mock_cache["relaxer"] = mock_relaxer
+        mock_cache["design_key"] = ""
+        mock_cache["designer"] = mock_designer
+
+        mock_repack_min.return_value = "minimized_pdb"
+        mock_relaxer.get_energy_breakdown.side_effect = [
+            {"total_energy": -100.0},  # WT bound
+            {"total_energy": -80.0},  # WT unbound
+        ]
+        mock_separate.return_value = "separated_pdb"
+
+        task = self._make_task(mutations=())
+        result = _process_ensemble_member(task)
+
+        assert result.error is None
+        assert result.bound_wt_energy == pytest.approx(-100.0)
+        assert result.unbound_wt_energy == pytest.approx(-80.0)
+        assert result.bound_mut_energy is None
+        assert result.unbound_mut_energy is None
+
+    @patch("boundry.ddg._ddg_worker_cache", new_callable=dict)
+    @patch("boundry.ddg._repack_and_minimize")
+    @patch("boundry.relaxer.separate_interface_rigid_body")
+    @patch(
+        "boundry.interface_position_energetics.mutate_residue"
+    )
+    def test_with_mutations(
+        self,
+        mock_mutate,
+        mock_separate,
+        mock_repack_min,
+        mock_cache,
+    ):
+        mock_relaxer = MagicMock()
+        mock_designer = MagicMock()
+        mock_cache["relax_key"] = "implicit_solvent=True"
+        mock_cache["relaxer"] = mock_relaxer
+        mock_cache["design_key"] = ""
+        mock_cache["designer"] = mock_designer
+
+        mock_repack_min.side_effect = [
+            "wt_min_pdb",
+            "mut_min_pdb",
+        ]
+        mock_relaxer.get_energy_breakdown.side_effect = [
+            {"total_energy": -100.0},  # WT bound
+            {"total_energy": -80.0},  # WT unbound
+            {"total_energy": -90.0},  # Mut bound
+            {"total_energy": -75.0},  # Mut unbound
+        ]
+        mock_separate.side_effect = [
+            "wt_separated",
+            "mut_separated",
+        ]
+        mock_mutate.return_value = "mutated_pdb"
+
+        mutations = (MutationSpec("A", 1, "LEU", "ALA"),)
+        task = self._make_task(mutations=mutations)
+        result = _process_ensemble_member(task)
+
+        assert result.error is None
+        assert result.bound_wt_energy == pytest.approx(-100.0)
+        assert result.unbound_wt_energy == pytest.approx(-80.0)
+        assert result.bound_mut_energy == pytest.approx(-90.0)
+        assert result.unbound_mut_energy == pytest.approx(-75.0)
+
+    @patch("boundry.ddg._ddg_worker_cache", new_callable=dict)
+    @patch("boundry.ddg._repack_and_minimize")
+    def test_error_handling(self, mock_repack_min, mock_cache):
+        mock_relaxer = MagicMock()
+        mock_designer = MagicMock()
+        mock_cache["relax_key"] = "implicit_solvent=True"
+        mock_cache["relaxer"] = mock_relaxer
+        mock_cache["design_key"] = ""
+        mock_cache["designer"] = mock_designer
+
+        mock_repack_min.side_effect = RuntimeError("boom")
+
+        task = self._make_task()
+        result = _process_ensemble_member(task)
+
+        assert result.error is not None
+        assert "boom" in result.error
+
+
+# ------------------------------------------------------------------
+# compute_ddg
+# ------------------------------------------------------------------
+
+
+class TestComputeDdG:
+    def test_chain_pairs_required(self):
+        from boundry.config import DdGConfig
+
+        config = DdGConfig(chain_pairs=None)
+        with pytest.raises(ValueError, match="chain_pairs is required"):
+            compute_ddg("PDB", [], config)
+
+    @patch("boundry.ddg._process_ensemble_member")
+    @patch("boundry.ddg.build_sampling_neighborhood")
+    @patch("boundry.ddg.build_neighborhood_spec")
+    @patch("boundry.ddg.validate_mutations")
+    def test_end_to_end_mocked(
+        self,
+        mock_validate,
+        mock_build_spec,
+        mock_build_sampling,
+        mock_worker,
+    ):
+        from boundry.config import DdGConfig
+        from boundry.resfile import DesignSpec, ResidueMode
+
+        mock_relaxer = MagicMock()
+        mock_designer = MagicMock()
+
+        # minimize returns PDB
+        mock_relaxer.minimize_with_pair_restraints.return_value = (
+            "minimized"
+        )
+        # ensemble returns 2 members
+        mock_relaxer.generate_local_md_ensemble.return_value = [
+            "member0",
+            "member1",
+        ]
+
+        mock_build_spec.return_value = DesignSpec(
+            residue_specs={}, default_mode=ResidueMode.NATRO
+        )
+        mock_build_sampling.return_value = [("A", 1)]
+
+        mock_worker.side_effect = [
+            _DdGMemberResult(
+                member_index=0,
+                bound_wt_energy=-100.0,
+                unbound_wt_energy=-80.0,
+                bound_mut_energy=-90.0,
+                unbound_mut_energy=-75.0,
+            ),
+            _DdGMemberResult(
+                member_index=1,
+                bound_wt_energy=-102.0,
+                unbound_wt_energy=-82.0,
+                bound_mut_energy=-92.0,
+                unbound_mut_energy=-77.0,
+            ),
+        ]
+
+        config = DdGConfig(
+            chain_pairs=[("A", "B")], n_ensemble=2
+        )
+        mutations = [MutationSpec("A", 1, "LEU", "ALA")]
+
+        result = compute_ddg(
+            "PDB",
+            mutations,
+            config,
+            relaxer=mock_relaxer,
+            designer=mock_designer,
+        )
+
+        assert isinstance(result, DdGResult)
+        assert result.n_ensemble == 2
+        assert result.n_successful == 2
+        assert len(result.ensemble_ddGs) == 2
+        assert result.mean_ddG is not None
+        # member 0: dG_wt=-20, dG_mut=-15, ddG=5
+        # member 1: dG_wt=-20, dG_mut=-15, ddG=5
+        assert result.mean_ddG == pytest.approx(5.0)
+
+    @patch("boundry.ddg._process_ensemble_member")
+    @patch("boundry.ddg.build_sampling_neighborhood")
+    @patch("boundry.ddg.build_neighborhood_spec")
+    @patch("boundry.ddg.validate_mutations")
+    def test_handles_failed_members(
+        self,
+        mock_validate,
+        mock_build_spec,
+        mock_build_sampling,
+        mock_worker,
+    ):
+        from boundry.config import DdGConfig
+        from boundry.resfile import DesignSpec, ResidueMode
+
+        mock_relaxer = MagicMock()
+        mock_designer = MagicMock()
+        mock_relaxer.minimize_with_pair_restraints.return_value = (
+            "minimized"
+        )
+        mock_relaxer.generate_local_md_ensemble.return_value = [
+            "m0",
+            "m1",
+        ]
+        mock_build_spec.return_value = DesignSpec(
+            residue_specs={}, default_mode=ResidueMode.NATRO
+        )
+        mock_build_sampling.return_value = []
+
+        mock_worker.side_effect = [
+            _DdGMemberResult(
+                member_index=0, error="RuntimeError: fail"
+            ),
+            _DdGMemberResult(
+                member_index=1,
+                bound_wt_energy=-100.0,
+                unbound_wt_energy=-80.0,
+                bound_mut_energy=-90.0,
+                unbound_mut_energy=-75.0,
+            ),
+        ]
+
+        config = DdGConfig(
+            chain_pairs=[("A", "B")], n_ensemble=2
+        )
+        result = compute_ddg(
+            "PDB",
+            [MutationSpec("A", 1, "LEU", "ALA")],
+            config,
+            relaxer=mock_relaxer,
+            designer=mock_designer,
+        )
+        assert result.n_successful == 1
+        assert result.n_ensemble == 2
+
+    @patch("boundry.ddg._process_ensemble_member")
+    @patch("boundry.ddg.build_sampling_neighborhood")
+    @patch("boundry.ddg.build_neighborhood_spec")
+    @patch("boundry.ddg.validate_mutations")
+    def test_ensemble_caching(
+        self,
+        mock_validate,
+        mock_build_spec,
+        mock_build_sampling,
+        mock_worker,
+        tmp_path,
+    ):
+        from boundry.config import DdGConfig
+        from boundry.resfile import DesignSpec, ResidueMode
+
+        mock_relaxer = MagicMock()
+        mock_designer = MagicMock()
+        mock_relaxer.minimize_with_pair_restraints.return_value = (
+            "minimized"
+        )
+        mock_relaxer.generate_local_md_ensemble.return_value = [
+            "member0_pdb",
+            "member1_pdb",
+        ]
+        mock_build_spec.return_value = DesignSpec(
+            residue_specs={}, default_mode=ResidueMode.NATRO
+        )
+        mock_build_sampling.return_value = []
+        mock_worker.return_value = _DdGMemberResult(
+            member_index=0,
+            bound_wt_energy=-100.0,
+            unbound_wt_energy=-80.0,
+            bound_mut_energy=-90.0,
+            unbound_mut_energy=-75.0,
+        )
+
+        ens_dir = tmp_path / "ensemble"
+        config = DdGConfig(
+            chain_pairs=[("A", "B")],
+            n_ensemble=2,
+            cache_ensemble=True,
+            ensemble_dir=ens_dir,
+        )
+        compute_ddg(
+            "PDB",
+            [MutationSpec("A", 1, "LEU", "ALA")],
+            config,
+            relaxer=mock_relaxer,
+            designer=mock_designer,
+        )
+
+        cached = sorted(ens_dir.glob("member_*.pdb"))
+        assert len(cached) == 2
+        assert cached[0].read_text() == "member0_pdb"
+
+
+# ------------------------------------------------------------------
+# compute_interface_dg
+# ------------------------------------------------------------------
+
+
+class TestComputeInterfaceDG:
+    def test_chain_pairs_required(self):
+        from boundry.config import DdGConfig
+
+        config = DdGConfig(chain_pairs=None)
+        with pytest.raises(ValueError, match="chain_pairs is required"):
+            compute_interface_dg("PDB", config)
+
+    @patch("boundry.ddg._process_ensemble_member")
+    def test_returns_float(self, mock_worker):
+        from boundry.config import DdGConfig
+
+        mock_relaxer = MagicMock()
+        mock_designer = MagicMock()
+        mock_relaxer.minimize_with_pair_restraints.return_value = (
+            "minimized"
+        )
+        mock_relaxer.generate_local_md_ensemble.return_value = [
+            "m0",
+            "m1",
+        ]
+
+        mock_worker.side_effect = [
+            _DdGMemberResult(
+                member_index=0,
+                bound_wt_energy=-100.0,
+                unbound_wt_energy=-80.0,
+            ),
+            _DdGMemberResult(
+                member_index=1,
+                bound_wt_energy=-102.0,
+                unbound_wt_energy=-82.0,
+            ),
+        ]
+
+        config = DdGConfig(
+            chain_pairs=[("A", "B")], n_ensemble=2
+        )
+        dg = compute_interface_dg(
+            "PDB",
+            config,
+            relaxer=mock_relaxer,
+            designer=mock_designer,
+        )
+        assert isinstance(dg, float)
+        # (-20 + -20) / 2 = -20
+        assert dg == pytest.approx(-20.0)
+
+    @patch("boundry.ddg._process_ensemble_member")
+    def test_raises_on_all_failures(self, mock_worker):
+        from boundry.config import DdGConfig
+
+        mock_relaxer = MagicMock()
+        mock_designer = MagicMock()
+        mock_relaxer.minimize_with_pair_restraints.return_value = (
+            "minimized"
+        )
+        mock_relaxer.generate_local_md_ensemble.return_value = [
+            "m0",
+        ]
+
+        mock_worker.return_value = _DdGMemberResult(
+            member_index=0, error="RuntimeError: fail"
+        )
+
+        config = DdGConfig(
+            chain_pairs=[("A", "B")], n_ensemble=1
+        )
+        with pytest.raises(
+            RuntimeError, match="All ensemble members failed"
+        ):
+            compute_interface_dg(
+                "PDB",
+                config,
+                relaxer=mock_relaxer,
+                designer=mock_designer,
+            )
