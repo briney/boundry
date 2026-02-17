@@ -740,6 +740,7 @@ class _OptimizeProgress:
         self._progress = None
         self._campaign_task = None
         self._cycle_task = None
+        self._phase_tasks: list = []
 
     def __enter__(self):
         if not self._show:
@@ -749,14 +750,17 @@ class _OptimizeProgress:
                 BarColumn,
                 MofNCompleteColumn,
                 Progress,
+                SpinnerColumn,
                 TextColumn,
                 TimeElapsedColumn,
             )
 
             self._progress = Progress(
+                SpinnerColumn(),
                 TextColumn("[bold blue]{task.description}"),
                 BarColumn(),
                 MofNCompleteColumn(),
+                TextColumn("{task.fields[status]}"),
                 TimeElapsedColumn(),
             )
             self._progress.__enter__()
@@ -764,10 +768,12 @@ class _OptimizeProgress:
                 self._campaign_task = self._progress.add_task(
                     "Campaigns",
                     total=self._n_campaigns,
+                    status="",
                 )
             self._cycle_task = self._progress.add_task(
                 "Cycles",
                 total=self._n_cycles,
+                status="",
             )
         except ImportError:
             self._show = False
@@ -798,6 +804,51 @@ class _OptimizeProgress:
                 description=desc,
                 advance=1,
             )
+
+    # -- Phase-level progress --
+
+    def start_phase(
+        self, name: str, total: Optional[int] = None
+    ):
+        """Add a phase progress bar below the cycle bar.
+
+        *total=None* gives a spinner; *total=N* gives a M/N bar.
+        """
+        if not self._progress:
+            return
+        task_id = self._progress.add_task(
+            f"  {name}",
+            total=total,
+            status="",
+        )
+        self._phase_tasks.append(task_id)
+
+    def advance_phase(self):
+        """Advance the current (most recent) phase bar by 1."""
+        if self._progress and self._phase_tasks:
+            self._progress.advance(self._phase_tasks[-1])
+
+    def finish_phase(self):
+        """Mark the current phase as complete."""
+        if not self._progress or not self._phase_tasks:
+            return
+        task_id = self._phase_tasks[-1]
+        task = self._progress._tasks.get(task_id)
+        if task is not None and task.total is not None:
+            self._progress.update(
+                task_id,
+                completed=task.total,
+                status="done",
+            )
+        else:
+            self._progress.update(task_id, status="done")
+
+    def _clear_phases(self):
+        """Remove all phase bars (called at cycle transitions)."""
+        if self._progress:
+            for task_id in self._phase_tasks:
+                self._progress.remove_task(task_id)
+        self._phase_tasks = []
 
 
 # ------------------------------------------------------------------
@@ -946,6 +997,7 @@ def optimize(
                 campaign_dir.mkdir(parents=True, exist_ok=True)
 
             progress.reset_cycles()
+            progress._clear_phases()
 
             # Relax the starting structure
             logger.info(
@@ -961,11 +1013,16 @@ def optimize(
                 n_iterations=config.relax_iterations,
                 show_progress=False,
             )
+            progress.start_phase(
+                "Relaxing", total=config.relax_iterations
+            )
             relaxed = _relax(
                 pdb_string,
                 config=relax_pipeline,
                 n_iterations=config.relax_iterations,
+                on_iteration=progress.advance_phase,
             )
+            progress.finish_phase()
             parents = [relaxed.pdb_string]
 
             # Score initial dG
@@ -995,6 +1052,7 @@ def optimize(
                 cycle_num = cycle_idx + 1
                 cycle_seed = _compose_seed(campaign_seed, cycle_idx)
                 rng = random.Random(cycle_seed)
+                progress._clear_phases()
 
                 logger.info(
                     f"Campaign {campaign_num}, "
@@ -1007,18 +1065,24 @@ def optimize(
                 # scanning stays on the legacy analyze_interface
                 # path (ddG ensemble is too expensive for ranking).
                 if config.interface_scoring_backend == "ddg":
+                    progress.start_phase("Scoring")
                     dG_before = _score_interface(
                         parents[0], config, relaxer
                     )
+                    progress.finish_phase()
+                    progress.start_phase("Alanine scan")
                     _, positions = _analyze_and_find_positions(
                         parents[0], config, relaxer, pool
                     )
+                    progress.finish_phase()
                 else:
+                    progress.start_phase("Scanning interface")
                     dG_before, positions = (
                         _analyze_and_find_positions(
                             parents[0], config, relaxer, pool
                         )
                     )
+                    progress.finish_phase()
 
                 if not positions:
                     if config.position_sampling == "threshold":
@@ -1113,7 +1177,15 @@ def optimize(
                         flat_idx += 1
 
                 # Execute expansions in parallel
-                results = pool.map(_execute_beam_expansion, tasks)
+                progress.start_phase(
+                    "Beam expansion", total=len(tasks)
+                )
+                results = pool.map(
+                    _execute_beam_expansion,
+                    tasks,
+                    on_complete=progress.advance_phase,
+                )
+                progress.finish_phase()
 
                 # Filter out errors and sort by dG
                 valid_results: List[
@@ -1234,6 +1306,9 @@ def optimize(
                     )
                 )
                 progress.advance_cycle(dG_after)
+
+            # Clean up final cycle's phase bars
+            progress._clear_phases()
 
             # Campaign result
             final_campaign_dG = _score_interface(

@@ -23,6 +23,7 @@ from boundry.optimize import (
     OptimizeResult,
     _BeamExpansionResult,
     _BeamExpansionTask,
+    _OptimizeProgress,
     _PositionInfo,
     _compose_seed,
     _cycle_to_dict,
@@ -1209,7 +1210,7 @@ class TestSamplingWithoutReplacement:
         # Capture tasks submitted to pool.map
         captured_tasks = []
 
-        def capture_map(fn, tasks):
+        def capture_map(fn, tasks, **kwargs):
             captured_tasks.extend(tasks)
             return [
                 _BeamExpansionResult(
@@ -1713,7 +1714,7 @@ class TestMultiParentExpansion:
 
         captured_tasks_per_cycle = []
 
-        def capture_map(fn, tasks):
+        def capture_map(fn, tasks, **kwargs):
             tasks = list(tasks)
             captured_tasks_per_cycle.append(tasks)
             # Return 2 good results so beam_width=2 keeps 2 parents
@@ -1815,7 +1816,7 @@ class TestMultiParentExpansion:
 
         call_count = [0]
 
-        def capture_map(fn, tasks):
+        def capture_map(fn, tasks, **kwargs):
             tasks = list(tasks)
             call_count[0] += 1
             results = []
@@ -1915,7 +1916,7 @@ class TestMultiParentExpansion:
         captured_tasks_per_cycle = []
         call_count = [0]
 
-        def capture_map(fn, tasks):
+        def capture_map(fn, tasks, **kwargs):
             tasks = list(tasks)
             captured_tasks_per_cycle.append(tasks)
             call_count[0] += 1
@@ -2103,7 +2104,7 @@ class TestExcludeNative:
 
         captured_tasks = []
 
-        def capture_map(fn, tasks):
+        def capture_map(fn, tasks, **kwargs):
             tasks = list(tasks)
             captured_tasks.extend(tasks)
             results = []
@@ -2279,3 +2280,93 @@ class TestSerializeDdgConfig:
         result = _serialize_ddg_config(config)
         roundtripped = pickle.loads(pickle.dumps(result))
         assert roundtripped == result
+
+
+# ------------------------------------------------------------------
+# _OptimizeProgress phase tracking
+# ------------------------------------------------------------------
+
+
+class TestOptimizeProgressPhases:
+    """Tests for _OptimizeProgress phase-level progress bars."""
+
+    def test_phase_lifecycle_disabled(self):
+        """All phase methods are no-ops when show=False."""
+        prog = _OptimizeProgress(show=False, n_campaigns=1, n_cycles=5)
+        with prog:
+            # None of these should raise
+            prog.start_phase("Relaxing", total=5)
+            prog.advance_phase()
+            prog.finish_phase()
+            prog._clear_phases()
+
+    def test_phase_spinner(self):
+        """start_phase with no total creates a spinner task."""
+        prog = _OptimizeProgress(show=True, n_campaigns=1, n_cycles=5)
+        with prog:
+            prog.start_phase("Scoring")
+            assert len(prog._phase_tasks) == 1
+            task = prog._progress._tasks[prog._phase_tasks[0]]
+            assert task.total is None
+            prog.finish_phase()
+            task = prog._progress._tasks[prog._phase_tasks[0]]
+            assert "done" in task.fields["status"]
+
+    def test_phase_bar(self):
+        """start_phase with total creates a bar with M/N tracking."""
+        prog = _OptimizeProgress(show=True, n_campaigns=1, n_cycles=5)
+        with prog:
+            prog.start_phase("Expanding", total=100)
+            assert len(prog._phase_tasks) == 1
+            task = prog._progress._tasks[prog._phase_tasks[0]]
+            assert task.total == 100
+            assert task.completed == 0
+
+    def test_clear_phases_removes_all(self):
+        """_clear_phases removes all accumulated phase tasks."""
+        prog = _OptimizeProgress(show=True, n_campaigns=2, n_cycles=5)
+        with prog:
+            prog.start_phase("Phase 1", total=10)
+            prog.start_phase("Phase 2")
+            prog.start_phase("Phase 3", total=50)
+            assert len(prog._phase_tasks) == 3
+            prog._clear_phases()
+            assert len(prog._phase_tasks) == 0
+            # Phase tasks are removed from the display
+            # (only campaign + cycle tasks remain)
+            remaining = list(prog._progress._tasks.keys())
+            assert len(remaining) == 2  # campaign + cycle
+
+    def test_clear_phases_no_campaign(self):
+        """_clear_phases works when there's no campaign bar."""
+        prog = _OptimizeProgress(show=True, n_campaigns=1, n_cycles=5)
+        with prog:
+            prog.start_phase("Phase 1", total=10)
+            prog._clear_phases()
+            remaining = list(prog._progress._tasks.keys())
+            # Only cycle task (no campaign because n_campaigns=1)
+            assert len(remaining) == 1
+
+    def test_advance_phase_as_callback(self):
+        """advance_phase is usable as a bare () -> None callback."""
+        prog = _OptimizeProgress(show=True, n_campaigns=1, n_cycles=5)
+        with prog:
+            prog.start_phase("Beam", total=10)
+            callback = prog.advance_phase
+            callback()
+            callback()
+            callback()
+            task = prog._progress._tasks[prog._phase_tasks[0]]
+            assert task.completed == 3
+
+    def test_finish_phase_sets_completed(self):
+        """finish_phase sets completed = total for bar-style phases."""
+        prog = _OptimizeProgress(show=True, n_campaigns=1, n_cycles=5)
+        with prog:
+            prog.start_phase("Relaxing", total=5)
+            prog.advance_phase()
+            prog.advance_phase()
+            # Only 2/5 done, but finish_phase should set to 5/5
+            prog.finish_phase()
+            task = prog._progress._tasks[prog._phase_tasks[0]]
+            assert task.completed == 5

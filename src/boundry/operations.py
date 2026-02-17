@@ -12,7 +12,7 @@ import logging
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
     from boundry.binding_energy import BindingEnergyResult
@@ -532,6 +532,7 @@ def relax(
     design_spec: Optional["DesignSpec"] = None,
     pre_idealize: bool = False,
     n_iterations: int = 5,
+    on_iteration: Optional[Callable[[], None]] = None,
 ) -> Structure:
     """Iterative side-chain repacking and energy minimization.
 
@@ -625,6 +626,9 @@ def relax(
         # Update progress bar with energy
         if pbar is not None:
             pbar.set_postfix(E=f"{relax_info['final_energy']:.1f}")
+
+        if on_iteration is not None:
+            on_iteration()
 
         logger.info(
             f"  E_init={relax_info['initial_energy']:.2f}, "
