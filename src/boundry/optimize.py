@@ -300,12 +300,13 @@ def _execute_beam_expansion(task: _BeamExpansionTask) -> _BeamExpansionResult:
                 from boundry.ddg import compute_interface_dg
 
                 ddg_cfg = DdGConfig(**task.ddg_config_dict)
-                dG = compute_interface_dg(
+                dg_result = compute_interface_dg(
                     current_pdb,
                     ddg_cfg,
                     relaxer=relaxer,
                     designer=designer,
                 )
+                dG = dg_result.dG
             else:
                 be_result = calculate_binding_energy(
                     current_pdb,
@@ -426,9 +427,10 @@ def _score_interface(
     if config.interface_scoring_backend == "ddg":
         from boundry.ddg import compute_interface_dg
 
-        return compute_interface_dg(
+        result = compute_interface_dg(
             pdb_string, config.ddg, relaxer=relaxer
         )
+        return result.dG
 
     from boundry.binding_energy import calculate_binding_energy
 

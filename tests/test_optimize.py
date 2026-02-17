@@ -2165,9 +2165,12 @@ class TestScoreInterfaceDdgBackend:
             ddg=DdGConfig(chain_pairs=[("H", "L")]),
         )
 
+        from boundry.ddg import InterfaceDgResult
+
+        mock_result = InterfaceDgResult(dG=-18.5, minimized_pdb="ATOM...")
         with patch(
             "boundry.ddg.compute_interface_dg",
-            return_value=-18.5,
+            return_value=mock_result,
         ):
             dG = _score_interface("ATOM...", config, MagicMock())
 
