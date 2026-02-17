@@ -85,6 +85,32 @@ class MockDesigner:
 
         return bias
 
+    def _build_repack_mask(
+        self,
+        encoded_residues: list,
+        design_spec,
+    ) -> torch.Tensor:
+        """Build repack mask: 1=repack, 0=keep original rotamer (NATRO)."""
+        if design_spec is None:
+            return torch.ones(
+                len(encoded_residues),
+                device=self.device,
+                dtype=torch.float32,
+            )
+
+        mask = []
+        for key in encoded_residues:
+            if key in design_spec.residue_specs:
+                spec = design_spec.residue_specs[key]
+                mask.append(1.0 if spec.is_repackable() else 0.0)
+            else:
+                repackable = (
+                    design_spec.default_mode != ResidueMode.NATRO
+                )
+                mask.append(1.0 if repackable else 0.0)
+
+        return torch.tensor(mask, device=self.device, dtype=torch.float32)
+
 
 class TestBuildResidueMapping:
     """Tests for _build_residue_mapping method."""
@@ -362,3 +388,138 @@ class TestBuildAABias:
         # A3: NATAA - no bias (not designable)
         for aa in ALL_AAS:
             assert result[0, 2, aa_to_idx[aa]] == 0.0
+
+
+class TestBuildRepackMask:
+    """Tests for _build_repack_mask method."""
+
+    @pytest.fixture
+    def designer(self):
+        return MockDesigner()
+
+    def test_no_spec_repacks_all(self, designer):
+        """None design_spec returns all 1.0 (backward compat)."""
+        residues = ["A1", "A2", "A3"]
+
+        result = designer._build_repack_mask(residues, None)
+
+        assert result.shape == (3,)
+        assert torch.all(result == 1.0)
+
+    def test_natro_not_repackable(self, designer):
+        """NATRO residues get 0.0 (keep original rotamer)."""
+        residues = ["A1", "A2"]
+        specs = {
+            "A1": ResidueSpec(
+                chain="A", resnum=1, mode=ResidueMode.NATRO
+            ),
+            "A2": ResidueSpec(
+                chain="A", resnum=2, mode=ResidueMode.NATAA
+            ),
+        }
+        design_spec = DesignSpec(residue_specs=specs)
+
+        result = designer._build_repack_mask(residues, design_spec)
+
+        assert result[0] == 0.0  # NATRO
+        assert result[1] == 1.0  # NATAA
+
+    def test_nataa_repackable(self, designer):
+        """NATAA residues get 1.0 (repack side chain)."""
+        residues = ["A1"]
+        specs = {
+            "A1": ResidueSpec(
+                chain="A", resnum=1, mode=ResidueMode.NATAA
+            ),
+        }
+        design_spec = DesignSpec(residue_specs=specs)
+
+        result = designer._build_repack_mask(residues, design_spec)
+
+        assert result[0] == 1.0
+
+    def test_designable_modes_repackable(self, designer):
+        """ALLAA, PIKAA, NOTAA, POLAR, APOLAR are all repackable."""
+        residues = ["A1", "A2", "A3", "A4", "A5"]
+        specs = {
+            "A1": ResidueSpec(
+                chain="A", resnum=1, mode=ResidueMode.ALLAA
+            ),
+            "A2": ResidueSpec(
+                chain="A",
+                resnum=2,
+                mode=ResidueMode.PIKAA,
+                allowed_aas={"A", "G"},
+            ),
+            "A3": ResidueSpec(
+                chain="A",
+                resnum=3,
+                mode=ResidueMode.NOTAA,
+                allowed_aas={"C"},
+            ),
+            "A4": ResidueSpec(
+                chain="A", resnum=4, mode=ResidueMode.POLAR
+            ),
+            "A5": ResidueSpec(
+                chain="A", resnum=5, mode=ResidueMode.APOLAR
+            ),
+        }
+        design_spec = DesignSpec(residue_specs=specs)
+
+        result = designer._build_repack_mask(residues, design_spec)
+
+        assert torch.all(result == 1.0)
+
+    def test_default_mode_natro(self, designer):
+        """Unlisted residues with NATRO default get 0.0."""
+        residues = ["A1", "A2", "A3"]
+        specs = {
+            "A1": ResidueSpec(
+                chain="A", resnum=1, mode=ResidueMode.NATAA
+            ),
+        }
+        design_spec = DesignSpec(
+            residue_specs=specs, default_mode=ResidueMode.NATRO
+        )
+
+        result = designer._build_repack_mask(residues, design_spec)
+
+        assert result[0] == 1.0  # Explicit NATAA
+        assert result[1] == 0.0  # Default NATRO
+        assert result[2] == 0.0  # Default NATRO
+
+    def test_default_mode_nataa(self, designer):
+        """Unlisted residues with NATAA default get 1.0."""
+        residues = ["A1", "A2"]
+        specs = {}
+        design_spec = DesignSpec(
+            residue_specs=specs, default_mode=ResidueMode.NATAA
+        )
+
+        result = designer._build_repack_mask(residues, design_spec)
+
+        assert torch.all(result == 1.0)
+
+    def test_mixed_specs(self, designer):
+        """Mixed NATRO+NATAA+ALLAA produces correct per-residue values."""
+        residues = ["A1", "A2", "A3", "A4"]
+        specs = {
+            "A1": ResidueSpec(
+                chain="A", resnum=1, mode=ResidueMode.NATRO
+            ),
+            "A2": ResidueSpec(
+                chain="A", resnum=2, mode=ResidueMode.NATAA
+            ),
+            "A3": ResidueSpec(
+                chain="A", resnum=3, mode=ResidueMode.ALLAA
+            ),
+            "A4": ResidueSpec(
+                chain="A", resnum=4, mode=ResidueMode.NATRO
+            ),
+        }
+        design_spec = DesignSpec(residue_specs=specs)
+
+        result = designer._build_repack_mask(residues, design_spec)
+
+        expected = torch.tensor([0.0, 1.0, 1.0, 0.0])
+        assert torch.equal(result, expected)
