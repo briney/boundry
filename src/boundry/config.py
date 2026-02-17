@@ -93,6 +93,63 @@ class SelectPositionsConfig:
 
 
 @dataclass
+class DdGConfig:
+    """Configuration for ddG scoring pipeline.
+
+    When ``paper_mode=True``, ``n_ensemble`` and ``md_total_steps`` are
+    overridden to 50 and 100_000 respectively — but only when they are
+    still at their default values.  If the user explicitly sets either
+    field, the explicit value is preserved even with ``paper_mode=True``.
+    """
+
+    # Ensemble
+    n_ensemble: int = 35
+    md_total_steps: int = 50000
+    md_equilibration_steps: int = 5000
+    md_temperature: float = 300.0  # Kelvin
+    md_friction: float = 1.0  # 1/ps
+    neighborhood_sampling_bias: float = 1.0
+
+    # Restraints
+    ca_cutoff: float = 9.0  # Angstroms
+    restraint_sd: float = 0.5  # Angstroms
+
+    # Neighborhood
+    neighborhood_radius: float = 8.0  # Angstroms
+    sequence_window: int = 1
+
+    # Interface definition
+    chain_pairs: Optional[List[Tuple[str, str]]] = None
+    separation_distance: float = 100.0  # Angstroms
+
+    # Energy model
+    implicit_solvent: bool = True
+
+    # Execution
+    workers: int = 1
+    seed: Optional[int] = None
+    quiet: bool = True
+
+    # Output / cache
+    cache_ensemble: bool = False
+    ensemble_dir: Optional[Path] = None
+
+    # Analysis parity controls
+    sort_members_by_wt_bound_energy: bool = False
+    average_top_n: Optional[int] = None
+
+    # Convenience preset
+    paper_mode: bool = False
+
+    def __post_init__(self):
+        if self.paper_mode:
+            if self.n_ensemble == 35:
+                self.n_ensemble = 50
+            if self.md_total_steps == 50000:
+                self.md_total_steps = 100000
+
+
+@dataclass
 class OptimizeConfig:
     """Configuration for the optimize command."""
 
@@ -115,6 +172,8 @@ class OptimizeConfig:
             enabled=True, add_missing_residues=False
         )
     )
+    interface_scoring_backend: str = "ddg"  # "ddg" | "legacy"
+    ddg: "DdGConfig" = field(default_factory=DdGConfig)
     seed: Optional[int] = None
     workers: int = 1
     show_progress: bool = False
@@ -131,6 +190,13 @@ class OptimizeConfig:
             raise ValueError(
                 f"sampling_temperature must be > 0, "
                 f"got {self.sampling_temperature}"
+            )
+        valid_backends = ("ddg", "legacy")
+        if self.interface_scoring_backend not in valid_backends:
+            raise ValueError(
+                f"interface_scoring_backend must be one of "
+                f"{valid_backends}, "
+                f"got {self.interface_scoring_backend!r}"
             )
 
 

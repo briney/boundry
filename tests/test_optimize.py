@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 
 from boundry.cli import app
 from boundry.config import (
+    DdGConfig,
     DesignConfig,
     IdealizeConfig,
     OptimizeConfig,
@@ -78,6 +79,18 @@ class TestOptimizeConfig:
         assert isinstance(cfg.relax, RelaxConfig)
         assert isinstance(cfg.idealize, IdealizeConfig)
         assert cfg.idealize.enabled is True
+
+    def test_ddg_backend_default(self):
+        cfg = OptimizeConfig(chain_pairs=[("H", "L")])
+        assert cfg.interface_scoring_backend == "ddg"
+        assert isinstance(cfg.ddg, DdGConfig)
+
+    def test_legacy_backend(self):
+        cfg = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            interface_scoring_backend="legacy",
+        )
+        assert cfg.interface_scoring_backend == "legacy"
 
 
 # ------------------------------------------------------------------
@@ -1269,6 +1282,15 @@ class TestOptimizeConfigValidation:
             OptimizeConfig(
                 chain_pairs=[("H", "L")],
                 sampling_temperature=-1.0,
+            )
+
+    def test_invalid_backend(self):
+        with pytest.raises(
+            ValueError, match="interface_scoring_backend"
+        ):
+            OptimizeConfig(
+                chain_pairs=[("H", "L")],
+                interface_scoring_backend="invalid",
             )
 
     def test_threshold_mode_compat(self):

@@ -43,6 +43,7 @@ from boundry.workflow import Workflow
 # Configuration dataclasses (lightweight, no heavy deps)
 from boundry.config import (
     BeamBlock,
+    DdGConfig,
     DesignConfig,
     IdealizeConfig,
     InterfaceConfig,
@@ -90,6 +91,7 @@ __all__ = [
     "IdealizeConfig",
     "InterfaceConfig",
     "SelectPositionsConfig",
+    "DdGConfig",
     "WorkflowConfig",
     "WorkflowStep",
     "IterateBlock",
