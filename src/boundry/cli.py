@@ -1219,6 +1219,11 @@ def ddg(
     seed: Optional[int] = typer.Option(
         None, "--seed", help="Random seed for reproducibility"
     ),
+    cache_ensemble: bool = typer.Option(
+        False,
+        "--cache-ensemble",
+        help="Save ensemble member PDB files in output/ensemble/",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -1258,6 +1263,7 @@ def ddg(
             mutation_string=mutations,
             config=ddg_config,
             output_path=output,
+            cache_ensemble=cache_ensemble,
         )
 
     # Print summary
@@ -1273,6 +1279,11 @@ def ddg(
 
     if output is not None:
         typer.echo(f"Results: {output}/ddg_results.json")
+        typer.echo(
+            f"Minimized structure: {output}/input_minimized.pdb"
+        )
+        if cache_ensemble:
+            typer.echo(f"Ensemble: {output}/ensemble/")
 
 
 def _resolve_workflow(name_or_path: str) -> Path:

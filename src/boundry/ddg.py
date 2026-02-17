@@ -125,6 +125,9 @@ class DdGResult:
     n_successful: int
     n_ensemble: int
     ensemble_ddGs: List[float]
+    minimized_pdb: Optional[str] = None
+    sorted_by_wt_energy: bool = False
+    top_n_applied: Optional[int] = None
 
     def to_dict(self) -> dict:
         """Return a JSON-serializable dictionary."""
@@ -152,8 +155,18 @@ class DdGResult:
             "n_successful": self.n_successful,
             "n_ensemble": self.n_ensemble,
             "ensemble_ddGs": self.ensemble_ddGs,
+            "sorted_by_wt_energy": self.sorted_by_wt_energy,
+            "top_n_applied": self.top_n_applied,
             "member_results": members,
         }
+
+
+@dataclass
+class InterfaceDgResult:
+    """Result from interface dG (binding energy) computation."""
+
+    dG: float
+    minimized_pdb: str
 
 
 # ── Parsing helpers ───────────────────────────────────────────────
@@ -1013,6 +1026,14 @@ def compute_ddg(
         n_successful=len(ensemble_ddGs),
         n_ensemble=len(ensemble),
         ensemble_ddGs=ensemble_ddGs,
+        minimized_pdb=minimized_pdb,
+        sorted_by_wt_energy=config.sort_members_by_wt_bound_energy,
+        top_n_applied=(
+            config.average_top_n
+            if config.sort_members_by_wt_bound_energy
+            and config.average_top_n is not None
+            else None
+        ),
     )
 
 
@@ -1022,7 +1043,7 @@ def compute_interface_dg(
     relaxer: Any = None,
     designer: Any = None,
     pool: Any = None,
-) -> float:
+) -> InterfaceDgResult:
     """Compute interface dG (binding energy) without mutations.
 
     Uses the same ensemble pipeline as :func:`compute_ddg` but with
@@ -1036,7 +1057,7 @@ def compute_interface_dg(
         pool: WorkPool for parallel dispatch.
 
     Returns:
-        Mean dG (bound - unbound) across the ensemble.
+        :class:`InterfaceDgResult` with mean dG and minimized PDB.
 
     Raises:
         ValueError: If ``config.chain_pairs`` is ``None``.
@@ -1093,6 +1114,13 @@ def compute_interface_dg(
         implicit_solvent=config.implicit_solvent,
         seed=config.seed,
     )
+
+    # Optionally cache ensemble
+    if config.cache_ensemble and config.ensemble_dir is not None:
+        config.ensemble_dir.mkdir(parents=True, exist_ok=True)
+        for i, member_pdb in enumerate(ensemble):
+            path = config.ensemble_dir / f"member_{i:04d}.pdb"
+            path.write_text(member_pdb)
 
     # Build empty neighborhood spec (repack nothing)
     from boundry.resfile import DesignSpec, ResidueMode
@@ -1157,4 +1185,7 @@ def compute_interface_dg(
             "All ensemble members failed — cannot compute dG"
         )
 
-    return statistics.mean(dg_values)
+    return InterfaceDgResult(
+        dG=statistics.mean(dg_values),
+        minimized_pdb=minimized_pdb,
+    )

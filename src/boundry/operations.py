@@ -1100,6 +1100,7 @@ def ddg(
     mutation_string: Optional[str] = None,
     config: Optional["DdGConfig"] = None,
     output_path: Optional[Path] = None,
+    cache_ensemble: bool = False,
 ) -> Structure:
     """Compute ddG (mutation scoring) or dG (binding energy).
 
@@ -1125,10 +1126,11 @@ def ddg(
     Raises:
         ValueError: If ``config.chain_pairs`` is ``None``.
     """
-    import json
+    from dataclasses import replace as _replace
 
     from boundry.config import DdGConfig
     from boundry.ddg import (
+        InterfaceDgResult,
         compute_ddg,
         compute_interface_dg,
         parse_mutations,
@@ -1149,16 +1151,25 @@ def ddg(
 
     # Translate CIF chain IDs to PDB IDs
     if chain_id_mapping and config.chain_pairs:
-        from dataclasses import replace
-
-        config = replace(
+        config = _replace(
             config,
             chain_pairs=_translate_chain_pairs(
                 config.chain_pairs, chain_id_mapping
             ),
         )
 
+    # Wire ensemble caching when output_path is set
+    if output_path is not None and (
+        cache_ensemble or config.cache_ensemble
+    ):
+        config = _replace(
+            config,
+            cache_ensemble=True,
+            ensemble_dir=Path(output_path) / "ensemble",
+        )
+
     metadata: Dict[str, Any] = {"operation": "ddg"}
+    minimized_pdb_string: Optional[str] = None
 
     if mutations is not None or mutation_string is not None:
         # Mutation mode: compute ddG
@@ -1170,21 +1181,30 @@ def ddg(
         metadata["ddg"] = result.to_dict()
         metadata["ddG"] = result.mean_ddG
         metadata["std_ddG"] = result.std_ddG
+        minimized_pdb_string = result.minimized_pdb
     else:
         # Binding energy mode: compute dG
-        dG = compute_interface_dg(pdb_string, config)
-        metadata["ddg"] = {"dG": dG}
-        metadata["dG"] = dG
+        dg_result = compute_interface_dg(pdb_string, config)
+        metadata["ddg"] = {"dG": dg_result.dG}
+        metadata["dG"] = dg_result.dG
+        minimized_pdb_string = dg_result.minimized_pdb
 
     _propagate_chain_mapping(metadata, input_meta)
 
     if output_path is not None:
+        from boundry.result_io import (
+            write_ddg_json,
+            write_ddg_minimized_pdb,
+        )
+
         out_dir = Path(output_path)
         out_dir.mkdir(parents=True, exist_ok=True)
-        results_file = out_dir / "ddg_results.json"
-        results_file.write_text(
-            json.dumps(metadata["ddg"], indent=2)
-        )
+        write_ddg_json(metadata["ddg"], out_dir / "ddg_results.json")
+        if minimized_pdb_string is not None:
+            write_ddg_minimized_pdb(
+                minimized_pdb_string,
+                out_dir / "input_minimized.pdb",
+            )
 
     return Structure(
         pdb_string=pdb_string,

@@ -127,6 +127,25 @@ def resolve_interface_output_paths(
     return summary_path, pp_path, ala_path
 
 
+def write_ddg_json(result_dict: dict, output_path: PathLike) -> Path:
+    """Write ddG results JSON and return the path."""
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(result_dict, f, indent=2, default=str)
+    return path
+
+
+def write_ddg_minimized_pdb(
+    pdb_string: str, output_path: PathLike
+) -> Path:
+    """Write the restrained-minimized input PDB and return the path."""
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(pdb_string)
+    return path
+
+
 def _to_jsonable(value: Any) -> Any:
     if value is None:
         return None

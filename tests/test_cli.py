@@ -441,6 +441,11 @@ class TestDdg:
         assert result.exit_code != 0
         assert "not found" in result.output.lower()
 
+    def test_has_cache_ensemble_option(self):
+        """Test that --cache-ensemble option is available."""
+        result = runner.invoke(app, ["ddg", "--help"])
+        assert "--cache-ensemble" in result.output
+
     def test_missing_interface_flag(self, tmp_path):
         """Test ddg without --interface fails."""
         pdb_file = tmp_path / "input.pdb"

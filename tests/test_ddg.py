@@ -10,6 +10,7 @@ import pytest
 from boundry.ddg import (
     DdGResult,
     EnsembleMemberResult,
+    InterfaceDgResult,
     MutationSpec,
     _DdGMemberResult,
     _DdGMemberTask,
@@ -466,6 +467,8 @@ class TestDdGResult:
             "n_successful",
             "n_ensemble",
             "ensemble_ddGs",
+            "sorted_by_wt_energy",
+            "top_n_applied",
             "member_results",
         }
         assert set(d.keys()) == expected_keys
@@ -485,6 +488,17 @@ class TestDdGResult:
         result = self._make_result()
         d = result.to_dict()
         assert d["mutations"] == ["A:L1A"]
+
+    def test_to_dict_excludes_minimized_pdb(self):
+        result = self._make_result()
+        result.minimized_pdb = "PDB DATA"
+        d = result.to_dict()
+        assert "minimized_pdb" not in d
+
+    def test_minimized_pdb_field(self):
+        result = self._make_result()
+        result.minimized_pdb = "PDB"
+        assert result.minimized_pdb == "PDB"
 
 
 # ------------------------------------------------------------------
@@ -916,6 +930,7 @@ class TestComputeDdG:
         # member 0: dG_wt=-20, dG_mut=-15, ddG=5
         # member 1: dG_wt=-20, dG_mut=-15, ddG=5
         assert result.mean_ddG == pytest.approx(5.0)
+        assert result.minimized_pdb == "minimized"
 
     @patch("boundry.ddg._process_ensemble_member")
     @patch("boundry.ddg.build_sampling_neighborhood")
@@ -1026,6 +1041,106 @@ class TestComputeDdG:
         assert len(cached) == 2
         assert cached[0].read_text() == "member0_pdb"
 
+    @patch("boundry.ddg._process_ensemble_member")
+    @patch("boundry.ddg.build_sampling_neighborhood")
+    @patch("boundry.ddg.build_neighborhood_spec")
+    @patch("boundry.ddg.validate_mutations")
+    def test_result_aggregation_flags_when_sorting_enabled(
+        self,
+        mock_validate,
+        mock_build_spec,
+        mock_build_sampling,
+        mock_worker,
+    ):
+        from boundry.config import DdGConfig
+        from boundry.resfile import DesignSpec, ResidueMode
+
+        mock_relaxer = MagicMock()
+        mock_designer = MagicMock()
+        mock_relaxer.minimize_with_pair_restraints.return_value = (
+            "minimized"
+        )
+        mock_relaxer.generate_local_md_ensemble.return_value = [
+            "m0",
+        ]
+        mock_build_spec.return_value = DesignSpec(
+            residue_specs={}, default_mode=ResidueMode.NATRO
+        )
+        mock_build_sampling.return_value = []
+        mock_worker.return_value = _DdGMemberResult(
+            member_index=0,
+            bound_wt_energy=-100.0,
+            unbound_wt_energy=-80.0,
+            bound_mut_energy=-90.0,
+            unbound_mut_energy=-75.0,
+        )
+
+        config = DdGConfig(
+            chain_pairs=[("A", "B")],
+            n_ensemble=1,
+            sort_members_by_wt_bound_energy=True,
+            average_top_n=3,
+        )
+        result = compute_ddg(
+            "PDB",
+            [MutationSpec("A", 1, "LEU", "ALA")],
+            config,
+            relaxer=mock_relaxer,
+            designer=mock_designer,
+        )
+        assert result.sorted_by_wt_energy is True
+        assert result.top_n_applied == 3
+
+    @patch("boundry.ddg._process_ensemble_member")
+    @patch("boundry.ddg.build_sampling_neighborhood")
+    @patch("boundry.ddg.build_neighborhood_spec")
+    @patch("boundry.ddg.validate_mutations")
+    def test_top_n_applied_none_when_sorting_disabled(
+        self,
+        mock_validate,
+        mock_build_spec,
+        mock_build_sampling,
+        mock_worker,
+    ):
+        from boundry.config import DdGConfig
+        from boundry.resfile import DesignSpec, ResidueMode
+
+        mock_relaxer = MagicMock()
+        mock_designer = MagicMock()
+        mock_relaxer.minimize_with_pair_restraints.return_value = (
+            "minimized"
+        )
+        mock_relaxer.generate_local_md_ensemble.return_value = [
+            "m0",
+        ]
+        mock_build_spec.return_value = DesignSpec(
+            residue_specs={}, default_mode=ResidueMode.NATRO
+        )
+        mock_build_sampling.return_value = []
+        mock_worker.return_value = _DdGMemberResult(
+            member_index=0,
+            bound_wt_energy=-100.0,
+            unbound_wt_energy=-80.0,
+            bound_mut_energy=-90.0,
+            unbound_mut_energy=-75.0,
+        )
+
+        config = DdGConfig(
+            chain_pairs=[("A", "B")],
+            n_ensemble=1,
+            sort_members_by_wt_bound_energy=False,
+            average_top_n=3,
+        )
+        result = compute_ddg(
+            "PDB",
+            [MutationSpec("A", 1, "LEU", "ALA")],
+            config,
+            relaxer=mock_relaxer,
+            designer=mock_designer,
+        )
+        assert result.sorted_by_wt_energy is False
+        assert result.top_n_applied is None
+
 
 # ------------------------------------------------------------------
 # compute_interface_dg
@@ -1041,7 +1156,7 @@ class TestComputeInterfaceDG:
             compute_interface_dg("PDB", config)
 
     @patch("boundry.ddg._process_ensemble_member")
-    def test_returns_float(self, mock_worker):
+    def test_returns_interface_dg_result(self, mock_worker):
         from boundry.config import DdGConfig
 
         mock_relaxer = MagicMock()
@@ -1070,15 +1185,61 @@ class TestComputeInterfaceDG:
         config = DdGConfig(
             chain_pairs=[("A", "B")], n_ensemble=2
         )
-        dg = compute_interface_dg(
+        result = compute_interface_dg(
             "PDB",
             config,
             relaxer=mock_relaxer,
             designer=mock_designer,
         )
-        assert isinstance(dg, float)
+        assert isinstance(result, InterfaceDgResult)
         # (-20 + -20) / 2 = -20
-        assert dg == pytest.approx(-20.0)
+        assert result.dG == pytest.approx(-20.0)
+        assert result.minimized_pdb == "minimized"
+
+    @patch("boundry.ddg._process_ensemble_member")
+    def test_ensemble_caching(self, mock_worker, tmp_path):
+        from boundry.config import DdGConfig
+
+        mock_relaxer = MagicMock()
+        mock_designer = MagicMock()
+        mock_relaxer.minimize_with_pair_restraints.return_value = (
+            "minimized"
+        )
+        mock_relaxer.generate_local_md_ensemble.return_value = [
+            "member0_pdb",
+            "member1_pdb",
+        ]
+
+        mock_worker.side_effect = [
+            _DdGMemberResult(
+                member_index=0,
+                bound_wt_energy=-100.0,
+                unbound_wt_energy=-80.0,
+            ),
+            _DdGMemberResult(
+                member_index=1,
+                bound_wt_energy=-102.0,
+                unbound_wt_energy=-82.0,
+            ),
+        ]
+
+        ens_dir = tmp_path / "ensemble"
+        config = DdGConfig(
+            chain_pairs=[("A", "B")],
+            n_ensemble=2,
+            cache_ensemble=True,
+            ensemble_dir=ens_dir,
+        )
+        compute_interface_dg(
+            "PDB",
+            config,
+            relaxer=mock_relaxer,
+            designer=mock_designer,
+        )
+
+        cached = sorted(ens_dir.glob("member_*.pdb"))
+        assert len(cached) == 2
+        assert cached[0].read_text() == "member0_pdb"
 
     @patch("boundry.ddg._process_ensemble_member")
     def test_raises_on_all_failures(self, mock_worker):
