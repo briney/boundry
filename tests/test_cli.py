@@ -453,6 +453,97 @@ class TestDdg:
         result = runner.invoke(app, ["ddg", str(pdb_file)])
         assert result.exit_code != 0
 
+    @patch("boundry.operations.ddg")
+    def test_mutation_mode_stdout(self, mock_ddg, tmp_path):
+        """Test ddg mutation mode prints ddG summary."""
+        from boundry.operations import Structure
+
+        pdb_file = tmp_path / "input.pdb"
+        pdb_file.write_text("ATOM      1  N   ALA A   1\nEND\n")
+        mock_ddg.return_value = Structure(
+            pdb_string="ATOM\nEND\n",
+            metadata={
+                "operation": "ddg",
+                "ddG": 2.50,
+                "std_ddG": 0.80,
+                "ddg": {
+                    "mean_ddG": 2.50,
+                    "std_ddG": 0.80,
+                },
+            },
+        )
+        result = runner.invoke(
+            app,
+            [
+                "ddg",
+                str(pdb_file),
+                "--interface",
+                "A:B",
+                "--mutations",
+                "A:L5A",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "2.50" in result.output
+        assert "0.80" in result.output
+
+    @patch("boundry.operations.ddg")
+    def test_dg_mode_stdout(self, mock_ddg, tmp_path):
+        """Test ddg dG mode (no mutations) prints dG summary."""
+        from boundry.operations import Structure
+
+        pdb_file = tmp_path / "input.pdb"
+        pdb_file.write_text("ATOM      1  N   ALA A   1\nEND\n")
+        mock_ddg.return_value = Structure(
+            pdb_string="ATOM\nEND\n",
+            metadata={
+                "operation": "ddg",
+                "dG": -15.50,
+                "ddg": {"dG": -15.50},
+            },
+        )
+        result = runner.invoke(
+            app,
+            [
+                "ddg",
+                str(pdb_file),
+                "--interface",
+                "A:B",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "-15.50" in result.output
+
+    @patch("boundry.operations.ddg")
+    def test_output_directory_flag(self, mock_ddg, tmp_path):
+        """Test ddg with --output mentions result files."""
+        from boundry.operations import Structure
+
+        pdb_file = tmp_path / "input.pdb"
+        pdb_file.write_text("ATOM      1  N   ALA A   1\nEND\n")
+        out_dir = tmp_path / "out"
+        mock_ddg.return_value = Structure(
+            pdb_string="ATOM\nEND\n",
+            metadata={
+                "operation": "ddg",
+                "dG": -10.0,
+                "ddg": {"dG": -10.0},
+            },
+        )
+        result = runner.invoke(
+            app,
+            [
+                "ddg",
+                str(pdb_file),
+                "--interface",
+                "A:B",
+                "--output",
+                str(out_dir),
+            ],
+        )
+        assert result.exit_code == 0
+        assert "ddg_results.json" in result.output
+
 
 class TestMainEntryPoint:
     """Tests for the main() entry point."""
