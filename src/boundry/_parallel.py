@@ -59,14 +59,23 @@ class WorkPool:
         self,
         fn: Callable[[T], Any],
         tasks: List[T],
+        on_complete: Optional[Callable[[], None]] = None,
     ) -> List[Any]:
         """Submit all *tasks*, wait for completion, return ordered results.
 
         On any ``Future`` exception, cancels pending futures and raises
         a ``WorkflowError`` with the task index and exception context.
+
+        If *on_complete* is provided, it is called after each task
+        finishes successfully (useful for progress-bar updates).
         """
         if self._pool is None:
-            return [fn(task) for task in tasks]
+            results = []
+            for task in tasks:
+                results.append(fn(task))
+                if on_complete is not None:
+                    on_complete()
+            return results
 
         from boundry.workflow import WorkflowError
 
@@ -83,6 +92,8 @@ class WorkPool:
                 idx = future_to_idx[future]
                 try:
                     results[idx] = future.result()
+                    if on_complete is not None:
+                        on_complete()
                 except Exception as exc:
                     # Cancel remaining futures
                     for f in future_to_idx:

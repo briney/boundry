@@ -52,6 +52,18 @@ _ALANINE_SCAN_SKIP = {"ALA", "GLY", "PRO"}
 # Atoms retained when mutating to alanine
 _ALA_ATOMS = {"N", "CA", "C", "O", "CB", "OXT", "H", "HA"}
 
+# Backbone atoms present in all residues (except GLY lacks CB)
+_BACKBONE_ATOMS = {"N", "CA", "C", "O", "OXT", "H", "HA"}
+_BACKBONE_ATOMS_WITH_CB = _BACKBONE_ATOMS | {"CB"}
+
+# Standard 3-letter amino acid codes
+_STANDARD_AA = {
+    "ALA", "ARG", "ASN", "ASP", "CYS",
+    "GLN", "GLU", "GLY", "HIS", "ILE",
+    "LEU", "LYS", "MET", "PHE", "PRO",
+    "SER", "THR", "TRP", "TYR", "VAL",
+}  # fmt: skip
+
 
 # ------------------------------------------------------------------
 # Data classes
@@ -140,27 +152,39 @@ class PositionEnergeticsResult(NamedTuple):
 # ------------------------------------------------------------------
 
 
-def mutate_to_alanine(
+def mutate_residue(
     pdb_string: str,
     chain_id: str,
     resnum: int,
+    new_resname: str,
     icode: str = "",
 ) -> str:
-    """Mutate a single residue to alanine in a PDB string.
+    """Mutate a single residue to any standard amino acid in a PDB string.
 
-    Deletes side-chain atoms beyond the alanine atom set and renames
-    the residue to ``ALA``.  Downstream tools (PDBFixer / OpenMM)
-    handle hydrogen rebuilding.
+    Strips side-chain atoms (keeping backbone + CB when the target is
+    not GLY) and renames the residue.  Downstream tools (PDBFixer /
+    OpenMM) rebuild missing heavy atoms and hydrogens.
 
     Args:
         pdb_string: PDB file contents.
         chain_id: Chain containing the target residue.
         resnum: Residue sequence number.
+        new_resname: Target residue as a 3-letter code (e.g. ``"ALA"``).
         icode: Insertion code (empty string if none).
 
     Returns:
-        Modified PDB string with the residue mutated to ALA.
+        Modified PDB string with the residue mutated.
+
+    Raises:
+        ValueError: If *new_resname* is not a standard amino acid.
     """
+    new_resname = new_resname.upper()
+    if new_resname not in _STANDARD_AA:
+        raise ValueError(
+            f"Unknown residue type: {new_resname!r}. "
+            f"Must be one of the 20 standard amino acids."
+        )
+    keep = _BACKBONE_ATOMS if new_resname == "GLY" else _BACKBONE_ATOMS_WITH_CB
     out_lines: list[str] = []
     for line in pdb_string.splitlines(keepends=True):
         if not line.startswith(("ATOM", "HETATM")):
@@ -183,15 +207,38 @@ def mutate_to_alanine(
             and line_resnum == resnum
             and line_icode == (icode or "")
         ):
-            # Drop atoms not in alanine
-            if atom_name not in _ALA_ATOMS:
+            if atom_name not in keep:
                 continue
-            # Rename residue to ALA
-            line = line[:17] + "ALA" + line[20:]
+            # Rename residue
+            line = line[:17] + f"{new_resname:<3s}" + line[20:]
 
         out_lines.append(line)
 
     return "".join(out_lines)
+
+
+def mutate_to_alanine(
+    pdb_string: str,
+    chain_id: str,
+    resnum: int,
+    icode: str = "",
+) -> str:
+    """Mutate a single residue to alanine in a PDB string.
+
+    Convenience wrapper around :func:`mutate_residue` for alanine
+    scanning.  Downstream tools (PDBFixer / OpenMM) handle hydrogen
+    rebuilding.
+
+    Args:
+        pdb_string: PDB file contents.
+        chain_id: Chain containing the target residue.
+        resnum: Residue sequence number.
+        icode: Insertion code (empty string if none).
+
+    Returns:
+        Modified PDB string with the residue mutated to ALA.
+    """
+    return mutate_residue(pdb_string, chain_id, resnum, "ALA", icode=icode)
 
 
 def remove_residue(

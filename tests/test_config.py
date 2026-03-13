@@ -4,6 +4,7 @@ from pathlib import Path
 
 from boundry.config import (
     BeamBlock,
+    DdGConfig,
     DesignConfig,
     IdealizeConfig,
     InterfaceConfig,
@@ -140,6 +141,73 @@ class TestInterfaceConfig:
         )
         assert config.show_progress is True
         assert config.quiet is True
+
+
+class TestDdGConfig:
+    """Tests for DdGConfig dataclass."""
+
+    def test_default_values(self):
+        """Test all default configuration values."""
+        config = DdGConfig()
+        assert config.n_ensemble == 35
+        assert config.md_total_steps == 50000
+        assert config.md_equilibration_steps == 5000
+        assert config.md_temperature == 300.0
+        assert config.md_friction == 1.0
+        assert config.neighborhood_sampling_bias == 1.0
+        assert config.ca_cutoff == 9.0
+        assert config.restraint_sd == 0.5
+        assert config.neighborhood_radius == 8.0
+        assert config.sequence_window == 1
+        assert config.chain_pairs is None
+        assert config.separation_distance == 100.0
+        assert config.implicit_solvent is True
+        assert config.workers == 1
+        assert config.seed is None
+        assert config.quiet is True
+        assert config.cache_ensemble is False
+        assert config.ensemble_dir is None
+        assert config.sort_members_by_wt_bound_energy is False
+        assert config.average_top_n is None
+        assert config.paper_mode is False
+
+    def test_custom_values(self):
+        """Test constructor with overrides."""
+        config = DdGConfig(
+            n_ensemble=50,
+            md_total_steps=100000,
+            ca_cutoff=12.0,
+            chain_pairs=[("H", "A")],
+            workers=4,
+            seed=42,
+            quiet=False,
+        )
+        assert config.n_ensemble == 50
+        assert config.md_total_steps == 100000
+        assert config.ca_cutoff == 12.0
+        assert config.chain_pairs == [("H", "A")]
+        assert config.workers == 4
+        assert config.seed == 42
+        assert config.quiet is False
+
+    def test_paper_mode_overrides(self):
+        """paper_mode=True sets n_ensemble=50, md_total_steps=100000."""
+        config = DdGConfig(paper_mode=True)
+        assert config.n_ensemble == 50
+        assert config.md_total_steps == 100000
+
+    def test_paper_mode_preserves_explicit(self):
+        """paper_mode=True does not override explicitly set values."""
+        config = DdGConfig(
+            paper_mode=True, n_ensemble=20, md_total_steps=75000
+        )
+        assert config.n_ensemble == 20
+        assert config.md_total_steps == 75000
+
+    def test_ensemble_dir_accepts_path(self):
+        """ensemble_dir accepts a Path object."""
+        config = DdGConfig(ensemble_dir=Path("/tmp/ensembles"))
+        assert config.ensemble_dir == Path("/tmp/ensembles")
 
 
 class TestPipelineConfig:

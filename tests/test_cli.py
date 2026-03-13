@@ -32,6 +32,8 @@ class TestAppStructure:
         assert "renumber" in result.output
         assert "analyze-interface" in result.output
         assert "run" in result.output
+        assert "optimize" in result.output
+        assert "ddg" in result.output
 
 
 class TestIdealize:
@@ -370,6 +372,8 @@ class TestHelpers:
             "renumber",
             "analyze-interface",
             "run",
+            "optimize",
+            "ddg",
         ]
         for cmd in commands:
             result = runner.invoke(app, [cmd, "--help"])
@@ -377,6 +381,168 @@ class TestHelpers:
                 f"--verbose missing from {cmd}"
             )
             assert "-v" in result.output, f"-v missing from {cmd}"
+
+
+class TestDdg:
+    """Tests for the ddg subcommand."""
+
+    def test_help(self):
+        """Test ddg --help."""
+        result = runner.invoke(app, ["ddg", "--help"])
+        assert result.exit_code == 0
+        assert "ddg" in result.output.lower()
+
+    def test_has_interface_option(self):
+        """Test that --interface option is available."""
+        result = runner.invoke(app, ["ddg", "--help"])
+        assert "--interface" in result.output
+
+    def test_has_mutations_option(self):
+        """Test that --mutations option is available."""
+        result = runner.invoke(app, ["ddg", "--help"])
+        assert "--mutations" in result.output
+
+    def test_has_n_ensemble_option(self):
+        """Test that --n-ensemble option is available."""
+        result = runner.invoke(app, ["ddg", "--help"])
+        assert "--n-ensemble" in result.output
+
+    def test_has_paper_mode_option(self):
+        """Test that --paper-mode option is available."""
+        result = runner.invoke(app, ["ddg", "--help"])
+        assert "--paper-mode" in result.output
+
+    def test_has_workers_option(self):
+        """Test that --workers option is available."""
+        result = runner.invoke(app, ["ddg", "--help"])
+        assert "--workers" in result.output
+
+    def test_has_seed_option(self):
+        """Test that --seed option is available."""
+        result = runner.invoke(app, ["ddg", "--help"])
+        assert "--seed" in result.output
+
+    def test_missing_args(self):
+        """Test ddg with no arguments fails."""
+        result = runner.invoke(app, ["ddg"])
+        assert result.exit_code != 0
+
+    def test_missing_input_file(self, tmp_path):
+        """Test ddg with nonexistent input file."""
+        result = runner.invoke(
+            app,
+            [
+                "ddg",
+                str(tmp_path / "nonexistent.pdb"),
+                "--interface",
+                "A:B",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower()
+
+    def test_has_cache_ensemble_option(self):
+        """Test that --cache-ensemble option is available."""
+        result = runner.invoke(app, ["ddg", "--help"])
+        assert "--cache-ensemble" in result.output
+
+    def test_missing_interface_flag(self, tmp_path):
+        """Test ddg without --interface fails."""
+        pdb_file = tmp_path / "input.pdb"
+        pdb_file.write_text("ATOM\nEND\n")
+        result = runner.invoke(app, ["ddg", str(pdb_file)])
+        assert result.exit_code != 0
+
+    @patch("boundry.operations.ddg")
+    def test_mutation_mode_stdout(self, mock_ddg, tmp_path):
+        """Test ddg mutation mode prints ddG summary."""
+        from boundry.operations import Structure
+
+        pdb_file = tmp_path / "input.pdb"
+        pdb_file.write_text("ATOM      1  N   ALA A   1\nEND\n")
+        mock_ddg.return_value = Structure(
+            pdb_string="ATOM\nEND\n",
+            metadata={
+                "operation": "ddg",
+                "ddG": 2.50,
+                "std_ddG": 0.80,
+                "ddg": {
+                    "mean_ddG": 2.50,
+                    "std_ddG": 0.80,
+                },
+            },
+        )
+        result = runner.invoke(
+            app,
+            [
+                "ddg",
+                str(pdb_file),
+                "--interface",
+                "A:B",
+                "--mutations",
+                "A:L5A",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "2.50" in result.output
+        assert "0.80" in result.output
+
+    @patch("boundry.operations.ddg")
+    def test_dg_mode_stdout(self, mock_ddg, tmp_path):
+        """Test ddg dG mode (no mutations) prints dG summary."""
+        from boundry.operations import Structure
+
+        pdb_file = tmp_path / "input.pdb"
+        pdb_file.write_text("ATOM      1  N   ALA A   1\nEND\n")
+        mock_ddg.return_value = Structure(
+            pdb_string="ATOM\nEND\n",
+            metadata={
+                "operation": "ddg",
+                "dG": -15.50,
+                "ddg": {"dG": -15.50},
+            },
+        )
+        result = runner.invoke(
+            app,
+            [
+                "ddg",
+                str(pdb_file),
+                "--interface",
+                "A:B",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "-15.50" in result.output
+
+    @patch("boundry.operations.ddg")
+    def test_output_directory_flag(self, mock_ddg, tmp_path):
+        """Test ddg with --output mentions result files."""
+        from boundry.operations import Structure
+
+        pdb_file = tmp_path / "input.pdb"
+        pdb_file.write_text("ATOM      1  N   ALA A   1\nEND\n")
+        out_dir = tmp_path / "out"
+        mock_ddg.return_value = Structure(
+            pdb_string="ATOM\nEND\n",
+            metadata={
+                "operation": "ddg",
+                "dG": -10.0,
+                "ddg": {"dG": -10.0},
+            },
+        )
+        result = runner.invoke(
+            app,
+            [
+                "ddg",
+                str(pdb_file),
+                "--interface",
+                "A:B",
+                "--output",
+                str(out_dir),
+            ],
+        )
+        assert result.exit_code == 0
+        assert "ddg_results.json" in result.output
 
 
 class TestMainEntryPoint:

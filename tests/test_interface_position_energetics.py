@@ -26,6 +26,7 @@ from boundry.interface_position_energetics import (
     compute_position_energetics,
     format_hotspot_table,
     format_position_table,
+    mutate_residue,
     mutate_to_alanine,
     remove_residue,
     write_position_csv,
@@ -158,7 +159,91 @@ class TestResidueKey:
 
 
 # ------------------------------------------------------------------
-# mutate_to_alanine
+# mutate_residue (general)
+# ------------------------------------------------------------------
+
+
+class TestMutateResidue:
+    def test_mutate_leu_to_ala(self):
+        """LEU -> ALA should strip CG, CD1, CD2, keep backbone + CB."""
+        result = mutate_residue(TWO_CHAIN_PDB, "A", 1, "ALA")
+        atoms = []
+        for line in result.splitlines():
+            if line.startswith("ATOM") and line[21] == "A":
+                atoms.append(line[12:16].strip())
+                assert line[17:20] == "ALA"
+        assert "CG" not in atoms
+        assert "CD1" not in atoms
+        assert "CD2" not in atoms
+        for a in ("N", "CA", "C", "O", "CB"):
+            assert a in atoms
+
+    def test_mutate_to_gly_drops_cb(self):
+        """Mutating to GLY should strip CB as well as side-chain atoms."""
+        result = mutate_residue(TWO_CHAIN_PDB, "A", 1, "GLY")
+        atoms = []
+        for line in result.splitlines():
+            if line.startswith("ATOM") and line[21] == "A":
+                atoms.append(line[12:16].strip())
+                assert line[17:20] == "GLY"
+        assert "CB" not in atoms
+        assert "CG" not in atoms
+        for a in ("N", "CA", "C", "O"):
+            assert a in atoms
+
+    def test_mutate_to_larger_residue(self):
+        """Mutating LEU -> TRP should keep backbone + CB (PDBFixer
+        rebuilds the rest)."""
+        result = mutate_residue(TWO_CHAIN_PDB, "A", 1, "TRP")
+        atoms = []
+        for line in result.splitlines():
+            if line.startswith("ATOM") and line[21] == "A":
+                atoms.append(line[12:16].strip())
+                assert line[17:20] == "TRP"
+        for a in ("N", "CA", "C", "O", "CB"):
+            assert a in atoms
+        # Side-chain atoms from LEU should be gone
+        assert "CG" not in atoms
+
+    def test_preserves_other_chains(self):
+        result = mutate_residue(TWO_CHAIN_PDB, "A", 1, "SER")
+        b_lines = [
+            l for l in result.splitlines()
+            if l.startswith("ATOM") and l[21] == "B"
+        ]
+        assert len(b_lines) == 7  # VAL unchanged
+
+    def test_preserves_ter_and_end(self):
+        result = mutate_residue(TWO_CHAIN_PDB, "A", 1, "SER")
+        assert "TER" in result
+        assert "END" in result
+
+    def test_invalid_resname_raises(self):
+        with pytest.raises(ValueError, match="Unknown residue type"):
+            mutate_residue(TWO_CHAIN_PDB, "A", 1, "XYZ")
+
+    def test_case_insensitive(self):
+        """Lower-case resname should be accepted."""
+        result = mutate_residue(TWO_CHAIN_PDB, "A", 1, "ala")
+        for line in result.splitlines():
+            if line.startswith("ATOM") and line[21] == "A":
+                assert line[17:20] == "ALA"
+
+    def test_noop_when_same_residue(self):
+        """Mutating LEU -> LEU should just strip side-chain and keep
+        backbone (functionally a strip-and-rename cycle)."""
+        result = mutate_residue(TWO_CHAIN_PDB, "A", 1, "LEU")
+        atoms = []
+        for line in result.splitlines():
+            if line.startswith("ATOM") and line[21] == "A":
+                atoms.append(line[12:16].strip())
+        # Backbone + CB retained
+        for a in ("N", "CA", "C", "O", "CB"):
+            assert a in atoms
+
+
+# ------------------------------------------------------------------
+# mutate_to_alanine (backward-compatible wrapper)
 # ------------------------------------------------------------------
 
 

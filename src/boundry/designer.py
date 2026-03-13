@@ -313,6 +313,25 @@ class Designer:
         # Convert S to int64 (required by one_hot in pack_side_chains)
         feature_dict["S"] = protein_dict["S"].unsqueeze(0).long()
 
+        # Determine repacking strategy
+        if design_spec is not None:
+            repack_mask = self._build_repack_mask(
+                encoded_residues, design_spec
+            )
+            if torch.all(repack_mask == 1.0):
+                logger.debug(
+                    "design_spec provided but all residues are "
+                    "repackable (no NATRO residues); "
+                    "repacking everything"
+                )
+            # Swap chain_mask for the packer (it reads
+            # feature_dict["chain_mask"] as mask_fix_sc when
+            # repack_everything=False)
+            feature_dict["chain_mask"] = repack_mask.unsqueeze(0)
+            repack_everything = False
+        else:
+            repack_everything = True
+
         # Pack side chains
         with torch.no_grad():
             sc_dict = pack_side_chains(
@@ -320,7 +339,16 @@ class Designer:
                 self._packer,
                 self.config.sc_num_denoising_steps,
                 self.config.sc_num_samples,
-                repack_everything=True,
+                repack_everything=repack_everything,
+            )
+
+        # Restore chain_mask to zeros for MPNN scoring
+        # (zeros = keep native sequence)
+        if design_spec is not None:
+            feature_dict["chain_mask"] = torch.zeros(
+                [1, len(encoded_residues)],
+                device=self.device,
+                dtype=torch.float32,
             )
 
         # Get sequence
@@ -455,6 +483,32 @@ class Designer:
                     ResidueMode.APOLAR,
                 )
                 mask.append(1.0 if default_designable else 0.0)
+
+        return torch.tensor(mask, device=self.device, dtype=torch.float32)
+
+    def _build_repack_mask(
+        self,
+        encoded_residues: list,
+        design_spec: Optional[DesignSpec],
+    ) -> torch.Tensor:
+        """Build repack mask: 1=repack side chain, 0=keep original rotamer (NATRO)."""
+        if design_spec is None:
+            return torch.ones(
+                len(encoded_residues),
+                device=self.device,
+                dtype=torch.float32,
+            )
+
+        mask = []
+        for key in encoded_residues:
+            if key in design_spec.residue_specs:
+                spec = design_spec.residue_specs[key]
+                mask.append(1.0 if spec.is_repackable() else 0.0)
+            else:
+                repackable = (
+                    design_spec.default_mode != ResidueMode.NATRO
+                )
+                mask.append(1.0 if repackable else 0.0)
 
         return torch.tensor(mask, device=self.device, dtype=torch.float32)
 

@@ -1015,6 +1015,257 @@ class TestDesign:
 
 
 # ------------------------------------------------------------------
+# ddg operation
+# ------------------------------------------------------------------
+
+
+class TestDdg:
+    """Tests for the ddg() operation."""
+
+    def test_returns_structure_with_mutations(self):
+        """Test ddG mutation scoring returns Structure with metadata."""
+        from boundry.ddg import DdGResult, MutationSpec
+
+        mock_result = DdGResult(
+            mutations=[
+                MutationSpec("A", 5, "LEU", "ALA"),
+            ],
+            member_results=[],
+            mean_ddG=2.5,
+            std_ddG=0.8,
+            mean_dG_wt=-10.0,
+            mean_dG_mut=-7.5,
+            n_successful=10,
+            n_ensemble=10,
+            ensemble_ddGs=[2.5],
+        )
+
+        with patch(
+            "boundry.ddg.compute_ddg",
+            return_value=mock_result,
+        ):
+            from boundry.config import DdGConfig
+            from boundry.operations import ddg
+
+            config = DdGConfig(chain_pairs=[("A", "B")])
+            result = ddg(
+                SINGLE_CHAIN_PDB,
+                mutation_string="A:L5A",
+                config=config,
+            )
+
+        assert isinstance(result, Structure)
+        assert result.metadata["operation"] == "ddg"
+        assert result.metadata["ddG"] == 2.5
+        assert result.metadata["std_ddG"] == 0.8
+        assert "ddg" in result.metadata
+        assert result.metadata["ddg"]["mean_ddG"] == 2.5
+
+    def test_returns_structure_no_mutations(self):
+        """Test dG binding energy mode returns Structure with metadata."""
+        from boundry.ddg import InterfaceDgResult
+
+        with patch(
+            "boundry.ddg.compute_interface_dg",
+            return_value=InterfaceDgResult(
+                dG=-15.5, minimized_pdb="MINIMIZED"
+            ),
+        ):
+            from boundry.config import DdGConfig
+            from boundry.operations import ddg
+
+            config = DdGConfig(chain_pairs=[("A", "B")])
+            result = ddg(TWO_CHAIN_PDB, config=config)
+
+        assert isinstance(result, Structure)
+        assert result.metadata["operation"] == "ddg"
+        assert result.metadata["dG"] == -15.5
+        assert result.metadata["ddg"] == {"dG": -15.5}
+
+    def test_requires_chain_pairs(self):
+        """Test that ValueError is raised when chain_pairs is None."""
+        from boundry.config import DdGConfig
+        from boundry.operations import ddg
+
+        config = DdGConfig()  # chain_pairs defaults to None
+        with pytest.raises(ValueError, match="chain_pairs"):
+            ddg(SINGLE_CHAIN_PDB, config=config)
+
+    def test_accepts_structure_input(self):
+        """Test that ddg() works with a Structure object."""
+        from boundry.ddg import InterfaceDgResult
+
+        with patch(
+            "boundry.ddg.compute_interface_dg",
+            return_value=InterfaceDgResult(
+                dG=-12.0, minimized_pdb="MIN"
+            ),
+        ):
+            from boundry.config import DdGConfig
+            from boundry.operations import ddg
+
+            struct = Structure(pdb_string=TWO_CHAIN_PDB)
+            config = DdGConfig(chain_pairs=[("A", "B")])
+            result = ddg(struct, config=config)
+
+        assert isinstance(result, Structure)
+        assert result.metadata["dG"] == -12.0
+
+    def test_output_path_writes_json(self, tmp_path):
+        """Test that output_path writes ddg_results.json."""
+        from boundry.ddg import InterfaceDgResult
+
+        with patch(
+            "boundry.ddg.compute_interface_dg",
+            return_value=InterfaceDgResult(
+                dG=-15.0, minimized_pdb="MINIMIZED"
+            ),
+        ):
+            from boundry.config import DdGConfig
+            from boundry.operations import ddg
+
+            config = DdGConfig(chain_pairs=[("A", "B")])
+            out_dir = tmp_path / "results"
+            result = ddg(
+                TWO_CHAIN_PDB, config=config, output_path=out_dir
+            )
+
+        json_path = out_dir / "ddg_results.json"
+        assert json_path.exists()
+        import json
+
+        data = json.loads(json_path.read_text())
+        assert data["dG"] == -15.0
+
+    def test_propagates_chain_mapping(self):
+        """Test that CIF chain ID mapping is propagated."""
+        from boundry.ddg import InterfaceDgResult
+
+        with patch(
+            "boundry.ddg.compute_interface_dg",
+            return_value=InterfaceDgResult(
+                dG=-10.0, minimized_pdb="MIN"
+            ),
+        ):
+            from boundry.config import DdGConfig
+            from boundry.operations import ddg
+
+            struct = Structure(
+                pdb_string=TWO_CHAIN_PDB,
+                metadata={"chain_id_mapping": {"A": "HA", "B": "LB"}},
+            )
+            config = DdGConfig(chain_pairs=[("HA", "LB")])
+            result = ddg(struct, config=config)
+
+        assert "chain_id_mapping" in result.metadata
+        assert result.metadata["chain_id_mapping"] == {
+            "A": "HA",
+            "B": "LB",
+        }
+
+    def test_output_path_writes_minimized_pdb(self, tmp_path):
+        """Test that output_path writes input_minimized.pdb."""
+        from boundry.ddg import InterfaceDgResult
+
+        with patch(
+            "boundry.ddg.compute_interface_dg",
+            return_value=InterfaceDgResult(
+                dG=-15.0, minimized_pdb="MINIMIZED PDB DATA"
+            ),
+        ):
+            from boundry.config import DdGConfig
+            from boundry.operations import ddg
+
+            config = DdGConfig(chain_pairs=[("A", "B")])
+            out_dir = tmp_path / "results"
+            ddg(
+                TWO_CHAIN_PDB, config=config, output_path=out_dir
+            )
+
+        pdb_path = out_dir / "input_minimized.pdb"
+        assert pdb_path.exists()
+        assert pdb_path.read_text() == "MINIMIZED PDB DATA"
+
+    def test_output_path_writes_json_with_aggregation_flags(
+        self, tmp_path
+    ):
+        """Test mutation mode JSON includes aggregation flags."""
+        from boundry.ddg import DdGResult, EnsembleMemberResult, MutationSpec
+
+        mock_result = DdGResult(
+            mutations=[MutationSpec("A", 1, "LEU", "ALA")],
+            member_results=[
+                EnsembleMemberResult(member_index=0)
+            ],
+            mean_ddG=2.5,
+            std_ddG=0.8,
+            mean_dG_wt=-20.0,
+            mean_dG_mut=-17.5,
+            n_successful=1,
+            n_ensemble=1,
+            ensemble_ddGs=[2.5],
+            minimized_pdb="MIN",
+            sorted_by_wt_energy=True,
+            top_n_applied=3,
+        )
+        with patch(
+            "boundry.ddg.compute_ddg",
+            return_value=mock_result,
+        ), patch("boundry.ddg.parse_mutations"):
+            from boundry.config import DdGConfig
+            from boundry.operations import ddg
+
+            config = DdGConfig(chain_pairs=[("A", "B")])
+            out_dir = tmp_path / "results"
+            ddg(
+                TWO_CHAIN_PDB,
+                mutation_string="A:L1A",
+                config=config,
+                output_path=out_dir,
+            )
+
+        import json
+
+        data = json.loads(
+            (out_dir / "ddg_results.json").read_text()
+        )
+        assert data["sorted_by_wt_energy"] is True
+        assert data["top_n_applied"] == 3
+
+    def test_cache_ensemble_wires_ensemble_dir(self, tmp_path):
+        """Test cache_ensemble=True sets ensemble_dir on config."""
+        from boundry.ddg import InterfaceDgResult
+
+        captured_config = {}
+
+        def fake_compute(pdb_string, config, **kwargs):
+            captured_config["config"] = config
+            return InterfaceDgResult(
+                dG=-15.0, minimized_pdb="MIN"
+            )
+
+        with patch(
+            "boundry.ddg.compute_interface_dg",
+            side_effect=fake_compute,
+        ):
+            from boundry.config import DdGConfig
+            from boundry.operations import ddg
+
+            config = DdGConfig(chain_pairs=[("A", "B")])
+            out_dir = tmp_path / "results"
+            ddg(
+                TWO_CHAIN_PDB,
+                config=config,
+                output_path=out_dir,
+                cache_ensemble=True,
+            )
+
+        cfg = captured_config["config"]
+        assert cfg.cache_ensemble is True
+        assert cfg.ensemble_dir == out_dir / "ensemble"
+
+
+# ------------------------------------------------------------------
 # analyze_interface operation
 # ------------------------------------------------------------------
 
@@ -1432,6 +1683,7 @@ class TestTopLevelImports:
         """
         from boundry import (
             analyze_interface,
+            ddg,
             design,
             minimize,
             mpnn,
@@ -1449,6 +1701,7 @@ class TestTopLevelImports:
         assert callable(design)
         assert callable(analyze_interface)
         assert callable(select_positions)
+        assert callable(ddg)
 
     def test_structure_importable(self):
         """Test that Structure is importable from boundry."""
@@ -1514,6 +1767,19 @@ class TestTopLevelImports:
         from boundry.operations import renumber
 
         assert callable(renumber)
+
+    def test_ddg_types_importable(self):
+        """Test that DdGResult and MutationSpec are importable."""
+        from boundry import DdGResult, MutationSpec
+
+        spec = MutationSpec(
+            chain_id="A",
+            residue_number=5,
+            wild_type="LEU",
+            mutant="ALA",
+        )
+        assert spec.chain_id == "A"
+        assert DdGResult is not None
 
     def test_pipeline_removed(self):
         """Test that Pipeline and PipelineMode are no longer exposed."""

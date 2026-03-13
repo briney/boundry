@@ -12,6 +12,8 @@ from boundry.operations import InterfaceAnalysisResult
 from boundry.result_io import (
     interface_result_to_dict,
     resolve_interface_output_paths,
+    write_ddg_json,
+    write_ddg_minimized_pdb,
     write_interface_csv,
     write_interface_json,
 )
@@ -199,3 +201,29 @@ class TestInterfaceSerialization:
         pp_written, ala_written = write_interface_csv(result)
         assert pp_written is None
         assert ala_written is None
+
+
+class TestDdGWriters:
+    def test_write_ddg_json(self, tmp_path):
+        data = {"mean_ddG": 2.5, "n_ensemble": 10}
+        out = tmp_path / "ddg_results.json"
+        result = write_ddg_json(data, out)
+        assert result == out
+        assert out.exists()
+        import json
+
+        loaded = json.loads(out.read_text())
+        assert loaded["mean_ddG"] == 2.5
+        assert loaded["n_ensemble"] == 10
+
+    def test_write_ddg_json_creates_parent_dirs(self, tmp_path):
+        out = tmp_path / "nested" / "dir" / "ddg_results.json"
+        write_ddg_json({"dG": -5.0}, out)
+        assert out.exists()
+
+    def test_write_ddg_minimized_pdb(self, tmp_path):
+        pdb = "ATOM      1  N   ALA A   1\nEND\n"
+        out = tmp_path / "input_minimized.pdb"
+        result = write_ddg_minimized_pdb(pdb, out)
+        assert result == out
+        assert out.read_text() == pdb
