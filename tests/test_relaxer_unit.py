@@ -232,6 +232,324 @@ class TestSeparateInterfaceRigidBody:
 
 
 # ================================================================
+# Tests for _make_force_field
+# ================================================================
+
+
+class TestMakeForceField:
+    """Tests for the centralised force field / solvation helper."""
+
+    @patch("boundry.relaxer.openmm_app")
+    def test_implicit_solvent_from_config(self, mock_app):
+        """When config.implicit_solvent=True, selects gbn2."""
+        from boundry.config import RelaxConfig
+        from boundry.relaxer import Relaxer
+
+        relaxer = Relaxer(RelaxConfig(implicit_solvent=True))
+        mock_ff = MagicMock()
+        mock_app.ForceField.return_value = mock_ff
+
+        ff, kwargs = relaxer._make_force_field()
+
+        mock_app.ForceField.assert_called_once_with(
+            "amber14-all.xml", "implicit/gbn2.xml"
+        )
+        assert ff is mock_ff
+
+    @patch("boundry.relaxer.openmm_app")
+    def test_explicit_solvent_from_config(self, mock_app):
+        """When config.implicit_solvent=False, selects tip3pfb."""
+        from boundry.config import RelaxConfig
+        from boundry.relaxer import Relaxer
+
+        relaxer = Relaxer(RelaxConfig(implicit_solvent=False))
+        mock_ff = MagicMock()
+        mock_app.ForceField.return_value = mock_ff
+
+        ff, kwargs = relaxer._make_force_field()
+
+        mock_app.ForceField.assert_called_once_with(
+            "amber14-all.xml", "amber14/tip3pfb.xml"
+        )
+
+    @patch("boundry.relaxer.openmm_app")
+    def test_explicit_override_beats_config(self, mock_app):
+        """Passing implicit_solvent=False overrides config=True."""
+        from boundry.config import RelaxConfig
+        from boundry.relaxer import Relaxer
+
+        relaxer = Relaxer(RelaxConfig(implicit_solvent=True))
+        mock_app.ForceField.return_value = MagicMock()
+
+        relaxer._make_force_field(implicit_solvent=False)
+
+        mock_app.ForceField.assert_called_once_with(
+            "amber14-all.xml", "amber14/tip3pfb.xml"
+        )
+
+    @patch("boundry.relaxer.openmm_app")
+    def test_implicit_override_beats_config(self, mock_app):
+        """Passing implicit_solvent=True overrides config=False."""
+        from boundry.config import RelaxConfig
+        from boundry.relaxer import Relaxer
+
+        relaxer = Relaxer(RelaxConfig(implicit_solvent=False))
+        mock_app.ForceField.return_value = MagicMock()
+
+        relaxer._make_force_field(implicit_solvent=True)
+
+        mock_app.ForceField.assert_called_once_with(
+            "amber14-all.xml", "implicit/gbn2.xml"
+        )
+
+    @patch("boundry.relaxer.openmm_app")
+    def test_dielectric_params_when_implicit(self, mock_app):
+        from boundry.config import RelaxConfig
+        from boundry.relaxer import Relaxer
+
+        relaxer = Relaxer(RelaxConfig(implicit_solvent=True))
+        mock_app.ForceField.return_value = MagicMock()
+
+        _, kwargs = relaxer._make_force_field()
+
+        assert kwargs["soluteDielectric"] == 1.0
+        assert kwargs["solventDielectric"] == 78.5
+
+    @patch("boundry.relaxer.openmm_app")
+    def test_no_dielectric_params_when_explicit(self, mock_app):
+        from boundry.config import RelaxConfig
+        from boundry.relaxer import Relaxer
+
+        relaxer = Relaxer(RelaxConfig(implicit_solvent=False))
+        mock_app.ForceField.return_value = MagicMock()
+
+        _, kwargs = relaxer._make_force_field()
+
+        assert "soluteDielectric" not in kwargs
+        assert "solventDielectric" not in kwargs
+
+    @patch("boundry.relaxer.openmm_app")
+    def test_hbonds_constraint_always_present(self, mock_app):
+        from openmm import app as real_app
+
+        from boundry.config import RelaxConfig
+        from boundry.relaxer import Relaxer
+
+        for implicit in (True, False):
+            mock_app.reset_mock()
+            mock_app.HBonds = real_app.HBonds
+            mock_app.ForceField.return_value = MagicMock()
+
+            relaxer = Relaxer(RelaxConfig(implicit_solvent=implicit))
+            _, kwargs = relaxer._make_force_field()
+
+            assert kwargs["constraints"] is real_app.HBonds
+
+
+# ================================================================
+# Tests for _relax_unconstrained force field selection
+# ================================================================
+
+
+class TestRelaxUnconstrainedForceField:
+    """Verify _relax_unconstrained uses _make_force_field."""
+
+    @patch("boundry.relaxer.openmm_app")
+    @patch("boundry.relaxer.openmm")
+    @patch("boundry.relaxer.PDBFixer")
+    def test_implicit_solvent_used(
+        self, mock_fixer_cls, mock_openmm, mock_app
+    ):
+        """With implicit_solvent=True, _relax_unconstrained uses gbn2."""
+        from openmm import unit
+
+        from boundry.config import RelaxConfig
+        from boundry.relaxer import Relaxer
+
+        relaxer = Relaxer(RelaxConfig(implicit_solvent=True))
+        relaxer._use_gpu = False
+
+        mock_fixer = MagicMock()
+        mock_fixer_cls.return_value = mock_fixer
+
+        mock_ff = MagicMock()
+        mock_modeller = MagicMock()
+        mock_app.ForceField.return_value = mock_ff
+        mock_ff.createSystem.return_value = MagicMock()
+        mock_app.Modeller.return_value = mock_modeller
+
+        mock_sim = MagicMock()
+        mock_app.Simulation.return_value = mock_sim
+        mock_state = MagicMock()
+        mock_state.getPotentialEnergy.return_value = unit.Quantity(
+            -100.0, unit.kilocalories_per_mole
+        )
+        mock_state.getPositions.return_value = unit.Quantity(
+            np.array([[0.0, 0.0, 0.0]]), unit.angstroms
+        )
+        mock_sim.context.getState.return_value = mock_state
+        mock_app.PDBFile.writeFile.side_effect = (
+            lambda t, p, o: o.write("END\n")
+        )
+
+        relaxer._relax_unconstrained("ATOM dummy\nEND\n")
+
+        mock_app.ForceField.assert_called_once_with(
+            "amber14-all.xml", "implicit/gbn2.xml"
+        )
+        create_kwargs = mock_ff.createSystem.call_args[1]
+        assert "soluteDielectric" in create_kwargs
+        assert "solventDielectric" in create_kwargs
+
+    @patch("boundry.relaxer.openmm_app")
+    @patch("boundry.relaxer.openmm")
+    @patch("boundry.relaxer.PDBFixer")
+    def test_explicit_solvent_used(
+        self, mock_fixer_cls, mock_openmm, mock_app
+    ):
+        """With implicit_solvent=False, _relax_unconstrained uses tip3pfb."""
+        from openmm import unit
+
+        from boundry.config import RelaxConfig
+        from boundry.relaxer import Relaxer
+
+        relaxer = Relaxer(RelaxConfig(implicit_solvent=False))
+        relaxer._use_gpu = False
+
+        mock_fixer = MagicMock()
+        mock_fixer_cls.return_value = mock_fixer
+
+        mock_ff = MagicMock()
+        mock_modeller = MagicMock()
+        mock_app.ForceField.return_value = mock_ff
+        mock_ff.createSystem.return_value = MagicMock()
+        mock_app.Modeller.return_value = mock_modeller
+
+        mock_sim = MagicMock()
+        mock_app.Simulation.return_value = mock_sim
+        mock_state = MagicMock()
+        mock_state.getPotentialEnergy.return_value = unit.Quantity(
+            -100.0, unit.kilocalories_per_mole
+        )
+        mock_state.getPositions.return_value = unit.Quantity(
+            np.array([[0.0, 0.0, 0.0]]), unit.angstroms
+        )
+        mock_sim.context.getState.return_value = mock_state
+        mock_app.PDBFile.writeFile.side_effect = (
+            lambda t, p, o: o.write("END\n")
+        )
+
+        relaxer._relax_unconstrained("ATOM dummy\nEND\n")
+
+        mock_app.ForceField.assert_called_once_with(
+            "amber14-all.xml", "amber14/tip3pfb.xml"
+        )
+        create_kwargs = mock_ff.createSystem.call_args[1]
+        assert "soluteDielectric" not in create_kwargs
+
+
+# ================================================================
+# Tests for _relax_direct force field selection
+# ================================================================
+
+
+class TestRelaxDirectForceField:
+    """Verify _relax_direct uses _make_force_field."""
+
+    @patch("boundry.relaxer.openmm_app")
+    @patch("boundry.relaxer.openmm")
+    def test_implicit_solvent_used(self, mock_openmm, mock_app):
+        """With implicit_solvent=True, _relax_direct uses gbn2."""
+        from openmm import unit
+
+        from boundry.config import RelaxConfig
+        from boundry.relaxer import Relaxer
+
+        relaxer = Relaxer(RelaxConfig(implicit_solvent=True))
+        relaxer._use_gpu = False
+
+        mock_pdb = MagicMock()
+        mock_app.PDBFile.return_value = mock_pdb
+
+        mock_ff = MagicMock()
+        mock_modeller = MagicMock()
+        mock_app.ForceField.return_value = mock_ff
+        mock_ff.createSystem.return_value = MagicMock()
+        mock_app.Modeller.return_value = mock_modeller
+
+        mock_sim = MagicMock()
+        mock_app.Simulation.return_value = mock_sim
+        mock_state = MagicMock()
+        mock_state.getPotentialEnergy.return_value = unit.Quantity(
+            -100.0, unit.kilocalories_per_mole
+        )
+        mock_state.getPositions.return_value = unit.Quantity(
+            np.array([[0.0, 0.0, 0.0]]), unit.angstroms
+        )
+        mock_sim.context.getState.return_value = mock_state
+
+        # writeFile is called at end to produce output
+        def write_pdb(t, p, o):
+            o.write("END\n")
+
+        mock_app.PDBFile.writeFile = MagicMock(side_effect=write_pdb)
+
+        relaxer._relax_direct("ATOM dummy\nEND\n")
+
+        mock_app.ForceField.assert_called_once_with(
+            "amber14-all.xml", "implicit/gbn2.xml"
+        )
+        create_kwargs = mock_ff.createSystem.call_args[1]
+        assert "soluteDielectric" in create_kwargs
+        assert "solventDielectric" in create_kwargs
+
+    @patch("boundry.relaxer.openmm_app")
+    @patch("boundry.relaxer.openmm")
+    def test_explicit_solvent_used(self, mock_openmm, mock_app):
+        """With implicit_solvent=False, _relax_direct uses tip3pfb."""
+        from openmm import unit
+
+        from boundry.config import RelaxConfig
+        from boundry.relaxer import Relaxer
+
+        relaxer = Relaxer(RelaxConfig(implicit_solvent=False))
+        relaxer._use_gpu = False
+
+        mock_pdb = MagicMock()
+        mock_app.PDBFile.return_value = mock_pdb
+
+        mock_ff = MagicMock()
+        mock_modeller = MagicMock()
+        mock_app.ForceField.return_value = mock_ff
+        mock_ff.createSystem.return_value = MagicMock()
+        mock_app.Modeller.return_value = mock_modeller
+
+        mock_sim = MagicMock()
+        mock_app.Simulation.return_value = mock_sim
+        mock_state = MagicMock()
+        mock_state.getPotentialEnergy.return_value = unit.Quantity(
+            -100.0, unit.kilocalories_per_mole
+        )
+        mock_state.getPositions.return_value = unit.Quantity(
+            np.array([[0.0, 0.0, 0.0]]), unit.angstroms
+        )
+        mock_sim.context.getState.return_value = mock_state
+
+        def write_pdb(t, p, o):
+            o.write("END\n")
+
+        mock_app.PDBFile.writeFile = MagicMock(side_effect=write_pdb)
+
+        relaxer._relax_direct("ATOM dummy\nEND\n")
+
+        mock_app.ForceField.assert_called_once_with(
+            "amber14-all.xml", "amber14/tip3pfb.xml"
+        )
+        create_kwargs = mock_ff.createSystem.call_args[1]
+        assert "soluteDielectric" not in create_kwargs
+
+
+# ================================================================
 # Tests for _build_system_for_ddg (mocked OpenMM)
 # ================================================================
 

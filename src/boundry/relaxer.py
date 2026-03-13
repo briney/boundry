@@ -218,18 +218,12 @@ class Relaxer:
         fixer.findMissingAtoms()
         fixer.addMissingAtoms()
 
-        # Create force field and system
-        force_field = openmm_app.ForceField(
-            "amber14-all.xml", "amber14/tip3pfb.xml"
-        )
-
-        # Use Modeller to add hydrogens
+        # Create force field and system (uses implicit solvation config)
+        force_field, create_kwargs = self._make_force_field()
         modeller = openmm_app.Modeller(fixer.topology, fixer.positions)
         modeller.addHydrogens(force_field)
-
-        # Create system with HBonds constraints (standard for minimization)
         system = force_field.createSystem(
-            modeller.topology, constraints=openmm_app.HBonds
+            modeller.topology, **create_kwargs
         )
 
         # Create integrator and simulation
@@ -313,18 +307,12 @@ class Relaxer:
         pdb_file = io.StringIO(pdb_string)
         pdb = openmm_app.PDBFile(pdb_file)
 
-        # Create force field and system
-        force_field = openmm_app.ForceField(
-            "amber14-all.xml", "amber14/tip3pfb.xml"
-        )
-
-        # Use Modeller to add hydrogens (doesn't require pdbfixer)
+        # Create force field and system (uses implicit solvation config)
+        force_field, create_kwargs = self._make_force_field()
         modeller = openmm_app.Modeller(pdb.topology, pdb.positions)
         modeller.addHydrogens(force_field)
-
-        # Create system with constraints on hydrogen bonds
         system = force_field.createSystem(
-            modeller.topology, constraints=openmm_app.HBonds
+            modeller.topology, **create_kwargs
         )
 
         # Add position restraints if stiffness > 0
@@ -414,6 +402,42 @@ class Relaxer:
         )
         system.addForce(force)
 
+    def _make_force_field(
+        self, *, implicit_solvent: bool | None = None
+    ) -> tuple:
+        """Select force field and createSystem kwargs for solvation model.
+
+        Centralises force field + solvation model selection so that
+        relaxation and scoring use the same energy surface.
+
+        Args:
+            implicit_solvent: Override for ``self.config.implicit_solvent``.
+                When *None*, reads from config.
+
+        Returns:
+            ``(force_field, create_kwargs)`` — *create_kwargs* includes
+            ``constraints=HBonds`` and dielectric parameters when implicit
+            solvation is active.
+        """
+        use_implicit = (
+            implicit_solvent
+            if implicit_solvent is not None
+            else self.config.implicit_solvent
+        )
+        if use_implicit:
+            force_field = openmm_app.ForceField(
+                "amber14-all.xml", "implicit/gbn2.xml"
+            )
+        else:
+            force_field = openmm_app.ForceField(
+                "amber14-all.xml", "amber14/tip3pfb.xml"
+            )
+        create_kwargs: dict = {"constraints": openmm_app.HBonds}
+        if use_implicit:
+            create_kwargs["soluteDielectric"] = 1.0
+            create_kwargs["solventDielectric"] = 78.5
+        return force_field, create_kwargs
+
     def _build_system_for_ddg(
         self,
         topology,
@@ -439,22 +463,14 @@ class Relaxer:
             ``(system, modeller)`` tuple.  The caller is responsible for
             creating an integrator and simulation.
         """
-        if implicit_solvent:
-            force_field = openmm_app.ForceField(
-                "amber14-all.xml", "implicit/gbn2.xml"
-            )
-        else:
-            force_field = openmm_app.ForceField(
-                "amber14-all.xml", "amber14/tip3pfb.xml"
-            )
+        force_field, create_kwargs = self._make_force_field(
+            implicit_solvent=implicit_solvent
+        )
+        if constraints is not openmm_app.HBonds:
+            create_kwargs["constraints"] = constraints
 
         modeller = openmm_app.Modeller(topology, positions)
         modeller.addHydrogens(force_field)
-
-        create_kwargs = dict(constraints=constraints)
-        if implicit_solvent:
-            create_kwargs["soluteDielectric"] = 1.0
-            create_kwargs["solventDielectric"] = 78.5
 
         system = force_field.createSystem(
             modeller.topology, **create_kwargs

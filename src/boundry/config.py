@@ -33,7 +33,7 @@ class RelaxConfig:
     constrained: bool = False  # Use constrained (AmberRelaxation) minimization
     split_chains_at_gaps: bool = True  # Split chains at gaps to prevent closure
     implicit_solvent: bool = (
-        True  # Use GBn2 implicit solvation for energy evaluation
+        True  # Use GBn2 implicit solvation for relaxation and energy evaluation
     )
     # GPU is auto-detected and used when available
 
