@@ -170,6 +170,8 @@ class TestDdGConfig:
         assert config.sort_members_by_wt_bound_energy is False
         assert config.average_top_n is None
         assert config.paper_mode is False
+        assert config.relax_separated is True
+        assert config.relax_separated_iterations == 1
 
     def test_custom_values(self):
         """Test constructor with overrides."""

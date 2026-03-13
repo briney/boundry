@@ -121,6 +121,8 @@ class _BeamExpansionTask:
     exclude_native: bool = False
     interface_scoring_backend: str = "legacy"
     ddg_config_dict: Optional[Dict[str, Any]] = None
+    relax_separated: bool = True
+    relax_separated_iterations: int = 1
 
 
 @dataclass
@@ -313,6 +315,13 @@ def _execute_beam_expansion(task: _BeamExpansionTask) -> _BeamExpansionResult:
                     relaxer,
                     chain_pairs=task.chain_pairs,
                     distance_cutoff=8.0,
+                    relax_separated=task.relax_separated,
+                    designer=(
+                        designer
+                        if task.relax_separated
+                        else None
+                    ),
+                    relax_separated_iterations=task.relax_separated_iterations,
                 )
                 dG = be_result.binding_energy
 
@@ -408,6 +417,8 @@ def _serialize_ddg_config(config: "DdGConfig") -> Dict[str, Any]:
         ),
         "average_top_n": config.average_top_n,
         "paper_mode": False,  # already applied via __post_init__
+        "relax_separated": config.relax_separated,
+        "relax_separated_iterations": config.relax_separated_iterations,
     }
 
 
@@ -415,6 +426,7 @@ def _score_interface(
     pdb_string: str,
     config: OptimizeConfig,
     relaxer: Relaxer,
+    designer: Optional[Any] = None,
 ) -> float:
     """Compute binding energy (dG) for a structure.
 
@@ -428,7 +440,10 @@ def _score_interface(
         from boundry.ddg import compute_interface_dg
 
         result = compute_interface_dg(
-            pdb_string, config.ddg, relaxer=relaxer
+            pdb_string,
+            config.ddg,
+            relaxer=relaxer,
+            designer=designer,
         )
         return result.dG
 
@@ -439,6 +454,9 @@ def _score_interface(
         relaxer,
         chain_pairs=config.chain_pairs,
         distance_cutoff=8.0,
+        relax_separated=config.relax_separated,
+        designer=designer if config.relax_separated else None,
+        relax_separated_iterations=config.relax_separated_iterations,
     )
     if result.binding_energy is None:
         raise RuntimeError(
@@ -452,6 +470,7 @@ def _analyze_and_find_positions(
     config: OptimizeConfig,
     relaxer: Relaxer,
     pool: Optional[WorkPool] = None,
+    designer: Optional[Any] = None,
 ) -> Tuple[float, List[_PositionInfo]]:
     """Run alanine scan and collect candidate positions.
 
@@ -472,12 +491,15 @@ def _analyze_and_find_positions(
         scan_chains=config.scan_chains,
         quiet=config.quiet,
         workers=config.workers,
+        relax_separated=config.relax_separated_scan,
+        relax_separated_iterations=config.relax_separated_iterations,
     )
 
     result = analyze_interface(
         pdb_string,
         config=interface_config,
         relaxer=relaxer,
+        designer=designer,
         pool=pool,
     )
 
@@ -519,6 +541,7 @@ def _analyze_and_find_bad(
     config: OptimizeConfig,
     relaxer: Relaxer,
     pool: Optional[WorkPool] = None,
+    designer: Optional[Any] = None,
 ) -> Tuple[float, List[Tuple[str, int, str]]]:
     """Backwards-compatible wrapper around :func:`_analyze_and_find_positions`.
 
@@ -528,7 +551,7 @@ def _analyze_and_find_bad(
 
     compat_config = replace(config, position_sampling="threshold")
     dG_wt, positions = _analyze_and_find_positions(
-        pdb_string, compat_config, relaxer, pool
+        pdb_string, compat_config, relaxer, pool, designer
     )
     return dG_wt, [
         (p.chain_id, p.resnum, p.icode) for p in positions
@@ -921,14 +944,17 @@ def optimize(
             ),
         )
 
-    # Sync chain_pairs into ddg sub-config
+    # Sync chain_pairs and relax_separated into ddg sub-config
     if config.interface_scoring_backend == "ddg":
         from dataclasses import replace as _replace
 
         config = _replace(
             config,
             ddg=_replace(
-                config.ddg, chain_pairs=config.chain_pairs
+                config.ddg,
+                chain_pairs=config.chain_pairs,
+                relax_separated=config.relax_separated,
+                relax_separated_iterations=config.relax_separated_iterations,
             ),
         )
 
@@ -941,6 +967,19 @@ def optimize(
 
     # Create shared Relaxer for main-process interface analysis
     relaxer = Relaxer(config.relax)
+
+    # Designer for main-process scoring (unbound relaxation)
+    scoring_designer = None
+    if config.relax_separated or config.relax_separated_scan:
+        from boundry.designer import Designer
+
+        scoring_designer = Designer(config.design)
+        logger.info(
+            "Unbound relaxation enabled: scoring calls will "
+            "repack+minimize separated chains "
+            f"({config.relax_separated_iterations} iteration(s) "
+            f"per group)"
+        )
 
     # Output dir setup
     out_dir = Path(output_dir) if output_dir is not None else None
@@ -1028,7 +1067,9 @@ def optimize(
             parents = [relaxed.pdb_string]
 
             # Score initial dG
-            initial_dG = _score_interface(parents[0], config, relaxer)
+            initial_dG = _score_interface(
+                parents[0], config, relaxer, scoring_designer
+            )
             logger.info(
                 f"Campaign {campaign_num}: initial dG = {initial_dG:.2f}"
             )
@@ -1069,19 +1110,30 @@ def optimize(
                 if config.interface_scoring_backend == "ddg":
                     progress.start_phase("Scoring")
                     dG_before = _score_interface(
-                        parents[0], config, relaxer
+                        parents[0],
+                        config,
+                        relaxer,
+                        scoring_designer,
                     )
                     progress.finish_phase()
                     progress.start_phase("Alanine scan")
                     _, positions = _analyze_and_find_positions(
-                        parents[0], config, relaxer, pool
+                        parents[0],
+                        config,
+                        relaxer,
+                        pool,
+                        scoring_designer,
                     )
                     progress.finish_phase()
                 else:
                     progress.start_phase("Scanning interface")
                     dG_before, positions = (
                         _analyze_and_find_positions(
-                            parents[0], config, relaxer, pool
+                            parents[0],
+                            config,
+                            relaxer,
+                            pool,
+                            scoring_designer,
                         )
                     )
                     progress.finish_phase()
@@ -1173,6 +1225,8 @@ def optimize(
                                 exclude_native=config.exclude_native,
                                 interface_scoring_backend=config.interface_scoring_backend,
                                 ddg_config_dict=ddg_config_dict,
+                                relax_separated=config.relax_separated,
+                                relax_separated_iterations=config.relax_separated_iterations,
                             )
                         )
                         task_parent_ranks.append(parent_rank)
@@ -1314,7 +1368,7 @@ def optimize(
 
             # Campaign result
             final_campaign_dG = _score_interface(
-                parents[0], config, relaxer
+                parents[0], config, relaxer, scoring_designer
             )
             campaign_sequences_after = _filter_sequences(
                 _residue_map_to_sequences(

@@ -1098,6 +1098,29 @@ def optimize(
         "--exclude-native",
         help="Exclude the native amino acid at each design position",
     ),
+    no_relax_separated: bool = typer.Option(
+        False,
+        "--no-relax-separated",
+        help=(
+            "Disable repack+minimize of unbound chains "
+            "before scoring"
+        ),
+    ),
+    relax_separated_iterations: int = typer.Option(
+        1,
+        "--relax-separated-iterations",
+        help=(
+            "Number of repack+minimize iterations per "
+            "chain group for unbound relaxation"
+        ),
+    ),
+    no_relax_separated_scan: bool = typer.Option(
+        False,
+        "--no-relax-separated-scan",
+        help=(
+            "Disable unbound relaxation during alanine scan"
+        ),
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -1150,6 +1173,9 @@ def optimize(
         sampling_temperature=sampling_temperature,
         regression_tolerance=regression_tolerance,
         exclude_native=exclude_native,
+        relax_separated=not no_relax_separated,
+        relax_separated_iterations=relax_separated_iterations,
+        relax_separated_scan=not no_relax_separated_scan,
         design=DesignConfig(
             model_type=model_type,
             temperature=temperature,

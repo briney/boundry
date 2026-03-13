@@ -733,7 +733,9 @@ class TestDdGMemberTaskPickle:
 
 
 class TestProcessEnsembleMember:
-    def _make_task(self, mutations=()):
+    def _make_task(
+        self, mutations=(), relax_separated=False
+    ):
         return _DdGMemberTask(
             member_index=0,
             member_pdb_string="ATOM  mock PDB",
@@ -750,6 +752,7 @@ class TestProcessEnsembleMember:
             ca_cutoff=9.0,
             restraint_sd=0.5,
             quiet=True,
+            relax_separated=relax_separated,
         )
 
     @patch("boundry.ddg._ddg_worker_cache", new_callable=dict)
@@ -781,6 +784,52 @@ class TestProcessEnsembleMember:
         assert result.unbound_wt_energy == pytest.approx(-80.0)
         assert result.bound_mut_energy is None
         assert result.unbound_mut_energy is None
+
+    @patch("boundry.ddg._ddg_worker_cache", new_callable=dict)
+    @patch("boundry.ddg._repack_and_minimize")
+    @patch("boundry.binding_energy.extract_chain")
+    @patch("boundry.utils.filter_protein_only")
+    def test_wt_only_relax_separated(
+        self,
+        mock_filter,
+        mock_extract,
+        mock_repack_min,
+        mock_cache,
+    ):
+        """With relax_separated=True, unbound scoring uses
+        extract_chain + repack_and_minimize per group."""
+        mock_relaxer = MagicMock()
+        mock_designer = MagicMock()
+        mock_cache["relax_key"] = "implicit_solvent=True"
+        mock_cache["relaxer"] = mock_relaxer
+        mock_cache["design_key"] = ""
+        mock_cache["designer"] = mock_designer
+
+        mock_extract.return_value = "chain_pdb"
+        mock_filter.return_value = "filtered_pdb"
+        mock_repack_min.side_effect = [
+            "wt_bound_min",  # WT bound
+            "group_a_relaxed",  # group A unbound
+            "group_b_relaxed",  # group B unbound
+        ]
+        mock_relaxer.get_energy_breakdown.side_effect = [
+            {"total_energy": -100.0},  # WT bound
+            {"total_energy": -50.0},  # group A unbound
+            {"total_energy": -30.0},  # group B unbound
+        ]
+
+        task = self._make_task(
+            mutations=(), relax_separated=True
+        )
+        result = _process_ensemble_member(task)
+
+        assert result.error is None
+        assert result.bound_wt_energy == pytest.approx(-100.0)
+        # Unbound = sum of group energies
+        assert result.unbound_wt_energy == pytest.approx(-80.0)
+        assert mock_extract.call_count == 2
+        # 3 calls: 1 for bound, 2 for unbound groups
+        assert mock_repack_min.call_count == 3
 
     @patch("boundry.ddg._ddg_worker_cache", new_callable=dict)
     @patch("boundry.ddg._repack_and_minimize")

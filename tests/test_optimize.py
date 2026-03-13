@@ -56,6 +56,9 @@ class TestOptimizeConfig:
         assert cfg.quiet is True
         assert cfg.seed is None
         assert cfg.scan_chains is None
+        assert cfg.relax_separated is True
+        assert cfg.relax_separated_iterations == 1
+        assert cfg.relax_separated_scan is True
 
     def test_chain_pairs_required(self):
         """OptimizeConfig requires chain_pairs."""
@@ -150,6 +153,37 @@ class TestBeamExpansionTask:
         assert roundtripped.target_chain == "H"
         assert roundtripped.seed == 42
         assert roundtripped.chain_pairs == [("H", "L")]
+
+    def test_relax_separated_fields_default(self):
+        task = _BeamExpansionTask(
+            parent_pdb_string="ATOM...",
+            target_chain="H",
+            target_resnum=52,
+            target_icode="",
+            relax_config_dict={},
+            design_config_dict={},
+            chain_pairs=[("H", "L")],
+            seed=42,
+        )
+        assert task.relax_separated is True
+        assert task.relax_separated_iterations == 1
+
+    def test_relax_separated_fields_pickle(self):
+        task = _BeamExpansionTask(
+            parent_pdb_string="ATOM...",
+            target_chain="H",
+            target_resnum=52,
+            target_icode="",
+            relax_config_dict={},
+            design_config_dict={},
+            chain_pairs=[("H", "L")],
+            seed=42,
+            relax_separated=True,
+            relax_separated_iterations=3,
+        )
+        rt = pickle.loads(pickle.dumps(task))
+        assert rt.relax_separated is True
+        assert rt.relax_separated_iterations == 3
 
 
 # ------------------------------------------------------------------
@@ -313,6 +347,59 @@ class TestScoreInterface:
         ):
             with pytest.raises(RuntimeError, match="returned None"):
                 _score_interface("ATOM...", config, MagicMock())
+
+    def test_legacy_passes_relax_separated(self):
+        """Legacy backend passes relax_separated params to
+        calculate_binding_energy."""
+        from boundry.optimize import _score_interface
+
+        mock_be_result = MagicMock()
+        mock_be_result.binding_energy = -10.0
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            interface_scoring_backend="legacy",
+            relax_separated=True,
+            relax_separated_iterations=3,
+        )
+        mock_designer = MagicMock()
+
+        with patch(
+            "boundry.binding_energy.calculate_binding_energy",
+            return_value=mock_be_result,
+        ) as mock_calc:
+            _score_interface(
+                "ATOM...", config, MagicMock(), mock_designer
+            )
+
+        _, kwargs = mock_calc.call_args
+        assert kwargs["relax_separated"] is True
+        assert kwargs["designer"] is mock_designer
+        assert kwargs["relax_separated_iterations"] == 3
+
+    def test_ddg_passes_designer(self):
+        """ddG backend passes designer to compute_interface_dg."""
+        from boundry.optimize import _score_interface
+
+        mock_dg_result = MagicMock()
+        mock_dg_result.dG = -12.0
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            interface_scoring_backend="ddg",
+        )
+        mock_designer = MagicMock()
+
+        with patch(
+            "boundry.ddg.compute_interface_dg",
+            return_value=mock_dg_result,
+        ) as mock_dg:
+            _score_interface(
+                "ATOM...", config, MagicMock(), mock_designer
+            )
+
+        _, kwargs = mock_dg.call_args
+        assert kwargs["designer"] is mock_designer
 
 
 # ------------------------------------------------------------------
@@ -1484,6 +1571,61 @@ class TestAnalyzeAndFindPositions:
             assert len(positions) == 1
             assert positions[0].resnum == 50
 
+    def test_passes_relax_separated_scan_to_interface_config(self):
+        """relax_separated_scan is forwarded to InterfaceConfig."""
+        from boundry.optimize import _analyze_and_find_positions
+
+        mock_result = self._mock_scan_result([
+            ("H", 50, "", 3.0, False),
+        ])
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+            relax_separated_scan=True,
+            relax_separated_iterations=2,
+        )
+
+        with patch(
+            "boundry.operations.analyze_interface",
+            return_value=mock_result,
+        ) as mock_ai:
+            _analyze_and_find_positions(
+                "ATOM...", config, MagicMock()
+            )
+
+        call_kwargs = mock_ai.call_args[1]
+        ic = call_kwargs.get("config") or mock_ai.call_args[0][1]
+        # InterfaceConfig should have relax_separated=True
+        assert ic.relax_separated is True
+        assert ic.relax_separated_iterations == 2
+
+    def test_passes_designer_to_analyze_interface(self):
+        """Designer is forwarded to analyze_interface."""
+        from boundry.optimize import _analyze_and_find_positions
+
+        mock_result = self._mock_scan_result([
+            ("H", 50, "", 3.0, False),
+        ])
+
+        config = OptimizeConfig(
+            chain_pairs=[("H", "L")],
+        )
+        mock_designer = MagicMock()
+
+        with patch(
+            "boundry.operations.analyze_interface",
+            return_value=mock_result,
+        ) as mock_ai:
+            _analyze_and_find_positions(
+                "ATOM...",
+                config,
+                MagicMock(),
+                designer=mock_designer,
+            )
+
+        call_kwargs = mock_ai.call_args[1]
+        assert call_kwargs["designer"] is mock_designer
+
 
 # ------------------------------------------------------------------
 # Regression guard
@@ -1656,6 +1798,14 @@ class TestCLIOptimizeNewFlags:
         assert "--position-sampling" in result.output
         assert "--sampling-temperature" in result.output
         assert "--regression-tolerance" in result.output
+
+    def test_relax_separated_flags_in_help(self):
+        result = runner.invoke(app, ["optimize", "--help"])
+        assert result.exit_code == 0
+        assert "--no-relax-separated" in result.output
+        # Typer may truncate long option names in help display
+        assert "--relax-separated-iterati" in result.output
+        assert "--no-relax-separated-scan" in result.output
 
 
 # ------------------------------------------------------------------

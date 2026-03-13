@@ -125,6 +125,10 @@ class DdGConfig:
     # Energy model
     implicit_solvent: bool = True
 
+    # Unbound-state relaxation
+    relax_separated: bool = True
+    relax_separated_iterations: int = 1
+
     # Execution
     workers: int = 1
     seed: Optional[int] = None
@@ -165,6 +169,9 @@ class OptimizeConfig:
     sampling_temperature: float = 1.0  # softmax temperature (> 0)
     regression_tolerance: float = 0.0  # max dG increase allowed
     exclude_native: bool = False
+    relax_separated: bool = True
+    relax_separated_iterations: int = 1
+    relax_separated_scan: bool = True
     design: "DesignConfig" = field(default_factory=lambda: DesignConfig())
     relax: "RelaxConfig" = field(default_factory=lambda: RelaxConfig())
     idealize: "IdealizeConfig" = field(

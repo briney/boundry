@@ -630,6 +630,8 @@ class _DdGMemberTask:
     ca_cutoff: float
     restraint_sd: float
     quiet: bool
+    relax_separated: bool = True
+    relax_separated_iterations: int = 1
 
 
 @dataclass
@@ -706,17 +708,44 @@ def _process_ensemble_member(task: _DdGMemberTask) -> _DdGMemberResult:
             wt_bound_pdb
         )["total_energy"]
 
-        # --- WT unbound: separate → score ---------------------------
+        # --- WT unbound: separate → (optional relax) → score --------
+        from boundry.binding_energy import extract_chain
         from boundry.relaxer import separate_interface_rigid_body
+        from boundry.utils import filter_protein_only
 
-        unbound_pdb = separate_interface_rigid_body(
-            wt_bound_pdb,
-            chain_groups,
-            task.separation_distance,
-        )
-        unbound_wt_energy = relaxer.get_energy_breakdown(
-            unbound_pdb
-        )["total_energy"]
+        if task.relax_separated:
+            # Repack+minimize each chain group independently
+            group_energies: list = []
+            for group in chain_groups:
+                group_pdb = extract_chain(wt_bound_pdb, list(group))
+                group_pdb = filter_protein_only(group_pdb)
+                best_e: Optional[float] = None
+                for _ in range(task.relax_separated_iterations):
+                    relaxed = _repack_and_minimize(
+                        group_pdb,
+                        design_spec,
+                        designer,
+                        relaxer,
+                        task.ca_cutoff,
+                        task.restraint_sd,
+                        task.implicit_solvent,
+                    )
+                    e = relaxer.get_energy_breakdown(relaxed)[
+                        "total_energy"
+                    ]
+                    if best_e is None or e < best_e:
+                        best_e = e
+                group_energies.append(best_e)
+            unbound_wt_energy = sum(group_energies)
+        else:
+            unbound_pdb = separate_interface_rigid_body(
+                wt_bound_pdb,
+                chain_groups,
+                task.separation_distance,
+            )
+            unbound_wt_energy = relaxer.get_energy_breakdown(
+                unbound_pdb
+            )["total_energy"]
 
         bound_mut_energy = None
         unbound_mut_energy = None
@@ -750,14 +779,42 @@ def _process_ensemble_member(task: _DdGMemberTask) -> _DdGMemberResult:
                 mut_bound_pdb
             )["total_energy"]
 
-            mut_unbound_pdb = separate_interface_rigid_body(
-                mut_bound_pdb,
-                chain_groups,
-                task.separation_distance,
-            )
-            unbound_mut_energy = relaxer.get_energy_breakdown(
-                mut_unbound_pdb
-            )["total_energy"]
+            if task.relax_separated:
+                mut_group_energies: list = []
+                for group in chain_groups:
+                    group_pdb = extract_chain(
+                        mut_bound_pdb, list(group)
+                    )
+                    group_pdb = filter_protein_only(group_pdb)
+                    best_e_mut: Optional[float] = None
+                    for _ in range(
+                        task.relax_separated_iterations
+                    ):
+                        relaxed = _repack_and_minimize(
+                            group_pdb,
+                            design_spec,
+                            designer,
+                            relaxer,
+                            task.ca_cutoff,
+                            task.restraint_sd,
+                            task.implicit_solvent,
+                        )
+                        e = relaxer.get_energy_breakdown(relaxed)[
+                            "total_energy"
+                        ]
+                        if best_e_mut is None or e < best_e_mut:
+                            best_e_mut = e
+                    mut_group_energies.append(best_e_mut)
+                unbound_mut_energy = sum(mut_group_energies)
+            else:
+                mut_unbound_pdb = separate_interface_rigid_body(
+                    mut_bound_pdb,
+                    chain_groups,
+                    task.separation_distance,
+                )
+                unbound_mut_energy = relaxer.get_energy_breakdown(
+                    mut_unbound_pdb
+                )["total_energy"]
 
         return _DdGMemberResult(
             member_index=task.member_index,
@@ -938,6 +995,8 @@ def compute_ddg(
             ca_cutoff=config.ca_cutoff,
             restraint_sd=config.restraint_sd,
             quiet=config.quiet,
+            relax_separated=config.relax_separated,
+            relax_separated_iterations=config.relax_separated_iterations,
         )
         for i, member_pdb in enumerate(ensemble)
     ]
@@ -1152,6 +1211,8 @@ def compute_interface_dg(
             ca_cutoff=config.ca_cutoff,
             restraint_sd=config.restraint_sd,
             quiet=config.quiet,
+            relax_separated=config.relax_separated,
+            relax_separated_iterations=config.relax_separated_iterations,
         )
         for i, member_pdb in enumerate(ensemble)
     ]
