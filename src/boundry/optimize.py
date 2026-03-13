@@ -153,7 +153,7 @@ def _get_aa_at_position(
 
     Returns ``"X"`` if the position is not found.
     """
-    from boundry.workflow_metadata import _RESTYPE_3TO1
+    from boundry._sequence import _RESTYPE_3TO1
 
     target_icode = icode.strip()
     for line in pdb_string.splitlines():
@@ -341,7 +341,7 @@ def _execute_beam_expansion(task: _BeamExpansionTask) -> _BeamExpansionResult:
             task.target_icode,
         )
 
-        from boundry.workflow_metadata import (
+        from boundry._sequence import (
             _residue_map_to_sequences,
             extract_residue_map,
         )
@@ -1077,7 +1077,7 @@ def optimize(
                 overall_initial_dG = initial_dG
 
             # Capture campaign-level sequences before design
-            from boundry.workflow_metadata import (
+            from boundry._sequence import (
                 _residue_map_to_sequences,
                 extract_residue_map,
             )
@@ -1164,7 +1164,7 @@ def optimize(
                     continue
 
                 # Compute sequences before design for this cycle
-                from boundry.workflow_metadata import (
+                from boundry._sequence import (
                     _residue_map_to_sequences,
                     extract_residue_map,
                 )
