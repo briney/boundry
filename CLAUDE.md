@@ -80,8 +80,6 @@ Subcommands: `idealize`, `minimize`, `repack`, `relax`, `mpnn`, `design`, `renum
 - **`renumber.py`** — PDB insertion code handling. `has_insertion_codes()`, `renumber_pdb()`, `restore_numbering()`. Operations that need sequential numbering (minimize, relax, design) auto-renumber and restore.
 - **`interface.py` / `binding_energy.py` / `surface_area.py`** — Interface analysis: residue identification, ddG calculation, SASA, shape complementarity.
 - **`interface_position_energetics.py`** — Per-position interface energetics (residue removal and alanine scanning). `compute_position_energetics()` with sequential and parallel scan paths via the shared pool.
-- **`runner.py`** — Shared operation runners with invocation-aware output handling. `run_structure_operation()` and `run_interface_operation()` unify execution across API and CLI modes.
-- **`invocation.py`** — Invocation/output policy helpers. `InvocationMode`, `OperationKind`, `OutputRequirement`, `OutputPolicy` manage output-path requirements across calling contexts.
 - **`result_io.py`** — Result serialization and output-path helpers. `write_structure_output()`, `write_interface_json()`, `write_interface_csv()`.
 - **`chain_gaps.py`** — Detects missing residues via residue number discontinuities and large C-N distances.
 - **`resfile.py`** — Parses Rosetta-style resfiles (NATRO, NATAA, ALLAA, PIKAA, NOTAA, POLAR, APOLAR).
@@ -124,7 +122,6 @@ Tests are in `tests/` using pytest. Two custom markers:
 - **`test_interface.py`** — Tests for interface residue identification.
 - **`test_interface_position_energetics.py`** — Tests for per-position energetics.
 - **`test_config.py`** — Tests for configuration dataclasses.
-- **`test_runner.py`** — Tests for operation runner functions.
 - **`test_result_io.py`** — Tests for result serialization.
 - **`test_utils.py`** — Tests for utility functions.
 - **`test_weights.py`** — Tests for LigandMPNN weight management.

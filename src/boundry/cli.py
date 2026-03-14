@@ -195,29 +195,17 @@ def _parse_chain_pairs(chain_string: str) -> list:
 
 def _run_structure_command(
     *,
-    operation_name: str,
     operation,
     input_file: Path,
     output_file: Path,
     operation_kwargs: Optional[dict] = None,
 ):
-    """Run a structure-producing operation with CLI output policy."""
-    from boundry.invocation import (
-        InvocationMode,
-        OutputPolicy,
-        OutputRequirement,
-    )
-    from boundry.runner import run_structure_operation
+    """Run a structure-producing operation and write the result."""
+    from boundry.result_io import write_structure_output
 
-    return run_structure_operation(
-        name=operation_name,
-        operation=operation,
-        structure=input_file,
-        output=output_file,
-        mode=InvocationMode.CLI,
-        output_policy=OutputPolicy(OutputRequirement.REQUIRED),
-        **(operation_kwargs or {}),
-    )
+    result = operation(input_file, **(operation_kwargs or {}))
+    write_structure_output(result, output_file)
+    return result
 
 
 # -------------------------------------------------------------------
@@ -267,7 +255,6 @@ def idealize(
     logger.info(f"Idealizing {input_file} -> {output_file}")
     with _quiet_context(verbose):
         result = _run_structure_command(
-            operation_name="idealize",
             operation=_idealize,
             input_file=input_file,
             output_file=output_file,
@@ -327,7 +314,6 @@ def minimize(
     logger.info(f"Minimizing {input_file} -> {output_file}")
     with _quiet_context(verbose):
         result = _run_structure_command(
-            operation_name="minimize",
             operation=_minimize,
             input_file=input_file,
             output_file=output_file,
@@ -390,7 +376,6 @@ def repack(
     logger.info(f"Repacking {input_file} -> {output_file}")
     with _quiet_context(verbose):
         result = _run_structure_command(
-            operation_name="repack",
             operation=_repack,
             input_file=input_file,
             output_file=output_file,
@@ -490,7 +475,6 @@ def relax(
     )
     with _quiet_context(verbose):
         result = _run_structure_command(
-            operation_name="relax",
             operation=_relax,
             input_file=input_file,
             output_file=output_file,
@@ -555,7 +539,6 @@ def mpnn(
     logger.info(f"Designing {input_file} -> {output_file}")
     with _quiet_context(verbose):
         result = _run_structure_command(
-            operation_name="mpnn",
             operation=_mpnn,
             input_file=input_file,
             output_file=output_file,
@@ -655,7 +638,6 @@ def design(
     )
     with _quiet_context(verbose):
         result = _run_structure_command(
-            operation_name="design",
             operation=_design,
             input_file=input_file,
             output_file=output_file,
@@ -697,7 +679,6 @@ def renumber(
 
     logger.info(f"Renumbering {input_file} -> {output_file}")
     _run_structure_command(
-        operation_name="renumber",
         operation=_renumber,
         input_file=input_file,
         output_file=output_file,
@@ -839,7 +820,11 @@ def analyze_interface(
 
     from boundry.config import DesignConfig, InterfaceConfig, RelaxConfig
     from boundry.operations import analyze_interface as _analyze
-    from boundry.runner import run_interface_operation
+    from boundry.result_io import (
+        resolve_interface_output_paths,
+        write_interface_csv,
+        write_interface_json,
+    )
 
     parsed_scan_chains = None
     if scan_chains:
@@ -893,21 +878,42 @@ def analyze_interface(
         ensure_weights(verbose=verbose)
         designer = Designer(DesignConfig())
 
-    result, outputs = run_interface_operation(
-        operation=_analyze,
-        structure=input_file,
-        output=output,
-        per_position_csv=per_position_csv,
-        alanine_scan_csv=alanine_scan_csv,
-        include_per_position_csv=per_position,
-        include_alanine_scan_csv=alanine_scan,
+    result = _analyze(
+        input_file,
         config=interface_config,
         relaxer=relaxer,
         designer=designer,
     )
 
+    # Write output files
+    summary_json_path = None
+    pp_csv_path = None
+    ala_csv_path = None
+
+    if output is not None:
+        summary_path, pp_path, ala_path = resolve_interface_output_paths(
+            output,
+            include_per_position_csv=per_position,
+            include_alanine_scan_csv=alanine_scan,
+            per_position_csv=per_position_csv,
+            alanine_scan_csv=alanine_scan_csv,
+        )
+        pp_csv_path, ala_csv_path = write_interface_csv(
+            result,
+            per_position_path=pp_path,
+            alanine_scan_path=ala_path,
+        )
+        summary_json_path = write_interface_json(result, summary_path)
+    else:
+        if per_position_csv is not None or alanine_scan_csv is not None:
+            pp_csv_path, ala_csv_path = write_interface_csv(
+                result,
+                per_position_path=per_position_csv,
+                alanine_scan_path=alanine_scan_csv,
+            )
+
+    # Display results
     if output is None:
-        # Print results to stdout
         if result.interface_info:
             typer.echo(result.interface_info.summary)
         if result.binding_energy:
@@ -941,10 +947,8 @@ def analyze_interface(
             )
             if table:
                 typer.echo(table)
-            if outputs.per_position_csv is not None:
-                typer.echo(
-                    f"Per-position CSV: {outputs.per_position_csv}"
-                )
+            if pp_csv_path is not None:
+                typer.echo(f"Per-position CSV: {pp_csv_path}")
         if result.alanine_scan:
             from boundry.interface_position_energetics import (
                 format_position_table as _fmt_table,
@@ -956,17 +960,15 @@ def analyze_interface(
             )
             if table:
                 typer.echo(table)
-            if outputs.alanine_scan_csv is not None:
-                typer.echo(
-                    f"Alanine scan CSV: {outputs.alanine_scan_csv}"
-                )
+            if ala_csv_path is not None:
+                typer.echo(f"Alanine scan CSV: {ala_csv_path}")
     else:
-        if outputs.summary_json is not None:
-            typer.echo(f"Summary JSON: {outputs.summary_json}")
-        if outputs.per_position_csv is not None:
-            typer.echo(f"Per-position CSV: {outputs.per_position_csv}")
-        if outputs.alanine_scan_csv is not None:
-            typer.echo(f"Alanine scan CSV: {outputs.alanine_scan_csv}")
+        if summary_json_path is not None:
+            typer.echo(f"Summary JSON: {summary_json_path}")
+        if pp_csv_path is not None:
+            typer.echo(f"Per-position CSV: {pp_csv_path}")
+        if ala_csv_path is not None:
+            typer.echo(f"Alanine scan CSV: {ala_csv_path}")
 
 
 def _parse_chain_pairs_strict(chain_string: str) -> list:
