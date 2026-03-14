@@ -1717,13 +1717,6 @@ class TestTopLevelImports:
         r = InterfaceAnalysisResult()
         assert r.interface_info is None
 
-    def test_workflow_importable(self):
-        """Test that Workflow is importable from boundry."""
-        from boundry import Workflow
-
-        assert hasattr(Workflow, "from_yaml")
-        assert hasattr(Workflow, "run")
-
     def test_config_classes_importable(self):
         """Test that all config classes are importable."""
         from boundry import (
@@ -1732,8 +1725,6 @@ class TestTopLevelImports:
             InterfaceConfig,
             PipelineConfig,
             RelaxConfig,
-            WorkflowConfig,
-            WorkflowStep,
         )
 
         assert DesignConfig().model_type == "ligand_mpnn"
@@ -1741,8 +1732,6 @@ class TestTopLevelImports:
         assert IdealizeConfig().enabled is False
         assert InterfaceConfig().enabled is False
         assert PipelineConfig().n_iterations == 5
-        assert WorkflowConfig(input="in.pdb").input == "in.pdb"
-        assert WorkflowStep(operation="idealize").operation == "idealize"
 
     def test_resfile_classes_importable(self):
         """Test that resfile classes are importable."""

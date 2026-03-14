@@ -41,7 +41,6 @@ class TestCLIHelp:
         assert "mpnn" in result.stdout
         assert "design" in result.stdout
         assert "analyze-interface" in result.stdout
-        assert "run" in result.stdout
 
     def test_subcommand_help_shows_positional_args(self):
         """Test that subcommand help shows positional INPUT/OUTPUT args."""

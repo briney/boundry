@@ -3,16 +3,12 @@
 from pathlib import Path
 
 from boundry.config import (
-    BeamBlock,
     DdGConfig,
     DesignConfig,
     IdealizeConfig,
     InterfaceConfig,
-    IterateBlock,
     PipelineConfig,
     RelaxConfig,
-    WorkflowConfig,
-    WorkflowStep,
 )
 
 
@@ -263,95 +259,3 @@ class TestPipelineConfig:
         """Test show_progress flag setting."""
         config = PipelineConfig(show_progress=True)
         assert config.show_progress is True
-
-
-class TestWorkflowStep:
-    """Tests for WorkflowStep dataclass."""
-
-    def test_minimal_step(self):
-        """Test creating a step with only required fields."""
-        step = WorkflowStep(operation="idealize")
-        assert step.operation == "idealize"
-        assert step.params == {}
-
-    def test_step_with_params(self):
-        """Test creating a step with parameters."""
-        step = WorkflowStep(
-            operation="minimize",
-            params={"constrained": False, "max_iterations": 1000},
-        )
-        assert step.operation == "minimize"
-        assert step.params == {"constrained": False, "max_iterations": 1000}
-
-    def test_step_no_output_field(self):
-        """Test that WorkflowStep no longer has an output field."""
-        step = WorkflowStep(operation="idealize")
-        assert not hasattr(step, "output")
-
-
-class TestWorkflowConfig:
-    """Tests for WorkflowConfig dataclass."""
-
-    def test_minimal_config(self):
-        """Test creating a workflow config with only input."""
-        config = WorkflowConfig(input="input.pdb")
-        assert config.input == "input.pdb"
-        assert config.project_path is None
-        assert config.seed is None
-        assert config.workflow_version == 1
-        assert config.steps == []
-
-    def test_full_config(self):
-        """Test creating a workflow config with all fields."""
-        steps = [
-            WorkflowStep(
-                operation="idealize",
-                params={"fix_cis_omega": True},
-            ),
-            WorkflowStep(
-                operation="minimize",
-                params={"constrained": False},
-            ),
-        ]
-        config = WorkflowConfig(
-            input="input.pdb",
-            project_path="results",
-            steps=steps,
-        )
-        assert config.input == "input.pdb"
-        assert config.project_path == "results"
-        assert len(config.steps) == 2
-        assert config.steps[0].operation == "idealize"
-        assert config.steps[1].operation == "minimize"
-
-    def test_default_steps_are_independent(self):
-        """Test that default steps list is not shared between instances."""
-        config1 = WorkflowConfig(input="a.pdb")
-        config2 = WorkflowConfig(input="b.pdb")
-        config1.steps.append(WorkflowStep(operation="idealize"))
-        assert len(config2.steps) == 0
-
-
-class TestIterateBlock:
-    """Tests for IterateBlock dataclass."""
-
-    def test_defaults(self):
-        block = IterateBlock(steps=[WorkflowStep(operation="idealize")])
-        assert block.n == 1
-        assert block.max_n == 100
-        assert block.until is None
-        assert not hasattr(block, "output")
-
-
-class TestBeamBlock:
-    """Tests for BeamBlock dataclass."""
-
-    def test_defaults(self):
-        block = BeamBlock(steps=[WorkflowStep(operation="relax")])
-        assert block.width == 5
-        assert block.rounds == 10
-        assert block.metric == "dG"
-        assert block.direction == "min"
-        assert block.until is None
-        assert block.expand == 1
-        assert not hasattr(block, "output")

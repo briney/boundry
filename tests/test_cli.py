@@ -31,7 +31,6 @@ class TestAppStructure:
         assert "design" in result.output
         assert "renumber" in result.output
         assert "analyze-interface" in result.output
-        assert "run" in result.output
         assert "optimize" in result.output
         assert "ddg" in result.output
 
@@ -319,29 +318,6 @@ class TestAnalyzeInterface:
         assert out_json.exists()
 
 
-class TestRun:
-    """Tests for the run subcommand."""
-
-    def test_help(self):
-        """Test run --help."""
-        result = runner.invoke(app, ["run", "--help"])
-        assert result.exit_code == 0
-        assert "workflow" in result.output.lower()
-
-    def test_has_seed_option(self):
-        """Test that --seed option is available."""
-        result = runner.invoke(app, ["run", "--help"])
-        assert "--seed" in result.output
-
-    def test_missing_workflow_file(self, tmp_path):
-        """Test run with nonexistent workflow file."""
-        result = runner.invoke(
-            app, ["run", str(tmp_path / "nonexistent.yaml")]
-        )
-        assert result.exit_code != 0
-        assert "not found" in result.output.lower()
-
-
 class TestHelpers:
     """Tests for CLI helper functions."""
 
@@ -371,7 +347,6 @@ class TestHelpers:
             "design",
             "renumber",
             "analyze-interface",
-            "run",
             "optimize",
             "ddg",
         ]
