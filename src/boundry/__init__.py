@@ -10,7 +10,7 @@ Core operations are available as top-level imports::
 
     from boundry import idealize, minimize, repack, relax, mpnn, design
     from boundry import analyze_interface, ddg
-    from boundry import Structure, Workflow
+    from boundry import Structure
 """
 
 try:
@@ -43,23 +43,16 @@ from boundry.operations import (
 # Optimize
 from boundry.optimize import OptimizeResult, optimize
 
-# Workflow system
-from boundry.workflow import Workflow
-
 # Configuration dataclasses (lightweight, no heavy deps)
 from boundry.config import (
-    BeamBlock,
     DdGConfig,
     DesignConfig,
     IdealizeConfig,
     InterfaceConfig,
-    IterateBlock,
     OptimizeConfig,
     PipelineConfig,
     RelaxConfig,
     SelectPositionsConfig,
-    WorkflowConfig,
-    WorkflowStep,
 )
 
 # Resfile parsing
@@ -91,8 +84,6 @@ __all__ = [
     "optimize",
     "OptimizeResult",
     "OptimizeConfig",
-    # Workflow
-    "Workflow",
     # Configuration
     "PipelineConfig",
     "DesignConfig",
@@ -101,10 +92,6 @@ __all__ = [
     "InterfaceConfig",
     "SelectPositionsConfig",
     "DdGConfig",
-    "WorkflowConfig",
-    "WorkflowStep",
-    "IterateBlock",
-    "BeamBlock",
     # Resfile
     "ResidueMode",
     "ResidueSpec",

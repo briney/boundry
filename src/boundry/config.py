@@ -1,8 +1,8 @@
-"""Configuration dataclasses for Boundry pipeline and workflows."""
+"""Configuration dataclasses for Boundry operations."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import List, Literal, Optional, Tuple
 
 
 ModelType = Literal["protein_mpnn", "ligand_mpnn", "soluble_mpnn"]
@@ -226,79 +226,3 @@ class PipelineConfig:
     relax: RelaxConfig = field(default_factory=RelaxConfig)
     idealize: IdealizeConfig = field(default_factory=IdealizeConfig)
     interface: InterfaceConfig = field(default_factory=InterfaceConfig)
-
-
-# -------------------------------------------------------------------
-# Workflow configuration
-# -------------------------------------------------------------------
-
-
-@dataclass
-class WorkflowStep:
-    """A single step in a Boundry workflow.
-
-    Each step maps to one of the core operations (idealize, minimize,
-    repack, relax, mpnn, design, analyze_interface) and carries
-    operation-specific parameters.
-    """
-
-    operation: str  # Operation name (e.g. 'idealize', 'minimize')
-    params: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class IterateBlock:
-    """Repeat a group of steps for a fixed count or until convergence."""
-
-    steps: List["WorkflowStepOrBlock"]
-    n: int = 1
-    max_n: int = 100
-    until: Optional[str] = None
-
-
-@dataclass
-class BeamBlock:
-    """Population-based beam search over a nested group of steps."""
-
-    steps: List["WorkflowStepOrBlock"]
-    width: int = 5
-    rounds: int = 10
-    metric: str = "dG"
-    direction: Literal["min", "max"] = "min"
-    until: Optional[str] = None
-    expand: int = 1
-
-
-@dataclass
-class CheckpointStep:
-    """Save the current structure under a named checkpoint."""
-
-    name: str
-
-
-@dataclass
-class CompareStep:
-    """Compute deltas between current structure and a named checkpoint."""
-
-    name: str
-
-
-WorkflowStepOrBlock = Union[
-    WorkflowStep, IterateBlock, BeamBlock, CheckpointStep, CompareStep
-]
-
-
-@dataclass
-class WorkflowConfig:
-    """Configuration for a YAML-based workflow.
-
-    Workflows are versioned schemas so the parser can evolve safely.
-    """
-
-    input: str  # Input PDB/CIF path
-    project_path: Optional[str] = None  # Base output directory (default: cwd)
-    seed: Optional[int] = None  # Workflow-level seed for reproducibility
-    workers: int = 1  # Global default; 1 = sequential (no pool)
-    workflow_version: int = 1
-    steps: List[WorkflowStepOrBlock] = field(default_factory=list)
-    vars: Dict[str, str] = field(default_factory=dict)

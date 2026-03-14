@@ -1,4 +1,4 @@
-"""Invocation/output policy helpers for API, CLI, and workflow entrypoints."""
+"""Invocation/output policy helpers for API and CLI entrypoints."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ class InvocationMode(str, Enum):
 
     API = "api"
     CLI = "cli"
-    WORKFLOW = "workflow"
 
 
 class OperationKind(str, Enum):
