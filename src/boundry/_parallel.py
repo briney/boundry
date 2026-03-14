@@ -1,21 +1,19 @@
-"""Process-level parallelism for workflow execution.
+"""Process-level parallelism for scan and batch computations.
 
 Provides a shared ``WorkPool`` context manager wrapping a
 ``ProcessPoolExecutor`` with the ``spawn`` start method.  The pool is
-created once at workflow start and torn down at the end, avoiding
-repeated heavy-import overhead in worker processes.
+created once and torn down when the context exits, avoiding repeated
+heavy-import overhead in worker processes.
 
-Operations are the unit of parallelism — the main process submits
-batches of ``OperationTask`` objects and waits at a barrier for all
-results.  Scan tasks (per-position interface energetics) are also
-submitted to the same shared pool.
+Primary consumers are per-position interface scans (alanine scanning,
+residue removal) dispatched as ``ScanTask`` objects, and any other
+batch computation that benefits from process-level parallelism.
 """
 
 from __future__ import annotations
 
 import logging
 import multiprocessing
-import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
@@ -26,16 +24,24 @@ T = TypeVar("T")
 
 
 # ------------------------------------------------------------------
+# Exceptions
+# ------------------------------------------------------------------
+
+
+class ParallelTaskError(RuntimeError):
+    """Raised when a task submitted to ``WorkPool`` fails."""
+
+
+# ------------------------------------------------------------------
 # WorkPool — shared process pool
 # ------------------------------------------------------------------
 
 
 class WorkPool:
-    """Shared process pool for workflow parallelism.
+    """Shared process pool for batch parallelism.
 
-    Context manager wrapping ``ProcessPoolExecutor(spawn)``.  Created
-    once at ``Workflow.run()`` start, torn down at end.  Provides a
-    ``map(worker_fn, tasks)`` method that submits a batch, collects
+    Context manager wrapping ``ProcessPoolExecutor(spawn)``.  Provides
+    a ``map(worker_fn, tasks)`` method that submits a batch, collects
     results in original order, and raises on worker errors.
 
     When ``max_workers <= 1``, no pool is created and ``map()`` falls
@@ -64,7 +70,7 @@ class WorkPool:
         """Submit all *tasks*, wait for completion, return ordered results.
 
         On any ``Future`` exception, cancels pending futures and raises
-        a ``WorkflowError`` with the task index and exception context.
+        a ``ParallelTaskError`` with the task index and exception context.
 
         If *on_complete* is provided, it is called after each task
         finishes successfully (useful for progress-bar updates).
@@ -76,8 +82,6 @@ class WorkPool:
                 if on_complete is not None:
                     on_complete()
             return results
-
-        from boundry.workflow import WorkflowError
 
         total = len(tasks)
         results: List[Any] = [None] * total
@@ -98,7 +102,7 @@ class WorkPool:
                     # Cancel remaining futures
                     for f in future_to_idx:
                         f.cancel()
-                    raise WorkflowError(
+                    raise ParallelTaskError(
                         f"Parallel task {idx + 1}/{total} "
                         f"failed: {type(exc).__name__}: {exc}"
                     ) from exc
@@ -106,10 +110,10 @@ class WorkPool:
             for f in future_to_idx:
                 f.cancel()
             raise
-        except WorkflowError:
+        except ParallelTaskError:
             raise
         except Exception as exc:
-            raise WorkflowError(
+            raise ParallelTaskError(
                 f"Parallel execution failed: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
@@ -161,36 +165,6 @@ class WorkPool:
 
 
 # ------------------------------------------------------------------
-# Serializable task / result types
-# ------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class OperationTask:
-    """Serializable inputs for one operation on one structure.
-
-    Replaces both ``StepTask`` and ``BranchTask``.  One task = one
-    operation on one structure.
-    """
-
-    pdb_string: str
-    metadata: Dict[str, Any]
-    source_path: Optional[str]
-    operation: str
-    params: Dict[str, Any]
-
-
-@dataclass
-class OperationResult:
-    """Serializable outputs from one operation execution."""
-
-    pdb_string: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    source_path: Optional[str] = None
-    error: Optional[str] = None
-
-
-# ------------------------------------------------------------------
 # Worker warning suppression
 # ------------------------------------------------------------------
 
@@ -220,43 +194,6 @@ def _suppress_worker_warnings() -> None:
     # __init__, which resets the logger level but not propagation.
     prody_logger = logging.getLogger(".prody")
     prody_logger.propagate = False
-
-
-# ------------------------------------------------------------------
-# Worker functions (top-level, pickle-safe targets)
-# ------------------------------------------------------------------
-
-
-def _execute_operation_worker(task: OperationTask) -> OperationResult:
-    """Execute a single operation on one structure in a worker.
-
-    This is the top-level function submitted to the process pool.
-    It imports all dependencies inside the function body to work
-    correctly with the ``spawn`` start method.
-    """
-    _suppress_worker_warnings()
-    try:
-        from boundry.operations import Structure
-        from boundry.workflow import Workflow
-
-        structure = Structure(
-            pdb_string=task.pdb_string,
-            metadata=dict(task.metadata),
-            source_path=task.source_path,
-        )
-
-        result = Workflow._run_operation(
-            task.operation, structure, dict(task.params)
-        )
-
-        return OperationResult(
-            pdb_string=result.pdb_string,
-            metadata=dict(result.metadata),
-            source_path=result.source_path,
-        )
-
-    except Exception as exc:
-        return OperationResult(error=f"{type(exc).__name__}: {exc}")
 
 
 # ------------------------------------------------------------------

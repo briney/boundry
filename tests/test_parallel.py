@@ -1,14 +1,9 @@
 """Tests for boundry._parallel module."""
 
-from unittest.mock import MagicMock, patch
-
 import pytest
 
 from boundry._parallel import (
-    OperationResult,
-    OperationTask,
     WorkPool,
-    _execute_operation_worker,
     _suppress_worker_warnings,
 )
 
@@ -28,55 +23,6 @@ def _raise_on_third(x):
     if x == 3:
         raise ValueError("boom")
     return x * 2
-
-
-# ------------------------------------------------------------------
-# Task / Result dataclasses
-# ------------------------------------------------------------------
-
-
-class TestOperationTask:
-    """Tests for OperationTask dataclass."""
-
-    def test_frozen(self):
-        task = OperationTask(
-            pdb_string="ATOM\nEND\n",
-            metadata={"dG": -5.0},
-            source_path=None,
-            operation="design",
-            params={"temperature": 0.1},
-        )
-        with pytest.raises(AttributeError):
-            task.operation = "relax"
-
-    def test_fields(self):
-        task = OperationTask(
-            pdb_string="ATOM\nEND\n",
-            metadata={"dG": -5.0},
-            source_path="/tmp/test.pdb",
-            operation="minimize",
-            params={"constrained": True},
-        )
-        assert task.pdb_string == "ATOM\nEND\n"
-        assert task.metadata == {"dG": -5.0}
-        assert task.source_path == "/tmp/test.pdb"
-        assert task.operation == "minimize"
-        assert task.params == {"constrained": True}
-
-
-class TestOperationResult:
-    """Tests for OperationResult dataclass."""
-
-    def test_defaults(self):
-        result = OperationResult()
-        assert result.pdb_string == ""
-        assert result.metadata == {}
-        assert result.source_path is None
-        assert result.error is None
-
-    def test_error_result(self):
-        result = OperationResult(error="ValueError: bad input")
-        assert result.error == "ValueError: bad input"
 
 
 # ------------------------------------------------------------------
@@ -223,71 +169,6 @@ class TestWorkPoolOnComplete:
                 )
         # First two succeed, third raises before callback
         assert count[0] == 2
-
-
-# ------------------------------------------------------------------
-# Worker functions
-# ------------------------------------------------------------------
-
-
-class TestExecuteOperationWorker:
-    """Tests for _execute_operation_worker."""
-
-    @patch("boundry.workflow.Workflow._run_operation")
-    def test_success(self, mock_op):
-        from boundry.operations import Structure
-
-        mock_op.return_value = Structure(
-            pdb_string="ATOM minimized\nEND\n",
-            metadata={"final_energy": -50.0},
-        )
-
-        task = OperationTask(
-            pdb_string="ATOM\nEND\n",
-            metadata={},
-            source_path=None,
-            operation="minimize",
-            params={"constrained": True},
-        )
-        result = _execute_operation_worker(task)
-
-        assert result.error is None
-        assert result.pdb_string == "ATOM minimized\nEND\n"
-        assert result.metadata["final_energy"] == -50.0
-
-    @patch("boundry.workflow.Workflow._run_operation")
-    def test_error_captured(self, mock_op):
-        mock_op.side_effect = RuntimeError("openmm crash")
-
-        task = OperationTask(
-            pdb_string="ATOM\nEND\n",
-            metadata={},
-            source_path=None,
-            operation="minimize",
-            params={},
-        )
-        result = _execute_operation_worker(task)
-
-        assert result.error is not None
-        assert "RuntimeError" in result.error
-
-    @patch("boundry._parallel._suppress_worker_warnings")
-    @patch("boundry.workflow.Workflow._run_operation")
-    def test_worker_calls_suppress(self, mock_op, mock_suppress):
-        from boundry.operations import Structure
-
-        mock_op.return_value = Structure(
-            pdb_string="ATOM\nEND\n", metadata={}
-        )
-        task = OperationTask(
-            pdb_string="ATOM\nEND\n",
-            metadata={},
-            source_path=None,
-            operation="minimize",
-            params={},
-        )
-        _execute_operation_worker(task)
-        mock_suppress.assert_called_once()
 
 
 # ------------------------------------------------------------------
