@@ -29,31 +29,7 @@ pip install -e ".[dev]"
 
 ## CLI
 
-Boundry provides a subcommand-based CLI. The primary entry point is `boundry run`, which executes multi-step YAML workflows. Individual operations are also available as standalone commands for quick, one-off tasks. Run `boundry --help` for a full list of commands.
-
-### Workflows
-
-Use `boundry run` to execute YAML workflow files:
-
-```bash
-# Run a workflow
-boundry run workflow.yaml
-
-# With seed and parallel workers
-boundry run workflow.yaml --seed 42 --workers 4
-
-# With config overrides
-boundry run workflow.yaml output=results/ project=my_proj
-
-# Run a bundled workflow
-boundry run simple_relax.yaml
-```
-
-See the [Workflows](#workflows) section and [Workflow Reference](src/boundry/workflows/README.md) for the full workflow schema.
-
-### Operations
-
-Individual operations are available as standalone commands for one-off tasks:
+Boundry provides a subcommand-based CLI. Each operation is a standalone command. Run `boundry --help` for a full list.
 
 ```bash
 # Fix backbone geometry
@@ -88,6 +64,14 @@ boundry analyze-interface complex.pdb --output interface.json
 # Per-position interface energetics
 boundry analyze-interface complex.pdb --per-position --alanine-scan
 boundry analyze-interface complex.pdb --per-position --scan-chains A,B --position-csv results.csv
+
+# Beam-search interface optimization
+boundry optimize complex.pdb results/ --interface H:A,L:A
+boundry optimize complex.pdb results/ --interface H:A,L:A --design-cycles 10 --beam-width 4 --workers 4
+
+# ddG mutation scoring (MD-ensemble four-state thermodynamic cycle)
+boundry ddg complex.pdb --interface H:A,L:A --mutations A:L5A,B:W10G
+boundry ddg complex.pdb --interface H:A,L:A  # binding energy only (no mutations)
 ```
 
 All commands that include energy minimization (`minimize`, `relax`, `design`) support `--pre-idealize` to fix backbone geometry before processing. These commands also automatically handle PDB insertion codes (e.g., Kabat-numbered antibodies) by renumbering residues before processing and restoring original numbering in the output. Use `--verbose` or `-v` on any command for detailed logging.
@@ -98,8 +82,8 @@ Core operations are available as standalone functions:
 
 ```python
 from boundry import idealize, minimize, repack, relax, mpnn, design, renumber
-from boundry import analyze_interface, select_positions
-from boundry import Structure, Workflow
+from boundry import analyze_interface, select_positions, optimize, ddg
+from boundry import Structure
 ```
 
 ### Operations
@@ -109,7 +93,7 @@ Each operation accepts a file path, PDB string, or `Structure` object and return
 ```python
 from boundry import relax, design, analyze_interface
 from boundry import Structure
-from boundry.config import PipelineConfig, RelaxConfig
+from boundry.config import PipelineConfig, DesignConfig, RelaxConfig
 
 # Relax a structure (repack + minimize cycles)
 result = relax("input.pdb", n_iterations=5)
@@ -124,7 +108,7 @@ config = PipelineConfig(
 result = design("input.pdb", config=config, n_iterations=3)
 result.write("designed.pdb")
 
-# Chain operations
+# Chain operations — compose operations directly in Python
 struct = Structure.from_file("input.pdb")
 struct = idealize(struct)
 struct = minimize(struct, pre_idealize=False)
@@ -250,97 +234,47 @@ print(f"Selected {selected.metadata['selected_positions']} positions for redesig
 designed = design(selected, design_spec=selected.metadata["design_spec"])
 ```
 
-## Workflows
+### Optimize
 
-Workflows define operations and compound control-flow blocks in YAML.
-Each step's output is fed as input to the next step (or candidate set).
-
-```yaml
-# workflow.yaml
-workflow_version: 1
-input: input.pdb
-output: final.pdb
-
-steps:
-  - operation: idealize
-    output: idealized.pdb  # optional intermediate output
-
-  - operation: relax
-    params:
-      n_iterations: 3
-      constrained: true
-```
-
-Run with the CLI or Python:
-
-```bash
-boundry run workflow.yaml
-```
+Beam-search interface optimization with iterative alanine scanning, LigandMPNN design, and AMBER minimization:
 
 ```python
-from boundry import Workflow
+from boundry import optimize
+from boundry.config import OptimizeConfig
 
-workflow = Workflow.from_yaml("workflow.yaml")
-result = workflow.run()
+config = OptimizeConfig(
+    chain_pairs=[("H", "A"), ("L", "A")],
+    design_cycles=10,
+    beam_width=4,
+    beam_expansion=25,
+)
+result = optimize("complex.pdb", config=config, output_dir="results/")
+print(f"dG: {result.initial_dG:.2f} -> {result.final_dG:.2f} kcal/mol")
 ```
 
-By default, workflow execution requires at least one output path
-(top-level `output` or step/block `output`). For in-memory execution in
-Python, construct with `Workflow.from_yaml(..., require_output=False)`.
+### ddG
 
-Compound block nodes and snapshot steps are also supported:
+MD-ensemble mutation scoring using a four-state thermodynamic cycle:
 
-- `iterate`: repeat nested steps for `n` cycles or until `until` condition.
-- `beam`: population search with `width`, `rounds`, `metric`, and pruning.
-- `checkpoint`: save a named snapshot of the current structure for later comparison.
-- `compare`: compute metric deltas between the current structure and a named checkpoint.
+```python
+from boundry import ddg
+from boundry.config import DdGConfig
 
-Checkpoint and compare enable before/after tracking within a workflow:
+# Score a specific mutation
+result = ddg("complex.pdb", mutation_string="A:L5A", config=DdGConfig(
+    chain_pairs=[("H", "A")],
+    n_ensemble=35,
+))
+print(f"ddG = {result.metadata['ddG']:.2f} kcal/mol")
 
-```yaml
-steps:
-  - operation: relax
-  - checkpoint: parent
-  - operation: design
-  - operation: analyze_interface
-  - compare: parent  # deltas available as {parent.delta.dG}, etc.
+# Interface binding energy (no mutations)
+result = ddg("complex.pdb", config=DdGConfig(
+    chain_pairs=[("H", "A")],
+))
+print(f"dG = {result.metadata['dG']:.2f} kcal/mol")
 ```
 
-See the [Workflow Reference](src/boundry/workflows/README.md) for complete
-documentation and examples.
-
-### Parallel Execution
-
-Set `workers` at the workflow level (or use `--workers`/`-j` on the CLI)
-to enable process-level parallelism. A single shared process pool is
-created once at workflow start and reused for all parallel operations:
-
-```yaml
-workers: 4
-steps:
-  - beam:
-      width: 3
-      rounds: 10
-      steps:
-        - operation: design
-        - operation: analyze_interface
-```
-
-- `workers: 1` (default) runs everything sequentially — no pool is
-  created.
-- `workers: N` (N > 1) creates a shared `ProcessPoolExecutor` with
-  the `spawn` start method.
-- Beam branches execute each inner step in parallel with a barrier
-  between steps.
-- `analyze_interface` runs in the main process so per-position scans
-  can fan out to the shared pool.
-
-Each worker process imports PyTorch/OpenMM independently (~500 MB–1 GB
-each), so choose a worker count appropriate for your system's memory.
-See the [Workflow Reference](src/boundry/workflows/README.md) for full
-details on parallel execution.
-
-### Supported Operations
+## Operations Reference
 
 | Operation           | Description                              | Key Parameters                             |
 | ------------------- | ---------------------------------------- | ------------------------------------------ |
@@ -353,9 +287,8 @@ details on parallel execution.
 | `renumber`          | Remove insertion codes                   | *(none)*                                     |
 | `analyze_interface` | Interface scoring                        | `chain_pairs`, `distance_cutoff`, `per_position`, `alanine_scan` |
 | `select_positions`  | Select positions for design              | `source`, `metric`, `threshold`, `direction`, `mode` |
-
-See the [Workflow Reference](src/boundry/workflows/README.md) for the full
-parameter reference and more workflow examples.
+| `optimize`          | Beam-search interface optimization       | `chain_pairs`, `design_cycles`, `beam_width`, `beam_expansion` |
+| `ddg`               | Mutation scoring / binding energy        | `chain_pairs`, `mutations`, `n_ensemble`   |
 
 ## Resfiles
 
@@ -389,6 +322,8 @@ All configuration is done through dataclasses in `boundry.config`:
 - **`InterfaceConfig`** — Interface analysis settings (cutoff, chain pairs, metrics)
 - **`SelectPositionsConfig`** — Position selection from interface analysis (source, metric, threshold)
 - **`PipelineConfig`** — Bundles design + relax configs for iterative operations
+- **`OptimizeConfig`** — Beam-search interface optimization settings
+- **`DdGConfig`** — MD-ensemble ddG scoring settings
 
 ## Development
 

@@ -1,8 +1,7 @@
-"""Residue-map and sequence helpers extracted from workflow_metadata.
+"""Residue-map and per-chain sequence helpers.
 
 These utilities are used by ``optimize.py`` (and potentially other modules)
 for PDB-level residue identity extraction and per-chain sequence derivation.
-They have no workflow semantics.
 """
 
 from __future__ import annotations

@@ -1,12 +1,12 @@
 """Example usage of the Boundry Python API.
 
-This script demonstrates the core operations and workflow system.
+This script demonstrates the core operations and how to compose them
+for multi-step protein engineering tasks.
 Requires OpenMM and LigandMPNN weights to be installed.
 """
 
 from boundry import (
     Structure,
-    Workflow,
     analyze_interface,
     design,
     idealize,
@@ -117,19 +117,13 @@ print(f"ddG: {result.binding_energy.binding_energy:.2f} kcal/mol")
 print(f"Shape complementarity: {result.shape_complementarity.sc_score:.3f}")
 
 # ---------------------------------------------------------------
-# 7. Chaining operations
+# 7. Composing operations
 # ---------------------------------------------------------------
 
-# Operations can be chained by passing Structure objects
+# Operations can be chained by passing Structure objects.
+# This is the recommended pattern for multi-step pipelines.
 struct = Structure.from_file("input.pdb")
 struct = idealize(struct)
-struct = minimize(struct)
-struct.write("processed.pdb")
-
-# ---------------------------------------------------------------
-# 8. Workflow from YAML
-# ---------------------------------------------------------------
-
-workflow = Workflow.from_yaml("src/boundry/workflows/simple_relax.yaml")
-result = workflow.run()
-print(f"Workflow complete. Final structure has {len(result.pdb_string)} chars")
+struct = relax(struct, n_iterations=3, pre_idealize=False)
+struct = design(struct, n_iterations=3, pre_idealize=False)
+struct.write("pipeline_output.pdb")

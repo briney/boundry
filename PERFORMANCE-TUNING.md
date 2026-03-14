@@ -360,7 +360,7 @@ Result: users request parallel workers but receive sequential per-member scoring
 
 ### Proposed fix
 
-In `operations.ddg()`, create a `WorkPool(config.workers)` when `config.workers > 1` and pass it into `compute_ddg()` / `compute_interface_dg()`. Keep current explicit `pool`-injection path for optimize/workflow integration.
+In `operations.ddg()`, create a `WorkPool(config.workers)` when `config.workers > 1` and pass it into `compute_ddg()` / `compute_interface_dg()`. Keep current explicit `pool`-injection path for optimize integration.
 
 ---
 

@@ -379,7 +379,7 @@ def _execute_beam_expansion(task: _BeamExpansionTask) -> _BeamExpansionResult:
 
 
 def _compose_seed(seed_base: int, local_seed: int) -> int:
-    """Deterministic seed composition (inline, avoids workflow import)."""
+    """Deterministic seed composition for reproducible parallel execution."""
     return seed_base * 100000 + local_seed
 
 
